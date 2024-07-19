@@ -1,0 +1,53 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Human identity
+model Account {
+  id String @id @default(uuid())
+  profiles Profile[]
+}
+
+// Online profiles associated to human identity
+model Profile {
+  id String @id // 16-byte hexadecimal representation of profile handle
+  accountId String
+  platform String // e.g. Twitter/X.com
+  ranking BigInt @default(0) // overall ranking, in satoshis
+  ranks RankTransaction[]
+  account Account @relation(fields: [accountId], references: [id])
+}
+
+model RankTransaction {
+  output String @id // formatted <txid>_<outIdx>
+  timestamp DateTime
+  profileId String
+  platform String
+  sentiment Boolean
+  value String // in satoshis
+  profile Profile @relation(fields: [profileId], references: [id])
+  @@index([output, profileId])
+}
+
+model DanaTransactionVersion1 {
+  output String @id // formatted <txid>_<outIdx>
+  timestamp DateTime
+  
+}
+
+model Checkpoint {
+  id String @id @default("main")
+  height Int @default(811624)
+  hash String
+}
