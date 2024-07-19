@@ -1,14 +1,17 @@
 # Keep environment variables out of version control
-.env
+**/.env
 
 # Ignore generated js files
-*.js
+**/*.js
 
 # test files aren't needed
 test*
 
 # keep these out!
-node_modules/
+**/node_modules/
 
 # Keep everything in these
-!local_modules/**/*
+!**/local_modules/**
+
+# misc stuff
+.DS_Store*
