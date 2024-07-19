@@ -1,0 +1,3 @@
+[submodule "indexer-ts/local_modules/bn.js"]
+	path = indexer-ts/local_modules/bn.js
+	url = https://github.com/LotusiaStewardship/bn.js
