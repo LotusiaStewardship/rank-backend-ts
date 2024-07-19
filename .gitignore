@@ -1,0 +1,14 @@
+# Keep environment variables out of version control
+.env
+
+# Ignore generated js files
+*.js
+
+# test files aren't needed
+test*
+
+# keep these out!
+node_modules/
+
+# Keep everything in these
+!local_modules/**/*
