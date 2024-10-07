@@ -1,3 +1,6 @@
-[submodule "indexer-ts/local_modules/bn.js"]
-	path = indexer-ts/local_modules/bn.js
-	url = https://github.com/LotusiaStewardship/bn.js
+[submodule "indexer-ts/sub_modules/bn.js"]
+	path = indexer-ts/sub_modules/bn.js
+	url = https://github.com/LotusiaStewardship/bn.js.git
+[submodule "indexer-ts/sub_modules/dana-sdk"]
+	path = indexer-ts/sub_modules/dana-sdk
+	url = git@github.com:danaverse/dana-sdk.git

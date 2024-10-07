@@ -3,15 +3,18 @@
 
 # Ignore generated js files
 **/*.js
-
-# test files aren't needed
-test*
+**/*.js.map
 
 # keep these out!
 **/node_modules/
+**/local_modules/
+**/sub_modules/
 
 # Keep everything in these
-!**/local_modules/**
+#!**/local_modules/**
+#!**/sub_modules/**
 
 # misc stuff
 .DS_Store*
+migrations/
+test*

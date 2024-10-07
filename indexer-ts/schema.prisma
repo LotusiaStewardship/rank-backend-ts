@@ -15,39 +15,60 @@ datasource db {
 
 // Human identity
 model Account {
-  id String @id @default(uuid())
+  id       String    @id
   profiles Profile[]
+
+  @@index([id(type: hash)])
 }
 
 // Online profiles associated to human identity
 model Profile {
-  id String @id // 16-byte hexadecimal representation of profile handle
-  accountId String
-  platform String // e.g. Twitter/X.com
-  ranking BigInt @default(0) // overall ranking, in satoshis
-  ranks RankTransaction[]
-  account Account @relation(fields: [accountId], references: [id])
+  // 16-byte hexadecimal representation of profile handle
+  id        String            @unique
+  accountId String            @id
+  // e.g. Twitter/X.com
+  platform  String
+  // overall ranking, in satoshis
+  ranking   BigInt            @default(0)
+  ranks     RankTransaction[]
+  account   Account?          @relation(fields: [accountId], references: [id])
+
+  @@index([id(type: hash)])
+  @@index([id(type: hash), ranking(type: btree, sort: Desc)], name: "profile_idx_ranked_highest")
+  @@index([id(type: hash), ranking(type: btree, sort: Asc)], name: "profile_idx_ranked_lowest")
 }
 
 model RankTransaction {
-  output String @id // formatted <txid>_<outIdx>
-  timestamp DateTime
-  profileId String
-  platform String
-  sentiment Boolean
-  value String // in satoshis
-  profile Profile @relation(fields: [profileId], references: [id])
-  @@index([output, profileId])
+  // <txid>_<outIdx>
+  output           String   @unique
+  // in satoshis
+  value            BigInt
+  profileId        String
+  platform         String
+  sentiment        Boolean
+  height           Int      @default(-1)
+  timestamp        BigInt
+  profile          Profile? @relation(fields: [profileAccountId], references: [accountId])
+  profileAccountId String?
+
+  @@index([height(sort: Desc)])
+  @@index([output(type: gin)])
+  @@index([profileId(type: hash), platform(type: hash)])
+  @@index([profileId(type: hash), sentiment(type: hash)])
+}
+
+model Block {
+  height      Int    @unique
+  timestamp   BigInt
+  hash        String @unique
+  ranksLength Int
+
+  @@index([height(sort: Desc)])
+  @@index([hash(type: hash)])
+  @@index([ranksLength(sort: Desc)])
 }
 
 model DanaTransactionVersion1 {
-  output String @id // formatted <txid>_<outIdx>
+  output    String   @unique // formatted <txid>_<outIdx>
   timestamp DateTime
-  
-}
-
-model Checkpoint {
-  id String @id @default("main")
-  height Int @default(811624)
-  hash String
 }
