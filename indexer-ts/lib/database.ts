@@ -77,7 +77,7 @@ export class Database {
             }
           }
         }))
-      )
+      ), { isolationLevel: 'RepeatableRead' }
     } catch (e: any) {
       throw new Error(`rewindProfiles: ${e.message}`)
     }
@@ -117,7 +117,7 @@ export class Database {
             
           })
         })
-      )
+      ), { isolationLevel: 'RepeatableRead' }
     } catch (e: any) {
       throw new Error(`upsertProfiles: ${e.message}`)
     }
@@ -140,7 +140,7 @@ export class Database {
               timestamp
             }
           })
-        })
+        }), { isolationLevel: 'RepeatableRead' }
       )
     } catch (e: any) {
       throw new Error(`updateRankTransactions: ${e.message}`)

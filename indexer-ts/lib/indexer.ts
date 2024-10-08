@@ -79,12 +79,15 @@ export class Indexer {
   private nngUri: string
   private rpcUri: string
   private queue: {
-    state: QUEUE_STATE,
+    state: QUEUE_STATE
+    mempool: RankTransaction[]
     promises: Promise<any>[]
   } = {
     state: QUEUE_STATE.FREE,
+    mempool: [],
     promises: []
   }
+  private subChannels: NNGMessageType[] = ['mempooltxadd', 'blkconnected', 'blkdisconctd']
   private parts: {
     [part in 'lokad' | 'sentiment' | 'platform' | 'profile' | 'post' | 'comment']: ScriptPart
   } = {
@@ -115,7 +118,7 @@ export class Indexer {
     // Pub/Sub socket setup
     this.sub = socket('sub', { chan: [] })
     this.sub.on('error', this.close)
-    this.sub.on('data', this.nngData)
+    this.sub.on('data', this.nngSubHandler)
     this.sub.rcvmaxsize(NNG_RPC_RCVMAXSIZE_CONSENSUS)
     this.sub.reconn(NNG_SOCKET_RECONN)
     this.sub.maxreconn(NNG_SOCKET_MAXRECONN)
@@ -130,7 +133,7 @@ export class Indexer {
    * Start the engines!
    */
   async init() {
-    let log = 'MAIN[init()]: '
+    let log = 'INIT: '
     // signal handlers
     process.on('SIGINT', this.close)
     process.on('SIGTERM', this.close)
@@ -147,10 +150,11 @@ export class Indexer {
     } catch (e: any) {
       this.close(
         ERR.NNG_CONNECT,
-        `MAIN[init()]: ${e.message}`
+        log + e.message
       )
     }
-    // If there are lingering unconfirmed RANK txs, clear them out now
+    // Rewind any mempool txs that weren't reconciled during last runtime
+    // Prepares for a clean and error-free runtime :)
     const mempooltxs = await this.db.getRankTransactionsByHeight(-1)
     if (mempooltxs.length > 0){
       try {
@@ -164,25 +168,26 @@ export class Indexer {
       }
     }
     // Get current checkpoint height/hash for init, otherwise start at genesis
-    const { hash, height } = await this.db.getCheckpoint() ?? this.genesis
-    console.log(log + `current checkpoint: ${hash} (height ${height})`)
+    const checkpoint = await this.db.getCheckpoint() ?? this.genesis
+    console.log(log + `current checkpoint: ${checkpoint.hash} (height ${checkpoint.height})`)
     // Get the best block compared to our checkpoint
     // The best block could be a previous block with a different hash
-    const best = await this.getBestBlock(hash, height)
+    const best = await this.getBestBlock(checkpoint)
     // Check for reorgs
     if (
-      best.height < height ||
-      hash != best.hash && best.height == height ||
-      hash != best.prevhash && best.height == (height + 1)
+      best.height < checkpoint.height ||
+      checkpoint.hash != best.hash && best.height == checkpoint.height ||
+      checkpoint.hash != best.prevhash && best.height == (checkpoint.height + 1)
     ) {
       console.log(
         log + ` --- ! REORG DETECTED\r\n`
-      + log + ` --- !    checkpoint best: ${hash} (height ${height})\r\n`
+      + log + ` --- !    checkpoint best: ${checkpoint.hash} (height ${checkpoint.height})\r\n`
       + log + ` --- !           RPC best: ${best.hash} (height ${best.height})\r\n`
       + log + ` --- !       RPC prevhash: ${best.prevhash} (height ${best.height - 1})`)
       // rewind backwards to match checkpoint height/hash to RPC
       try {
-        await this.rewindBlocks(height, best.height)
+        const result = await this.rewindBlocks(checkpoint.height, best.height)
+        console.log(log + result)
       } catch (e: any) {
         this.close(
           ERR.IDX_BLOCKS_REWIND,
@@ -194,7 +199,7 @@ export class Indexer {
     try {
       const t0 = performance.now()
       // checkpoint is latest synced block or current best (if already synced)
-      this.checkpoint = await this.syncBlocks(best.height + 1) ?? best
+      this.checkpoint = await this.syncBlocks(checkpoint) ?? best
       const t1 = ((performance.now() - t0) / 1000).toFixed(3)
       console.log(log + `synced with RPC: ${this.checkpoint.hash} (height: ${this.checkpoint.height})`)
       console.log(log + `processed ${this.checkpoint.height - best.height} total blocks (${t1}s)`)
@@ -214,125 +219,153 @@ export class Indexer {
         log + e.message
       )
     }
-    // Add the `mempooltxadd` and 'blkconnected' NNG channels
-    this.sub.chan(['mempooltxadd', 'blkconnected'])
-    console.log(log + `subscribed to NNG and awaiting messages`)
+    // Subscribe to required NNG channels
+    this.sub.chan(this.subChannels)
+    console.log(log + `subscribed to NNG (${this.subChannels.join(', ')})`)
   }
   /**
    * Shutdown established connections and close the NNG socket
    * @returns {void}
    */
   async close(
-    exitCode: number = 0,
+    exitCode: number | string,
     exitError?: string
   ): Promise<NodeJS.Immediate> {
+    let log = 'QUIT: '
+    if (exitError?.length) {
+      log = `FATAL: `
+      console.error(log + `${ERR[exitCode]} [${exitCode}]: ${exitError}`)
+    } else {
+      console.log(log + `exiting due to ${exitCode}`)
+    }
     //clearInterval(this.processingInterval)
     // ignore shutdown() number since we're exiting anyway
     this.sub?.shutdown(this.nngUri)
-    this.rpc?.shutdown(this.rpcUri)
     this.sub?.close()
+    console.log(log + 'NNG sub/pub socket shut down')
+    this.rpc?.shutdown(this.rpcUri)
     this.rpc?.close()
+    console.log(log + 'NNG req/res socket shut down')
     await this.db?.disconnect()
-    if (exitError?.length) { console.error(`FATAL: ${ERR[exitCode]} [${exitCode}]: ${exitError}`) }
+    console.log(log + 'database disconnected')
     // Next time the check queue is processed, we will exit
-    return setImmediate(() => process.exit(isNaN(Number(exitCode)) ? 1 : exitCode))
+    return setImmediate(() => process.exit(typeof exitCode == 'string' ? -1 : exitCode))
   }
   /**
    * Compare checkpoint `Block` against the RPC counterpart. Recurse backwards until a match is found.
    * @param checkpoint `Block` whose hash is compared to RPC at the same `height`
    * @returns {Promise<Block>} The best `Block` required to fully sync with RPC
    */
-  private async getBestBlock(hash: string, height: number): Promise<Block> {
-    // nanomsg library will block if there is a connection issue
-    // nanomsg library will return if RPC responds
-    const block = await this.rpcGetBlock(height)
-    // block will be null if RPC didn't give us the block for the checkpoint height
-    if (block) {
-      const header = block.header()
-      const rpcHash = this.toBlockhashOrTxid(header.blockHash().hash())
-      if (rpcHash == hash) {
-        // return RPC block as best
-        return this.toBlock(header)
+  private async getBestBlock(checkpoint: Block): Promise<Block> {
+    try {
+      // nanomsg library will block if there is a connection issue
+      // nanomsg library will return if RPC responds
+      const block = await this.rpcGetBlock(checkpoint.height)
+      // block will be null if RPC didn't give us the block for the checkpoint height
+      if (block) {
+        const header = block.header()
+        const rpcHash = this.toBlockhashOrTxid(header.blockHash().hash())
+        if (rpcHash == checkpoint.hash) {
+          // return RPC block (with prevhash) as best
+          return this.toBlock(header, true)
+        }
       }
+      // Either we didn't get a block from RPC or hash mismatch
+      // Get the prevblock from database and recurse
+      const prevblock = await this.db.getBlockByHeight(checkpoint.height - 1)
+      return this.getBestBlock(prevblock)
+    } catch (e: any) {
+      throw new Error(`getBestBlock(${typeof checkpoint}): ${e.message}`)
     }
-    // Either we didn't get a block from RPC or hash mismatch
-    const prevblock = await this.db.getBlockByHeight(height - 1)
-    return this.getBestBlock(prevblock.hash, prevblock.height)
   }
   /**
-   * 
-   * @param startHeight 
-   * @param bestHeight 
+   * Undo all changes made by `syncBlocks()`, starting at `startHeight` until `bestHeight` (non-inclusive)
+   * @param startHeight Block height to undo first
+   * @param bestHeight Block height 
    */
   private async rewindBlocks(
     startHeight: number,
     bestHeight: number
-  ): Promise<void> {
-    let log = 'MAIN[rewindBlocks()]: '
+  ): Promise<string> {
     for (let height = startHeight; height > bestHeight; height--) {
-      // Gather RANK txs from this block
-      const ranks = await this.db.getRankTransactionsByHeight(height)
-      // Use "true" to tell this method to execute rewind query vs upsert query
-      const result = await this.rewindProfiles(ranks)
-      // Delete block
-      await this.db.deleteBlockByHeight(height)
-      console.log(log + ` --- ! height ${height}: ${result}`)
+      try {
+        // Gather RANK txs from this block
+        const ranks = await this.db.getRankTransactionsByHeight(height)
+        // Use "true" to tell this method to execute rewind query vs upsert query
+        const result = await this.rewindProfiles(ranks)
+        // Delete block
+        await this.db.deleteBlockByHeight(height)
+        return ` --- ! height ${height}: ${result}`
+      } catch (e: any) {
+        throw new Error(`rewindBlocks(${startHeight}, ${bestHeight}): height ${height}: ${e.message}`)
+      }
     }
   }
   /**
-   * Called during reorg to revert RANK txs
+   * Called during reorg to delete RANK txs and adjust Profile rankings accordingly
    * @param ranks 
    */
   private async rewindProfiles(
     ranks: RankTransaction[]
   ) {
-    const t0 = performance.now()
-    const profiles = this.toProfiles(ranks)
-    await this.db.rewindProfiles(profiles)
-    const t1 = (performance.now() - t0).toFixed(3)
-    return `rewound ${ranks.length} RANK outputs for ${profiles.length} profiles (${t1}ms)`
+    try {
+      const t0 = performance.now()
+      const profiles = this.toProfiles(ranks)
+      await this.db.rewindProfiles(profiles)
+      const t1 = (performance.now() - t0).toFixed(3)
+      return `rewound ${profiles.length} profiles, ${ranks.length} RANK txs (${t1}ms)`
+    } catch (e: any) {
+      throw new Error(`rewindProfiles(${typeof ranks}): ${e.message}`)
+    }
   }
   /**
    * Poll NNG over RPC for (up to) `NNG_RPC_BLOCKRANGE_SIZE` blocks and process them for `RANK` transactions.
    * This method is called recursively from within until RANK database is synced with the blockchain.
-   * @param height 
+   * @param checkpoint Checkpoint block as starting point, either from database or recursive call
    * @returns 
    */
   private async syncBlocks(
-    height: number
+    checkpoint: Block
   ): Promise<Block> { 
-    let log = `MAIN[syncBlocks()]: `
+    let log = `INIT: `
     const t0 = performance.now()
-    // Fetch and parse the range of blocks and get the total count
-    const blockrange = await this.rpcGetBlockRange(height)
+    // Fetch range of blocks, starting at first height following checkpoint
+    const startRange = checkpoint.height + 1
+    const blockrange = await this.rpcGetBlockRange(startRange)
     const blocksLength = blockrange.blocksLength()
     // Already synced if no blocks returned from RPC
     if (blocksLength < 1) {
-      return null
+      return checkpoint
     }
-    log += `height ${height}->${height + (blocksLength - 1)}: `
     // Prepare for processing the block range
+    const endRange = startRange + blocksLength
+    log += `height ${startRange}->${endRange - 1}: `
     const blocks: Block[] = []
     const ranks: RankTransaction[] = []
     // Proceed with processing the block range
     for (let i = 0; i < blocksLength; i++) {
-      const block = blockrange.blocks(i)
-      const checkpoint = this.toBlock(block.header())
-      const txsLength = block.txsLength()
-      // Skip processing blocks with only coinbase tx or none at all
-      // Keep block to update database checkpoint
-      if (txsLength <= 1) {
-        blocks.push(checkpoint)
-        continue
+      try {
+        const block = blockrange.blocks(i)
+        const checkpoint = this.toBlock(block.header())
+        const txsLength = block.txsLength()
+        // Skip processing blocks with only coinbase tx or none at all
+        // Keep block to update database checkpoint
+        if (txsLength <= 1) {
+          blocks.push(checkpoint)
+          continue
+        }
+        const result = this.toRankTransactions(block)
+        // Saving these for later
+        blocks.push({ ...checkpoint, ranksLength: result.length })
+        ranks.push(...result)
+      } catch (e: any) {
+        throw new Error(`syncBlocks(${typeof checkpoint}): ${e.message}`)
       }
-      const result = this.processTransactions(block)
-      // Saving these for later
-      blocks.push({ ...checkpoint, ranksLength: result.length })
-      ranks.push(...result)
     }
     // Upsert profiles and include all associated RANK txs
     if (ranks.length > 0) {
       try {
+        // Upsert all block txs, filtering any found in the mempool queue
         await this.upsertProfiles(ranks)
       } catch (e: any) {
         this.close(
@@ -345,8 +378,10 @@ export class Indexer {
     try {
       await this.db.saveBlocks(blocks)
     } catch (e: any) {
-      console.error(log + e.message)
-      this.close()
+      this.close(
+        ERR.IDX_BLOCKS_SYNC,
+        log + e.message
+      )
     }
     const t1 = (performance.now() - t0).toFixed(3)
     console.log(log + `processed ${ranks.length} RANK txs (${t1}ms)`)
@@ -355,12 +390,13 @@ export class Indexer {
     if (blocksLength < NNG_RPC_BLOCKRANGE_SIZE) {
       // At this point, any RPC call will likely only be for a single block
       // Set the rcvmaxsize appropriately (as of 9/24/24 block size per network policy is 2MB)
-      this.rpc.rcvmaxsize(NNG_RPC_RCVMAXSIZE_CONSENSUS)
+      // UPDATE 10/8/24: Don't change this because we may need to sync blocks after reorg
+      //this.rpc.rcvmaxsize(NNG_RPC_RCVMAXSIZE_CONSENSUS)
       // All done catching up; return latest block for logging status to console
-      return blocks[blocks.length - 1]
+      return blocks.pop()
     }
-    // recursively sync the next range of blocks
-    return this.syncBlocks(height + blocksLength)
+    // recursively sync the next range of blocks, starting at new checkpoint
+    return this.syncBlocks(blocks.pop())
   }
   /**
    * 
@@ -372,13 +408,15 @@ export class Indexer {
     if (txsLength < 1) {
       return `no mempool txs to process`
     }
-    const ranks = this.processTransactions(mempool)
+    const ranks = this.toRankTransactions(mempool)
     if (ranks.length < 1) {
       return `no mempool RANK txs to process`
     }
     try {
       await this.upsertProfiles(ranks)
       const t1 = (performance.now() - t0).toFixed(3)
+      // Initialize the mempool queue with these RANK txs
+      this.queue.mempool = ranks
       return `processed ${ranks.length} mempool RANK txs (${t1}ms)`
     } catch (e: any) {
       throw new Error(e.message)
@@ -389,173 +427,233 @@ export class Indexer {
    * @param msg 
    * @returns 
    */
-  private nngData = async (msg: Buffer): Promise<void> => {
-    let log = 'NNG[nngMessage()]: '
+  private nngSubHandler = async (msg: Buffer): Promise<void> => {
+    let log = 'NNGSUB: '
     // Parse out the message type and convert message to ByteBuffer
     const msgType = msg.subarray(0, 12).toString() as NNGMessageType
     const bb = new ByteBuffer(msg.subarray(12))
 
     switch (msgType) {
       case 'mempooltxadd':
-        // If the event loop isn't ready for us to pile on more promises, we need to gtfo
-        if (this.queue.state != QUEUE_STATE.FREE) {
-          return
-        }
-        log += 'mempooltxadd: '
         try {
-          const mempooltx = NNG.TransactionAddedToMempool
-            .getRootAsTransactionAddedToMempool(bb)
-            .mempoolTx()
-            .tx()
-          const tx = new Transaction(Buffer.from(mempooltx.rawArray()))
-          // If a reorg occurs, all txs from those blocks will trigger mempooltxadd
-          // If any reorg'd block contains RANK txs, they will fail when adding to db
-          // Need to first make sure the RANK tx doesn't exist before proceeding
-          if (await this.db.isExistingTransaction(tx.txid)) {
-            return
-          }
-          const ranks = this.processRawTransaction(tx)
-          if (ranks.length > 0) {
-            const result = await this.upsertProfiles(ranks)
-            console.log(log + `${tx.txid}: ${result}`)
-          }
+          return this.nngMempoolTxAdd(bb)
         } catch (e: any) {
-          throw new Error(log + e.message)
+          this.close(
+            ERR.NNG_MEMPOOLTXADD,
+            log + `mempooltxadd: ${e.message}`
+          )
         }
-        break
       case 'blkconnected':
-        // Block processing has the highest priority in the event loop
-        // This is a signal to other event listeners to think twice before resolving
-        this.queue.state = QUEUE_STATE.BUSY
-        log += 'blkconnected: '
-        const connectedBlock = NNG.BlockConnected.getRootAsBlockConnected(bb)
-        // Remove all conflicting txs from database
-        // TODO: Will need to update Profile ranking values
-        // 9/25/24: THIS CODE BLOCK IS CURRENTLY UNTESTED
-        const tcl = connectedBlock.txsConflictedLength()
-        if (tcl > 0) {
-          for (let i = 0; i < tcl; i++) {
-            const tx = connectedBlock.txsConflicted(i)
-            const txid = this.toBlockhashOrTxid(tx.hash())
-            await this.db.deleteRankTransactionsByTxid(txid)
-            console.log(log + `${txid} deleted from db`)
-          }
-        }
-        // include the prevhash when processing block header
-        // this is for checking reorgs
-        const block = connectedBlock.block()
-        const prevhash = this.toBlockhashOrTxid(block.header().prevBlockHash().hash())
-        let best = this.toBlock(block.header())
-        // Check for reorgs and other stuff before processing
-        // If we have to process reorg, then assume our current block/ranks 
-        // TODO: probably need to copy this logic down to blkdisconctd
-        const { height, hash } = this.checkpoint
-        if (
-          // new block height should be greater than checkpoint
-          best.height < height ||
-          // checkpoint hash should match new block prevhash and new height should be +1
-          (hash != prevhash && (height + 1) == best.height) || 
-          // tertiary case for testing w/ invalidateblock; forced chain split
-          (hash != best.hash && height == best.height)
-        ) {
-          // REORG DETECTED
-          console.log(
-            log + ` --- ! BLOCKCHAIN DESYNC DETECTED -- POSSIBLE REORG\r\n`
-          + log + ` --- !    checkpoint best: ${hash} (height ${height})\r\n`
-          + log + ` --- !           RPC best: ${best.hash} (height ${best.height})\r\n`
-          + log + ` --- !       RPC prevhash: ${prevhash} (height ${best.height - 1})`)
-          // Fetch the best block hash/height to make sure we rewind accordingly
-          best = await this.getBestBlock(hash, height)
-          try {
-            // Rewind unconfirmed transactions first
-            const unconfirmed = await this.db.getRankTransactionsByHeight(-1)
-            const result = await this.rewindProfiles(unconfirmed)
-            console.log(log + ` --- ! height -1 (unconfirmed): ${result}`)
-          } catch (e: any) {
-            this.close(
-              ERR.IDX_PROFILE_REWIND,
-              log + e.message
-            )
-          }
-          // Rewind blocks until best hash/height is reached
-          try {
-            await this.rewindBlocks(height, best.height)
-          } catch (e: any) {
-            this.close(
-              ERR.IDX_BLOCKS_REWIND,
-              log + e.message
-            )
-          }
-          // Sync blocks after rewind
-          try {
-            await this.syncBlocks(best.height + 1)
-          } catch (e: any) {
-            this.close(
-              ERR.IDX_BLOCKS_SYNC,
-              log + e.message
-            )
-          }
-          // Don't continue; assume all RANK tx processing would be invalid from this point
-          // Queue is no longer busy; event listeners can process again
-          this.queue.state = QUEUE_STATE.FREE
-          return 
-        }
-        // Proceed normally if there is no reorg
-        // Process block for any RANK txs
-        const ranks = this.processTransactions(block)
-        if (ranks.length > 0) {
-          // Upsert all RANK txs that exist in the block but not in the database
-          // This can happen because mempooltxadd doesn't always get triggered immediately for some reason
-          const unconfirmed = await this.db.getRankTransactionsByHeight(-1)
-          const missing = ranks.filter(q => unconfirmed.findIndex(u => u.output == q.output) < 0)
-          if (missing.length > 0) {
-            const result = await this.upsertProfiles(missing)
-            console.log(log + result)
-          }
-          // Update all of the RANK txs from this block
-          const t0 = performance.now()
-          await this.db.updateRankTransactions(ranks)
-          const t1 = (performance.now() - t0).toFixed(3)
-          console.log(log + `confirmed ${ranks.length} RANK txs (${t1}ms)`)
-        }
-
-        // Save latest checkpoint
-        await this.db.saveBlocks([{
-          ...best,
-          ranksLength: ranks.length
-        }])
-        console.log(log + `${best.hash} (height ${best.height})`)
-
-        // TODO: we may need to add some additional state checks here, but maybe not
-
-        // Update checkpoint to this block
-        this.checkpoint = { ...best }
-        this.queue.state = QUEUE_STATE.FREE
-        break
-      /**
-       * 9/25/24: Not subscribed to these NNG channel messages
-       * 
-      // removed from mempool because it conflicts with tx in new block, reorg, etc.
-      case 'mempooltxrem':
         try {
-          // remove the tx from the db if it exists
+          return this.nngBlockConnected(bb)
         } catch (e: any) {
-
+          this.close(
+            ERR.NNG_BLKCONNCETED,
+            log + `blkconnected: ${e.message}`
+          )
         }
-        break
-       */
-        
       case 'blkdisconctd':
         try {
-          const disconnectedBlock = NNG.BlockDisconnected.getRootAsBlockDisconnected(bb)
-          const block = disconnectedBlock.block()
-
+          return this.nngBlockDisconnected(bb)
         } catch (e: any) {
-          throw new Error(`nngMessageHandler: blkdisconctd: ${e.message}`)
+          this.close(
+            ERR.NNG_BLKDISCONCTD,
+            log + `blkdisconctd: ${e.message}`
+          )
         }
-
+      /**
+       * 10/8/24: Not subscribed to this NNG channel message yet
+       * 
+      // tx removed from mempool because it conflicts with tx in new block, reorg, etc.
+      case 'mempooltxrem':
+        try {
+          return this.nngMempoolTxRem(bb)
+        } catch (e: any) {
+          this.close(
+            ERR.NNG_MEMPOOLTXADD,
+            log + e.message
+          )
+        }
         break
+      */
     }
+  }
+  /**
+   * 
+   * @param bb 
+   */
+  private async nngMempoolTxAdd(bb: ByteBuffer) {
+    // Queue state is busy during blkdisconctd, and we shouldn't question it, so let's gtfo
+    if (this.queue.state == QUEUE_STATE.BUSY) {
+      return
+    }
+    let log = 'NNGSUB: mempooltxadd: '
+    const mempooltx = NNG.TransactionAddedToMempool
+      .getRootAsTransactionAddedToMempool(bb)
+      .mempoolTx()
+      .tx()
+    const tx = new Transaction(Buffer.from(mempooltx.rawArray()))
+    // If a reorg occurs, all txs from those blocks will trigger mempooltxadd
+    // If any reorg'd block contains RANK txs, they will fail when adding to db
+    // Need to first make sure the RANK tx doesn't exist before proceeding
+    /**
+     * UPDATE:
+     * Since blkdisconctd handler is being implemented, reorged txs will be removed,
+     * so this is no longer necessary.
+    if (await this.db.isExistingTransaction(tx.txid)) {
+      return
+    }
+    */
+    const ranks = this.processRawTransaction(tx)
+    if (ranks.length > 0) {
+      const result = await this.upsertProfiles(ranks)
+      // Keep these RANK txs to reconcile with next block
+      this.queue.mempool.push(...ranks)
+      console.log(log + `${tx.txid}: ${result}`)
+    }
+  }
+  /**
+   * 
+   * @param bb 
+   * @returns 
+   */
+  private async nngBlockConnected(bb: ByteBuffer) {
+    // Queue state is busy during blkdisconctd, and we shouldn't question it, so let's gtfo
+    if (this.queue.state == QUEUE_STATE.BUSY) {
+      return
+    }
+    let log = 'NNGSUB: blkconnected: '
+    const connectedBlock = NNG.BlockConnected.getRootAsBlockConnected(bb)
+    // Remove all conflicting txs from database
+    // TODO: Will need to update Profile ranking values
+    // 9/25/24: THIS CODE BLOCK IS CURRENTLY UNTESTED
+    const tcl = connectedBlock.txsConflictedLength()
+    if (tcl > 0) {
+      for (let i = 0; i < tcl; i++) {
+        const tx = connectedBlock.txsConflicted(i)
+        const txid = this.toBlockhashOrTxid(tx.hash())
+        await this.db.deleteRankTransactionsByTxid(txid)
+        console.log(log + `${txid} deleted from db`)
+      }
+    }
+    // include the prevhash when processing block header
+    // this is for checking reorgs
+    const block = connectedBlock.block()
+    const best = this.toBlock(block.header())
+    // Process block for any RANK txs
+    const ranks = this.toRankTransactions(block)
+    let logConfirmed = ': confirmed 0 RANK txs'
+      const t0 = performance.now()
+    if (ranks.length > 0) {
+      // Find any RANK txs that were missing from mempool queue (i.e. not already upserted)
+      const missing = ranks.filter(r => {
+        // If we can't find the block RANK tx in mempool queue, return it as missing
+        const index = this.queue.mempool.findIndex(m => r.output == m.output)
+        if (index < 0) {
+          return true
+        }
+        // splice this RANK tx from the mempool queue
+        this.queue.mempool.splice(index, 1)
+        // We found this RANK tx in mempool, so it was already saved; filter it out
+        return false
+      })
+      // Upsert any missing RANK txs
+      if (missing.length > 0) {
+        await this.upsertProfiles(missing)
+      }
+      // Update all of the RANK txs for this block
+      await this.db.updateRankTransactions(ranks)
+      const t1 = (performance.now() - t0).toFixed(3)
+      logConfirmed = `: upserted ${missing.length}, confirmed ${ranks.length} RANK txs (${t1}ms)`
+    }
+
+    // Save latest checkpoint
+    await this.db.saveBlocks([{
+      ...best,
+      ranksLength: ranks.length
+    }])
+    console.log(log + `${best.hash}: height ${best.height}` + logConfirmed)
+
+    // TODO: we may need to add some additional state checks here, but maybe not
+
+    // Update checkpoint to this block
+    this.checkpoint = { ...best }
+  }
+  /**
+   * 
+   * @param bb 
+   * @returns 
+   */
+  private async nngBlockDisconnected(bb: ByteBuffer) {
+    // If queue is aready busy (i.e. >1 block reorg) then return
+    // Removing this will cascade nng blkdisconctd messages and ransack lotusd
+    if (this.queue.state == QUEUE_STATE.BUSY) {
+      return
+    }
+    // Set queue as busy so new NNG message events don't process
+    this.queue.state = QUEUE_STATE.BUSY
+    let log = 'NNGSUB: blkdisconctd: '
+    // Set up disconnected block for comparison to current best (checkpoint)
+    const disconnectedBlock = NNG.BlockDisconnected.getRootAsBlockDisconnected(bb).block()
+    const block = this.toBlock(disconnectedBlock.header(), true)
+    // Check for reorgs and other stuff before processing
+    // If we have to process reorg, then assume our current block/ranks 
+    // TODO: probably need to copy or move this logic down to blkdisconctd
+    if (
+      // disconnected block could be our checkpoint
+      block.height <= this.checkpoint.height ||
+      // checkpoint hash should match new block prevhash and new height should be +1
+      (this.checkpoint.hash != block.prevhash && (this.checkpoint.height + 1) == block.height) || 
+      // tertiary case for testing w/ invalidateblock; forced chain split
+      (this.checkpoint.hash != block.hash && this.checkpoint.height == block.height)
+    ) {
+      // REORG DETECTED
+      // Fetch the best block from RPC to rewind accordingly
+      const best = await this.getBestBlock(this.checkpoint)
+      console.log(
+        log + ` --- ! BLOCKCHAIN DESYNC DETECTED -- POSSIBLE REORG\r\n`
+      + log + ` --- !    checkpoint best: ${this.checkpoint.hash} (height ${this.checkpoint.height})\r\n`
+      + log + ` --- !           new best: ${best.hash} (height ${best.height})\r\n`
+      + log + ` --- !       new prevhash: ${best.prevhash} (height ${best.height - 1})`)
+      try {
+        // Rewind unconfirmed transactions first
+        const unconfirmed = this.queue.mempool.splice(0)
+        const result = await this.rewindProfiles(unconfirmed)
+        console.log(log + ` --- ! height -1 (unconfirmed): ${result}`)
+      } catch (e: any) {
+        this.close(
+          ERR.IDX_PROFILE_REWIND,
+          log + e.message
+        )
+      }
+      // Rewind blocks until best hash/height is reached
+      try {
+        const result = await this.rewindBlocks(this.checkpoint.height, best.height)
+        console.log(log + result)
+      } catch (e: any) {
+        this.close(
+          ERR.IDX_BLOCKS_REWIND,
+          log + e.message
+        )
+      }
+      // Sync blocks after rewind, starting with next after best
+      try {
+        await this.syncBlocks(best)
+      } catch (e: any) {
+        this.close(
+          ERR.IDX_BLOCKS_SYNC,
+          log + e.message
+        )
+      }
+      // Update checkpoint to new best block
+      this.checkpoint = { ...best }
+      console.log(log + `synced with RPC: ${this.checkpoint.hash} (height: ${this.checkpoint.height})`)
+    }
+    // Sync mempool before opening the queue to chaos
+    const result = await this.syncMempool()
+    console.log(log + result)
+    // Queue is now free to process other events
+    this.queue.state = QUEUE_STATE.FREE
   }
   /**
    * Process RANK txs into Profile upserts and commit to the database
@@ -570,7 +668,7 @@ export class Indexer {
     // Upsert each Profile + RANK txs + ranking increments/decrements
     await this.db.upsertProfiles(profiles)
     const t1 = (performance.now() - t0).toFixed(3)
-    return `processed ${ranks.length} RANK outputs for ${profiles.length} profiles (${t1}ms)`
+    return `upserted ${profiles.length} profiles, ${ranks.length} RANK txs (${t1}ms)`
   }
   /**
    * Send RPC command to lotusd over NNG interface (`this.rpc`)
@@ -584,16 +682,9 @@ export class Indexer {
       blockRequest?: { height: number },
     }
   ): Promise<ByteBuffer> {
-    // Make sure the RPC socket is connected
-    // TODO: Need to actually make this work... refer to todo.txt
-    if (!this.rpc.connected) {
-      this.close(
-        ERR.NNG_DISCONNECT,
-        `MAIN[rpcCall()]: RPC socket is not connected (reconnect failure?)`
-      )
-    }
+    // Set up builder and get proper flatbuffer offset for rpcType
     const builder = new Builder()
-    let offset = 0// placeholder
+    let offset: number
     switch (rpcType) {
       case "GetMempoolRequest":
         offset = NNG.GetMempoolRequest.createGetMempoolRequest(builder)
@@ -619,7 +710,7 @@ export class Indexer {
     // Then we can parse the blocks for RANK transactions
     const bb = <ByteBuffer> await new Promise((resolve, reject) => {
       const rpcSocketSendTimeout = setTimeout(
-        () => reject(`rpcCall(): Socket.send() timeout reached (${NNG_REQUEST_TIMEOUT_LENGTH}ms)`),
+        () => reject(`rpcCall(${rpcType}, ${typeof params}): Socket.send() timeout reached (${NNG_REQUEST_TIMEOUT_LENGTH}ms)`),
         NNG_REQUEST_TIMEOUT_LENGTH
       )
       // set up response listener before sending request; avoids race condition
@@ -635,12 +726,9 @@ export class Indexer {
       switch (result.errorCode()) {
         case 5: // block not found
           return null
-        // shut down if unhandled error
+        // what's happening
         default:
-          this.close(
-            ERR.NNG_RPC_REQUEST,
-            `MAIN[rpcCall()]: ${result.errorMsg()} (code: ${result.errorCode()})`
-          )
+          throw new Error(`rpcCall(${rpcType}, ${typeof params}): ${result.errorMsg()} (code: ${result.errorCode()})`)
       }
     }
     return new ByteBuffer(result.dataArray())
@@ -651,16 +739,24 @@ export class Indexer {
    * @returns {Promise<NNG.Block>}
    */
   private async rpcGetBlock(height: number): Promise<NNG.Block> {
-    const bb = await this.rpcCall('GetBlockRequest', { blockRequest: { height }})
-    return bb?.bytes()?.length ? NNG.GetBlockResponse.getRootAsGetBlockResponse(bb).block() : null
+    try {
+      const bb = await this.rpcCall('GetBlockRequest', { blockRequest: { height }})
+      return bb?.bytes()?.length ? NNG.GetBlockResponse.getRootAsGetBlockResponse(bb).block() : null
+    } catch (e: any) {
+      throw new Error(`rpcGetBlock(${height}): ${e.message}`)
+    }
   }
   /**
    * Fetches mempool txs
    * @returns {Promise<NNG.GetMempoolResponse>}
    */
   private async rpcGetMempool(): Promise<NNG.GetMempoolResponse> {
-    const bb = await this.rpcCall('GetMempoolRequest')
-    return NNG.GetMempoolResponse.getRootAsGetMempoolResponse(bb)
+    try {
+      const bb = await this.rpcCall('GetMempoolRequest')
+      return NNG.GetMempoolResponse.getRootAsGetMempoolResponse(bb)
+    } catch (e: any) {
+      throw new Error(`rpcGetMempool(): ${e.message}`)
+    }
   }
   /**
    * Fetches range of blocks starting at `height`, up to `NNG_RPC_BLOCKRANGE_SIZE` limit
@@ -670,28 +766,35 @@ export class Indexer {
    * @returns {Promise<NNG.GetBlockRangeResponse>}
    */
   private async rpcGetBlockRange(height: number): Promise<NNG.GetBlockRangeResponse> {
-    const bb = await this.rpcCall('GetBlockRangeRequest', {
-      blockRangeRequest: { startHeight: height, numBlocks: NNG_RPC_BLOCKRANGE_SIZE }
-    })
-    return NNG.GetBlockRangeResponse.getRootAsGetBlockRangeResponse(bb)
+    try {
+      const bb = await this.rpcCall('GetBlockRangeRequest', {
+        blockRangeRequest: { startHeight: height, numBlocks: NNG_RPC_BLOCKRANGE_SIZE }
+      })
+      return NNG.GetBlockRangeResponse.getRootAsGetBlockRangeResponse(bb)
+    } catch (e: any) {
+      throw new Error(`rpcGetBlockRange(${height}): ${e.message}`)
+    }
   }
   /**
    * 
    * @param data
    * @returns 
    */
-  private processTransactions(data: NNG.Block | NNG.GetMempoolResponse) {
+  private toRankTransactions(data: NNG.Block | NNG.GetMempoolResponse) {
     const ranks: RankTransaction[] = []
     const txsLength = data.txsLength()
     // skip coinbase tx (i.e. `let j = 1`)
     for (let j = 1; j < txsLength; j++) {
-      const txRaw = data.txs(j).tx().rawArray()
-      // Convert Uint8Array to Buffer else bitcore parse will fail
-      const tx = new Transaction(Buffer.from(txRaw))
-      // Differentiate between Block or Mempool accordingly
-      const block = data instanceof NNG.Block ? this.toBlock(data.header()) : null
-      ranks.push(...this.processRawTransaction(tx, block)
-      )
+      try {
+        const txRaw = data.txs(j).tx().rawArray()
+        // Convert Uint8Array to Buffer else bitcore parse will fail
+        const tx = new Transaction(Buffer.from(txRaw))
+        // Differentiate between Block or Mempool accordingly
+        const block = data instanceof NNG.Block ? this.toBlock(data.header()) : null
+        ranks.push(...this.processRawTransaction(tx, block))
+      } catch (e: any) {
+        throw new Error(`toRankTransactions(${typeof data}): ${e.message}`)
+      }
     }
     return ranks
   }
@@ -705,23 +808,27 @@ export class Indexer {
     block?: Block
   ): RankTransaction[] {
     const { txid, outputs } = tx
-    // Use current time if tx from mempool
-    const t = block?.timestamp ?? BigInt(Date.now())
-    // block header timestamp in seconds; need milliseconds
-    const ranks: RankTransaction[] = []
-    for (let outIdx = 0; outIdx < outputs.length; outIdx++) {
-      const output = outputs[outIdx]
-      if (!this.isRankScript(output.script)) {
-        continue
+    try {
+      // Use current time if tx from mempool
+      const t = block?.timestamp ?? BigInt(Date.now())
+      // block header timestamp in seconds; need milliseconds
+      const ranks: RankTransaction[] = []
+      for (let outIdx = 0; outIdx < outputs.length; outIdx++) {
+        const output = outputs[outIdx]
+        if (!this.isRankScript(output.script)) {
+          continue
+        }
+        ranks.push({
+          output: `${txid}_${outIdx}`,
+          timestamp: t,
+          height: block?.height ?? undefined,
+          ...this.toRankOutput(output)
+        })
       }
-      ranks.push({
-        output: `${txid}_${outIdx}`,
-        timestamp: t,
-        height: block?.height ?? undefined,
-        ...this.toRankOutput(output)
-      })
+      return ranks
+    } catch (e: any) {
+      throw new Error(`processRawTransaction(${typeof tx}, ${typeof block}): ${e.message}`)
     }
-    return ranks
   }
   /**
    * Check if the provided `script` is a RANK script
@@ -831,14 +938,16 @@ export class Indexer {
    * @param includePrevHash 
    * @returns 
    */
-  private toBlock(header: NNG.BlockHeader, prevhash: boolean = false): Block {
-    return {
-      height: this.toHeight(header),
-      timestamp: header.timestamp(),
-      hash: this.toBlockhashOrTxid(header.blockHash().hash()),
-      prevhash: prevhash ? this.toBlockhashOrTxid(header.prevBlockHash().hash()): undefined,
-      //ranks: [], // this will get filled later once txs are processed
-      ranksLength: 0
+  private toBlock(header: NNG.BlockHeader, includePrevhash: boolean = false): Block {
+    try {
+      const height = this.toHeight(header)
+      const timestamp = header.timestamp()
+      const hash = this.toBlockhashOrTxid(header.blockHash().hash())
+      const prevhash = includePrevhash ? this.toBlockhashOrTxid(header.prevBlockHash().hash()): undefined
+      const ranksLength = 0
+      return <Block> { height, timestamp, hash, prevhash, ranksLength }
+    } catch (e: any) {
+      throw new Error(`toBlock(${header}, ${includePrevhash}): ${e.message}`)
     }
   }
   /**
