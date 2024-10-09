@@ -186,8 +186,10 @@ export class Indexer {
       + log + ` --- !       RPC prevhash: ${best.prevhash} (height ${best.height - 1})`)
       // rewind backwards to match checkpoint height/hash to RPC
       try {
-        const result = await this.rewindBlocks(checkpoint.height, best.height)
-        console.log(log + result)
+        for (let height = checkpoint.height; height > best.height; height--) {
+          const result = await this.rewindBlock(height)
+          console.log(log + result)
+        }
       } catch (e: any) {
         this.close(
           ERR.IDX_BLOCKS_REWIND,
@@ -279,27 +281,25 @@ export class Indexer {
     }
   }
   /**
-   * Undo all changes made by `syncBlocks()`, starting at `startHeight` until `bestHeight` (non-inclusive)
-   * @param startHeight Block height to undo first
-   * @param bestHeight Block height 
+   * 
+   * @param height 
+   * @returns 
    */
-  private async rewindBlocks(
-    startHeight: number,
-    bestHeight: number
+  private async rewindBlock(
+    height: number
   ): Promise<string> {
-    for (let height = startHeight; height > bestHeight; height--) {
-      try {
-        // Gather RANK txs from this block
-        const ranks = await this.db.getRankTransactionsByHeight(height)
-        // Use "true" to tell this method to execute rewind query vs upsert query
-        const result = await this.rewindProfiles(ranks)
-        // Delete block
-        await this.db.deleteBlockByHeight(height)
-        return ` --- ! height ${height}: ${result}`
-      } catch (e: any) {
-        throw new Error(`rewindBlocks(${startHeight}, ${bestHeight}): height ${height}: ${e.message}`)
-      }
+    try {
+      // Gather RANK txs from this block
+      const ranks = await this.db.getRankTransactionsByHeight(height)
+      // Use "true" to tell this method to execute rewind query vs upsert query
+      const result = await this.rewindProfiles(ranks)
+      // Delete block
+      await this.db.deleteBlockByHeight(height)
+      return ` --- ! height ${height}: ${result}`
+    } catch (e: any) {
+      throw new Error(`rewindBlock(${height}: ${e.message}`)
     }
+
   }
   /**
    * Called during reorg to delete RANK txs and adjust Profile rankings accordingly
@@ -628,8 +628,10 @@ export class Indexer {
       }
       // Rewind blocks until best hash/height is reached
       try {
-        const result = await this.rewindBlocks(this.checkpoint.height, best.height)
-        console.log(log + result)
+        for (let height = this.checkpoint.height; height > best.height; height--) {
+          const result = await this.rewindBlock(height)
+          console.log(log + result)
+        }
       } catch (e: any) {
         this.close(
           ERR.IDX_BLOCKS_REWIND,
