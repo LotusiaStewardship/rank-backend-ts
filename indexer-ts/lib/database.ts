@@ -23,57 +23,60 @@ export class Database {
     await this.db.$disconnect()
   }
   /**
-   * Checks for existing `profileId` and returns the `accountId` of profile
+   * Checks if the profile with ID `id` exists and returns it
    * @param profileId 
    * @returns 
    */
-  async isExistingProfile(
-    id: string
-  ): Promise<string> {
+  async getProfileById(
+    profileId: string
+  ): Promise<Profile | undefined> {
     try {
-      const result = await this.db.profile.findFirst({
-        where: { id },
-        include: { account: {
-          select: { id: true }
-        } },
-      })
-      return result?.account.id
+      return await this.db.profile.findFirst({ where: { id: profileId }})
     } catch (e: any) {
       throw new Error(`isExistingProfile: ${e.message}`)
     }
   }
-  async isExistingTransaction(txid: string) {
-    try {
-      const result = await this.db.rankTransaction.findFirst({
-        where: { output: { contains: txid }},
-        select: { output: true }
-      })
-      return result?.output ?? undefined
-    } catch (e: any) {
-
-    }
-  }
+  //async isExistingTransaction(txid: string) {
+  //  try {
+  //    const result = await this.db.rankTransaction.findFirst({
+  //      where: { output: { contains: txid }},
+  //      select: { output: true }
+  //    })
+  //    return result?.output ?? undefined
+  //  } catch (e: any) {
+  //
+  //  }
+  //}
   /**
    * 
    * @param profiles 
    * @returns 
    */
-  async rewindProfiles(profiles: Profile[]) {
+  async rewindProfiles(profiles: { [id: string]: Profile }) {
     try {
       await this.db.$transaction(
-        profiles.map(p => this.db.profile.update({
-          where: { id: p.id, platform: p.platform },
+        Object.values(profiles).map(p => this.db.profile.update({
+          where: { id_platform: {
+            id: p.id,
+            platform: p.platform
+          }},
           data: {
             ranks: {
               // For REORG processing
               deleteMany: {
-                output: {
-                  in: p.ranks.map(r => r.output)
+                txid: {
+                  in: p.ranks.map(r => r.txid)
                 }
               }
             },
             ranking: {
-              decrement: p.ranks.reduce((total, { sentiment, value }) => total + Number(sentiment ? value : -value), 0)
+              decrement: p.ranking
+            },
+            ranksPositive: {
+              decrement: p.ranksPositive
+            },
+            ranksNegative: {
+              decrement: p.ranksNegative
             }
           }
         }))
@@ -84,37 +87,49 @@ export class Database {
   }
   /**
    * 
-   * @param param0 
+   * @param profiles 
    */
-  async upsertProfiles(profiles: Profile[]): Promise<undefined> {
+  async upsertProfiles(profiles: { [id: string]: Profile }): Promise<undefined> {
     try {
       await this.db.$transaction(
-        profiles.map(profile => {
-          const { id, ranks } = profile
-          const ranking = ranks.reduce((total, { sentiment, value }) => total + Number(sentiment ? value : -value), 0)
+        Object.values(profiles).map(profile => {
+          
+          const ranks = profile.ranks.map(rank => {
+            return {
+              txid: rank.txid,
+              value: rank.value,
+              sentiment: rank.sentiment,
+              timestamp: rank.timestamp,
+              height: rank.height
+            }
+          })
+          const ranksCreateMany = {
+            createMany: {
+              data: ranks
+            }
+          }
           return this.db.profile.upsert({
-            where: { id },
+            where: { id_platform: {
+              id: profile.id,
+              platform: profile.platform
+            }},
             create: {
-              ...profile,
               account: { create: { id: randomUUID() }},
-              ranks: {
-                createMany: {
-                  data: ranks
-                }
-              },
-              ranking
+              ...profile,
+              ranks: ranksCreateMany,
             },
             update: {
-              ranks: {
-                createMany: {
-                  data: ranks
-                }
-              },
+              ranks: ranksCreateMany,
               ranking: {
-                increment: ranking
+                increment: profile.ranking
+              },
+              ranksPositive: {
+                increment: profile.ranksPositive
+              },
+              ranksNegative: {
+                increment: profile.ranksNegative
               }
             },
-            
           })
         })
       ), { isolationLevel: 'RepeatableRead' }
@@ -132,9 +147,9 @@ export class Database {
     try {
       await this.db.$transaction(
         ranks.map(rank => {
-          const { height, timestamp, output } = rank
+          const { height, timestamp, txid } = rank
           return this.db.rankTransaction.update({
-            where: { output },
+            where: { txid },
             data: {
               height,
               timestamp
@@ -153,7 +168,7 @@ export class Database {
    */
   async getRankTransactionsByHeight(
     height: number
-  ) {
+  ): Promise<RankTransaction[]> {
     try {
       return await this.db.rankTransaction.findMany({ where: { height }})
     } catch (e: any) {
@@ -184,7 +199,7 @@ export class Database {
   ): Promise<undefined> {
     try {
       await this.db.rankTransaction.deleteMany({
-        where: { output: { contains: txid }}
+        where: { txid }
       })
     } catch (e: any) {
       // not a critical error
@@ -202,6 +217,15 @@ export class Database {
       })
     } catch (e: any) {
       throw new Error(`deleteBlockByHeight: ${e.message}`)
+    }
+  }
+  async saveBlock(block: Block) {
+    try {
+      await this.db.block.create({
+        data: block
+      })
+    } catch (e: any) {
+      throw new Error(`saveBlock: ${e.message}`)
     }
   }
   /**
