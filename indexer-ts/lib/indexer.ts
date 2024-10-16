@@ -5,19 +5,15 @@ import { Socket, socket } from 'nanomsg'
 //import { Socket } from '@rustup/nng'
 import { Database } from './database'
 import {
-  ERR,
+  RANK_SCRIPT_PARTS,
+  RANK_SCRIPT_MIN_BYTE_LENGTH,
   NNG_REQUEST_TIMEOUT_LENGTH,
   NNG_RPC_BLOCKRANGE_SIZE,
   NNG_RPC_RCVMAXSIZE_CONSENSUS,
   NNG_SOCKET_MAXRECONN,
   NNG_SOCKET_RECONN,
+  ERR,
 } from '../util/constants'
-/** First block with a RANK transaction */
-const GENESIS = {
-  hash: '00000000019cc1ddc04bc541f531f1424d04d0c37443867f1f6137cc7f7d09e5',
-  height: 811624,
-  timestamp: 1721079817n
-}
 /** These  */
 type NNGMessageProcessor = (bb: ByteBuffer) => Promise<void>
 /**  */
@@ -38,7 +34,7 @@ type ScriptPartName =
 type ScriptPart = {
   offset: number,
   len: number,
-  hex?: string,
+  values?: string[]
 }
 /** OP_RETURN <RANK> <sentiment> <profileId> [<postId> <commentHex>] */
 type RankOutput = {
@@ -84,14 +80,8 @@ export class Indexer {
     pending: Array<[ NNGMessageProcessor, ByteBuffer ]>,
   }
   private parts: {
-    [name in ScriptPartName]: ScriptPart
-  } = {
-    lokad: { offset: 2, len: 4, hex: Buffer.from('RANK').toString('hex') },
-    sentiment: { offset: 6, len: 1 },
-    platform: { offset: 8, len: 1 },
-    profile: { offset: 10, len: 16 },
-    post: { offset: 26, len: 32 }, // sha-256 hash of post metadata + body, if applicable
-    comment: { offset: 58, len: 164 } // optional on-chain comment to accompany vote (223 bytes - 59 bytes)
+    required: { [name in Exclude<ScriptPartName, 'post' | 'comment'>]: ScriptPart },
+    optional: { [name in Extract<ScriptPartName, 'post' | 'comment'>]: ScriptPart }
   }
   private genesis: Block = {
     ...GENESIS,
@@ -124,6 +114,18 @@ export class Indexer {
     this.rpc.rcvmaxsize(NNG_RPC_RCVMAXSIZE_CONSENSUS * NNG_RPC_BLOCKRANGE_SIZE)
     this.rpc.reconn(NNG_SOCKET_RECONN)
     this.rpc.maxreconn(NNG_SOCKET_MAXRECONN)
+    this.parts = {
+      required: {
+        lokad: { offset: 2, len: 4, values: Object.values(RANK_SCRIPT_PARTS.LOKAD) },
+        sentiment: { offset: 6, len: 1, values: Object.values(RANK_SCRIPT_PARTS.SENTIMENT) },
+        platform: { offset: 8, len: 1, values: Object.values(RANK_SCRIPT_PARTS.PLATFORM) },
+        profile: { offset: 10, len: 16 }, // As long as it is 16 bytes it is good
+      },
+      optional: {
+        post: { offset: 26, len: 32 }, // sha256 hash of post metadata + body, if applicable
+        comment: { offset: 58, len: 164 } // optional on-chain comment to accompany vote (223 bytes - 59 bytes)
+      }
+    }
   }
   /**
    * Start the engines!
@@ -773,7 +775,7 @@ export class Indexer {
     }
   }
   /**
-   * Check if the provided `script` is a RANK script
+   * Check if the provided output `script` is a RANK script
    * @param script Bitcore-compatible `Script` object
    * @returns {false | Buffer}
    */
@@ -785,35 +787,24 @@ export class Indexer {
       return false
     }
     const scriptBuf = script.toBuffer()
-    // prepare to parse lokad script parts
-    const { lokad } = this.parts
-    // make sure the script is long enough to parse for lokad
-    if (scriptBuf.length < (lokad.offset + lokad.len)) {
+    // make sure the script has all required bytes
+    if (scriptBuf.length < RANK_SCRIPT_MIN_BYTE_LENGTH) {
       return false;
     }
-    // make sure the script contains our lokad prefix
-    if (this.getScriptPartHex(lokad, scriptBuf) !== lokad.hex) {
-      return false;
+    // validate all required RANK parameters
+    for (const part of Object.values(this.parts.required)) {
+      const hex = this.getScriptPartHex(part, scriptBuf)
+      if (
+        // script part value is valid, if applicable
+        (part.values && !part.values.includes(hex))
+        // script part length meets requirement
+        || Buffer.from(hex, 'hex').length != part.len
+      ) {
+        return false
+      }
     }
-    // make sure the script contains all required parts
-    // TODO: need to finish sanitizing
-    const { sentiment, platform, profile, post, comment } = this.parts
-    //this.getScriptParts(scriptBuf)
-
     // valid RANK output confirmed; return for processing
     return scriptBuf
-  }
-  /**
-   * 
-   * @param scriptBuf 
-   */
-  private getScriptParts(
-    scriptBuf: Buffer
-  ) {
-    const parts: { [part: string]: BigInt | Boolean | string } = {}
-    for (const [name, part] of Object.entries(this.parts)) {
-      // TODO: Finish this one
-    }
   }
   /**
    * Parse the provided `scriptBuf` for the ScriptPart hex data
@@ -837,11 +828,12 @@ export class Indexer {
   private toRankOutput(
     output: Transaction.Output
   ): RankOutput {
+    const parts = this.parts.required
     const scriptBuf = output.script.toBuffer()
     const value = BigInt(output.satoshis)
-    const sentiment = Boolean(Number(this.getScriptPartHex(this.parts.sentiment, scriptBuf)))
-    const platform = this.getScriptPartHex(this.parts.platform, scriptBuf)
-    const profileId = this.getScriptPartHex(this.parts.profile, scriptBuf)
+    const sentiment = Boolean(Number(this.getScriptPartHex(parts.sentiment, scriptBuf)))
+    const platform = this.getScriptPartHex(parts.platform, scriptBuf)
+    const profileId = this.getScriptPartHex(parts.profile, scriptBuf)
     return { value, sentiment, platform, profileId }
   }
   /**

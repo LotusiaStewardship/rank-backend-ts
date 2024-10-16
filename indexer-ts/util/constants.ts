@@ -11,6 +11,22 @@ export const NNG_SOCKET_RECONN = 300 // time (ms) between reconnect attempts
 export const NNG_SOCKET_MAXRECONN = 3000 // max time (ms) before giving up reconnect
 export const NNG_REQUEST_TIMEOUT_LENGTH = 2000 // max time (ms) before aborting a Socket.send()
 /**
+ * RANK script declarations
+ */
+export const RANK_SCRIPT_MIN_BYTE_LENGTH = 26
+export const RANK_SCRIPT_PARTS = {
+  LOKAD: {
+    RANK: '52414e4b',
+  },
+  PLATFORM: {
+    TWITTER: '01'
+  },
+  SENTIMENT: {
+    POSITIVE: '51', // OP_TRUE
+    NEGATIVE: '00' // OP_FALSE
+  }
+}
+/**
  * Twitter stuff
  */
 export const TWITTER_PROFILE_LENGTH = 16 // maximum length of profile handle
