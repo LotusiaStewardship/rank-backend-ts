@@ -758,8 +758,8 @@ export class Indexer {
   ): RankOutput[] {
     const ranks: RankOutput[] = []
     try {
-      while (outputs.length > 0) {
-        const output = outputs.shift()
+      for (let outIdx = 0; outIdx < outputs.length; outIdx++) {
+        const output = outputs[outIdx]
         // Return RANK output array; could have data or not
         if (!this.isRankScript(output.script)) {
           return ranks
