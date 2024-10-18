@@ -1,14 +1,13 @@
-import { Prisma, PrismaClient } from "@prisma/client";
-//import {}  from "@prisma/client/sql"
-import BatchPayload = Prisma.BatchPayload
-import type {
+import { PrismaClient } from "@prisma/client";
+import { randomUUID } from "crypto";
+import {
   Block,
   RankTransaction,
-  Profile
+  Profile,
+  ProfileMap
 } from './indexer'
-import { randomUUID } from "crypto";
 
-export class Database {
+export default class Database {
   private db: PrismaClient
 
   constructor() {
@@ -29,58 +28,24 @@ export class Database {
    */
   async getProfileById(
     profileId: string
-  ): Promise<Profile | undefined> {
+  ): Promise<Partial<Profile> | undefined> {
     try {
       return await this.db.profile.findFirst({ where: { id: profileId }})
     } catch (e: any) {
       throw new Error(`isExistingProfile: ${e.message}`)
     }
   }
-  //async isExistingTransaction(txid: string) {
-  //  try {
-  //    const result = await this.db.rankTransaction.findFirst({
-  //      where: { output: { contains: txid }},
-  //      select: { output: true }
-  //    })
-  //    return result?.output ?? undefined
-  //  } catch (e: any) {
-  //
-  //  }
-  //}
   /**
    * 
    * @param profiles 
    * @returns 
    */
-  async rewindProfiles(profiles: { [id: string]: Profile }) {
+  async rewindProfiles(profiles: ProfileMap) {
     try {
       await this.db.$transaction(
-        Object.values(profiles).map(p => this.db.profile.update({
-          where: { id_platform: {
-            id: p.id,
-            platform: p.platform
-          }},
-          data: {
-            ranks: {
-              // For REORG processing
-              deleteMany: {
-                txid: {
-                  in: p.ranks.map(r => r.txid)
-                }
-              }
-            },
-            ranking: {
-              decrement: p.ranking
-            },
-            ranksPositive: {
-              decrement: p.ranksPositive
-            },
-            ranksNegative: {
-              decrement: p.ranksNegative
-            }
-          }
-        }))
-      ), { isolationLevel: 'RepeatableRead' }
+        this.toProfileRewindStatements(profiles),
+        { isolationLevel: 'RepeatableRead' }
+      )
     } catch (e: any) {
       throw new Error(`rewindProfiles: ${e.message}`)
     }
@@ -89,76 +54,14 @@ export class Database {
    * 
    * @param profiles 
    */
-  async upsertProfiles(profiles: { [id: string]: Profile }): Promise<undefined> {
+  async upsertProfiles(profiles: ProfileMap) {
     try {
       await this.db.$transaction(
-        Object.values(profiles).map(profile => {
-          
-          const ranks = profile.ranks.map(rank => {
-            return {
-              txid: rank.txid,
-              value: rank.value,
-              sentiment: rank.sentiment,
-              timestamp: rank.timestamp,
-              height: rank.height
-            }
-          })
-          const ranksCreateMany = {
-            createMany: {
-              data: ranks
-            }
-          }
-          return this.db.profile.upsert({
-            where: { id_platform: {
-              id: profile.id,
-              platform: profile.platform
-            }},
-            create: {
-              account: { create: { id: randomUUID() }},
-              ...profile,
-              ranks: ranksCreateMany,
-            },
-            update: {
-              ranks: ranksCreateMany,
-              ranking: {
-                increment: profile.ranking
-              },
-              ranksPositive: {
-                increment: profile.ranksPositive
-              },
-              ranksNegative: {
-                increment: profile.ranksNegative
-              }
-            },
-          })
-        })
-      ), { isolationLevel: 'RepeatableRead' }
-    } catch (e: any) {
-      throw new Error(`upsertProfiles: ${e.message}`)
-    }
-  }
-  /**
-   * 
-   * @param ranks 
-   */
-  async updateRankTransactions(
-    ranks: RankTransaction[]
-  ) {
-    try {
-      await this.db.$transaction(
-        ranks.map(rank => {
-          const { height, timestamp, txid } = rank
-          return this.db.rankTransaction.update({
-            where: { txid },
-            data: {
-              height,
-              timestamp
-            }
-          })
-        }), { isolationLevel: 'RepeatableRead' }
+        this.toProfileUpsertStatements(profiles),
+        { isolationLevel: 'RepeatableRead' }
       )
     } catch (e: any) {
-      throw new Error(`updateRankTransactions: ${e.message}`)
+      throw new Error(`upsertProfiles: ${e.message}`)
     }
   }
   /**
@@ -170,7 +73,9 @@ export class Database {
     height: number
   ): Promise<RankTransaction[]> {
     try {
-      return await this.db.rankTransaction.findMany({ where: { height }})
+      return await this.db.rankTransaction.findMany({
+        where: { height }
+      })
     } catch (e: any) {
       throw new Error(`getRankTransactionsByHeight: ${e.message}`)
     }
@@ -190,23 +95,6 @@ export class Database {
     }
   }
   /**
-   * Delete a `RankTransaction`. Useful for `TransactionRemovedFromMempool` events.
-   * @param txid 
-   * @returns {Promise<Prisma.BatchPayload | false>}
-   */
-  async deleteRankTransactionsByTxid(
-    txid: string
-  ): Promise<undefined> {
-    try {
-      await this.db.rankTransaction.deleteMany({
-        where: { txid }
-      })
-    } catch (e: any) {
-      // not a critical error
-      console.error(`WARN: deleteRankTransactionsByTxid: ${e.message}`)
-    }
-  }
-  /**
    * 
    * @param height 
    */
@@ -219,43 +107,153 @@ export class Database {
       throw new Error(`deleteBlockByHeight: ${e.message}`)
     }
   }
-  async saveBlock(block: Block) {
-    try {
-      await this.db.block.create({
-        data: block
-      })
-    } catch (e: any) {
-      throw new Error(`saveBlock: ${e.message}`)
-    }
-  }
   /**
-   * Save several blocks; primarily useful during `syncBlocks()`
-   * @param blocks 
+   * 
+   * @param block 
+   * @param txids 
+   * @param profiles 
    */
-  async saveBlocks(
-    blocks: Block[]
+  async saveBlock(
+    block: Block,
+    txids: Pick<RankTransaction, "txid">[],
+    profiles: Map<string, Profile>
   ) {
     try {
-      await this.db.block.createMany({
-        data: blocks
-      })
+      await this.db.$transaction([
+        // Create the block first for `height` pkey
+        // Simultaneously connect corresponding ranks
+        this.db.block.create({
+          data: { ...block,
+            ranks: {
+              connect: txids
+            }
+          }
+        }),
+        // Upsert any profiles if necessary
+        // RANK txs upserted here will be connected to above block
+        ...this.toProfileUpsertStatements(profiles)
+      ])
     } catch (e: any) {
-      throw new Error(`saveBlocks: ${e.message}`)
+      throw new Error(`saveBlock(${block.height}, ${txids.length}, ${typeof profiles}): ${e.message}`)
     }
   }
   /**
    * 
-   * @returns 
+   * @param blocks 
+   * @param profiles 
+   */
+  async saveBlockRange(
+    blocks: Block[],
+    profiles: ProfileMap
+  ) {
+    try {
+      await this.db.$transaction([
+        // Create all of the blocks first for `height` pkey
+        this.db.block.createMany({ data: blocks }),
+        // Upsert all profiles
+        // RANK txs upserted here are connected to above blocks
+        ...this.toProfileUpsertStatements(profiles)
+      ])
+    } catch (e: any) {
+      throw new Error(e.message)
+    }
+  }
+  /**
+   * Get the best `Block` from the database (i.e. highest `height`)
+   * @returns {Promise<Block>} The best `Block` as checkpoint
    */
   async getCheckpoint(): Promise<Block> {
     try {
       return await this.db.block.findFirst({
-        orderBy: { height: "desc" },
-        
+        orderBy: { height: "desc" }
       })
     } catch (e: any) {
       throw new Error(`getCheckpoint: ${e.message}`)
     }
+  }
+  /**
+   * 
+   * @param profiles 
+   * @returns 
+   */
+  toProfileUpsertStatements(
+    profiles: ProfileMap
+  ) {
+    const upserts: ReturnType<typeof this.db.profile.upsert>[] = []
+    for (const [ profileId, profile ] of profiles) {
+      upserts.push(
+        this.db.profile.upsert({
+          where: { id_platform: {
+            id: profileId,
+            platform: profile.platform
+          }},
+          // profile doesn't exist
+          create: {
+            account: { create: { id: randomUUID() }},
+            id: profileId,
+            platform: profile.platform,
+            ranks: {
+              createMany: { data: profile.ranks },
+            },
+          },
+          // profile exists
+          update: {
+            ranks: {
+              createMany: {data: profile.ranks }
+            },
+            ranking: {
+              increment: profile.ranking
+            },
+            ranksPositive: {
+              increment: profile.ranksPositive
+            },
+            ranksNegative: {
+              increment: profile.ranksNegative
+            }
+          },
+        })
+      )
+    }
+    return upserts
+  }
+  /**
+   * 
+   * @param profiles 
+   * @returns 
+   */
+  toProfileRewindStatements(
+    profiles: ProfileMap
+  ) {
+    const rewinds: ReturnType<typeof this.db.profile.update>[] = []
+    for (const [ profileId, profile ] of profiles) {
+      rewinds.push(
+        this.db.profile.update({
+          where: { id_platform: {
+            id: profileId,
+            platform: profile.platform
+          }},
+          data: {
+            ranks: {
+              deleteMany: {
+                txid: {
+                  in: profile.ranks.map(rank => rank.txid)
+                }
+              }
+            },
+            ranking: {
+              decrement: profile.ranking
+            },
+            ranksPositive: {
+              decrement: profile.ranksPositive
+            },
+            ranksNegative: {
+              decrement: profile.ranksNegative
+            }
+          }
+        })
+      )
+    }
+    return rewinds
   }
 
 }

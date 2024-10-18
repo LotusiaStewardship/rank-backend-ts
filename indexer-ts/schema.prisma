@@ -29,49 +29,47 @@ model Profile {
   // e.g. Twitter/X.com
   platform      String
   // overall ranking, in satoshis
-  ranking       BigInt            @default(0)
+  ranking       BigInt?
   // Total number of RANK txs with positive sentinment
-  ranksPositive Int               @default(0)
+  ranksPositive Int?
   // Total number of RANK txs with negative sentiment
-  ranksNegative Int               @default(0)
+  ranksNegative Int?
   ranks         RankTransaction[]
   account       Account?          @relation(fields: [accountId], references: [id])
 
   @@id([id, platform])
   @@index([id(type: hash)])
+  // these indexes are best used with a `LIMIT BY`
+  // ref: https://www.postgresql.org/docs/current/indexes-ordering.html#INDEXES-ORDERING
   @@index([id(type: hash), ranking(type: btree, sort: Desc)], name: "profile_idx_ranked_highest")
   @@index([id(type: hash), ranking(type: btree, sort: Asc)], name: "profile_idx_ranked_lowest")
 }
 
 model RankTransaction {
   txid      String   @id
-  height    Int      @default(-1)
-  timestamp BigInt
+  height    Int? // null for mempool transactions
+  timestamp BigInt // Block timestamp or indexer first-seen time
   value     BigInt // in satoshis
-  sentiment Boolean
-  profileId String
-  platform  String
-  profile   Profile? @relation(fields: [profileId, platform], references: [id, platform])
-  //profileAccountId String?
-  //@@index([profileId(type: hash), sentiment(type: hash)])
-
+  sentiment Boolean // 
+  profileId String // 
+  platform  String 
+  profile   Profile @relation(fields: [profileId, platform], references: [id, platform])
+  // RankTransactions will be deleted if their connected Block is deleted
+  block Block? @relation(fields: [height], references: [height], onDelete: Cascade)
+  
   @@index([profileId(type: hash), sentiment(type: hash)])
+  @@index([profileId(type: hash)])
   @@index([height(sort: Desc)])
-  @@index([txid(type: hash)])
 }
 
 model Block {
   hash        String @unique
   height      Int    @unique
   timestamp   BigInt
-  ranksLength Int?   @default(0)
+  ranksLength Int   @default(0)
+  ranks RankTransaction[]
 
   @@index([hash(type: hash)])
   @@index([height(sort: Desc)])
-  @@index([ranksLength(sort: Desc)])
-}
-
-model DanaTransactionVersion1 {
-  output    String   @unique // formatted <txid>_<outIdx>
-  timestamp DateTime
+  @@index([height, ranksLength(sort: Desc)])
 }

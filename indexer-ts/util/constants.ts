@@ -13,18 +13,24 @@ export const NNG_REQUEST_TIMEOUT_LENGTH = 2000 // max time (ms) before aborting 
 /**
  * RANK script declarations
  */
-export const RANK_SCRIPT_MIN_BYTE_LENGTH = 26
+export enum SCRIPT_PART_LOKAD {
+  RANK = '52414e4b' // "RANK"
+}
+export enum SCRIPT_PART_PLATFORM {
+  TWITTER = '01'
+}
+export enum SCRIPT_PART_SENTIMENT {
+  POSITIVE = '51', // OP_1 | OP_TRUE
+  NEGATIVE = '00', // OP_0 | OP_FALSE
+}
+export const RANK_SCRIPT_MIN_BYTE_LENGTH = 26 // required byte length for valid RANK tx
 export const RANK_SCRIPT_PARTS = {
-  LOKAD: {
-    RANK: '52414e4b',
-  },
-  PLATFORM: {
-    TWITTER: '01'
-  },
-  SENTIMENT: {
-    POSITIVE: '51', // OP_TRUE
-    NEGATIVE: '00' // OP_FALSE
-  }
+  LOKAD: SCRIPT_PART_LOKAD,
+  PLATFORM: SCRIPT_PART_PLATFORM,
+  SENTIMENT: SCRIPT_PART_SENTIMENT,
+  PROFILE: null,
+  POST: null,
+  COMMENT: null,
 }
 /**
  * Twitter stuff
@@ -35,17 +41,10 @@ export const TWITTER_PROFILE_LENGTH = 16 // maximum length of profile handle
  */
 export enum ERR {
   NNG_CONNECT = 1,
-  NNG_DISCONNECT = 2,
-  NNG_RPC_REQUEST = 3,
-  NNG_MEMPOOLTXADD = 4,
-  NNG_BLKCONNCETED = 5,
-  NNG_BLKDISCONCTD = 6,
-  NNG_PROCESS_MESSAGE = 7,
-  IDX_BLOCKS_SYNC= 11,
-  IDX_MEMPOOL_SYNC = 12,
-  IDX_PROFILE_REWIND = 13,
-  IDX_BLOCKS_REWIND = 14,
-  IDX_PROFILE_UPSERT = 15,
-  DB_UPSERT = 23,
-  UNHANDLED_EXCEPTION = 69,
+  NNG_PROCESS_MESSAGE,
+  IDX_PROFILE_REWIND,
+  IDX_BLOCKS_REWIND,
+  IDX_BLOCKS_SYNC,
+  IDX_MEMPOOL_SYNC,
+  UNHANDLED_EXCEPTION = 255,
 }
