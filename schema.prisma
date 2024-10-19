@@ -29,11 +29,11 @@ model Profile {
   // e.g. Twitter/X.com
   platform      String
   // overall ranking, in satoshis
-  ranking       BigInt?
+  ranking       BigInt
   // Total number of RANK txs with positive sentinment
-  ranksPositive Int?
+  ranksPositive Int
   // Total number of RANK txs with negative sentiment
-  ranksNegative Int?
+  ranksNegative Int
   ranks         RankTransaction[]
   account       Account?          @relation(fields: [accountId], references: [id])
 

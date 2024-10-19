@@ -189,9 +189,8 @@ export default class Database {
           }},
           // profile doesn't exist
           create: {
+            ...profile,
             account: { create: { id: randomUUID() }},
-            id: profileId,
-            platform: profile.platform,
             ranks: {
               createMany: { data: profile.ranks },
             },
