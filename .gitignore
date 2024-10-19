@@ -1,22 +1,10 @@
 # Keep environment variables out of version control
-**/.env
-
-# Ignore generated js files
-**/*.js
-**/*.js.map
-
+.env
 # keep these out!
 **/node_modules/
-**/local_modules/
-
 # misc stuff
 .DS_Store*
 migrations/
 test*
-
-# Always keep all submodule files/directories
-!**/sub_modules/bn.js
-indexer-ts/sub_modules/bn.js/node_modules
-!**/sub_modules/**
-# Except for node_modules
-**/sub_modules/**/node_modules
+# generated .js files
+*.js

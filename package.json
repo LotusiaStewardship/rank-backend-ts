@@ -16,18 +16,14 @@
     "@types/express": "^5.0.0",
     "@types/nanomsg": "^4.2.3",
     "@types/node": "^20.14.9",
-    "prisma": "^5.20.0",
+    "prisma": "^5.21.1",
     "typescript": "^5.6.3"
   },
   "dependencies": {
-    "@abcpros/bitcore-mnemonic": "^8.25.43",
-    "@dana-protocols/core": "file:sub_modules/dana-sdk/packages/core",
-    "@prisma/client": "^5.20.0",
-    "bitcore-lib-xpi": "file:sub_modules/bitcore-lib-xpi",
-    "bn.js": "file:sub_modules/bn.js",
-    "chronik-client": "^0.19.0",
+    "@abcpros/bitcore-lib-xpi": "^8.25.37",
+    "@prisma/client": "^5.21.1",
     "express": "^4.21.1",
     "flatbuffers": "^24.3.25",
-    "nanomsg": "file:sub_modules/nanomsg"
+    "nanomsg": "file:local_modules/nanomsg"
   }
 }

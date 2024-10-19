@@ -1,4 +1,4 @@
-import { Script, Transaction } from 'bitcore-lib-xpi'
+import { Script, Transaction } from '@abcpros/bitcore-lib-xpi'
 import { Builder, ByteBuffer } from 'flatbuffers'
 import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
