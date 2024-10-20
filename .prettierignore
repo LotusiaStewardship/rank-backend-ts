@@ -1,0 +1,4 @@
+local_modules/**
+lib/nng-interface/**
+*.js
+*.fbs
