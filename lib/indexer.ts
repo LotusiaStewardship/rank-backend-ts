@@ -38,7 +38,7 @@ type RankOutput = {
   platform: string // e.g. Twitter/X.com, etc.
   profileId: string // who the ranking is for
   sentiment: boolean // true = positive, false = negative
-  value: bigint // sats for sentiment
+  sats: bigint // sats for sentiment
 }
 /**  */
 export type RankTransaction = RankOutput & {
@@ -52,8 +52,8 @@ export type Profile = {
   platform: string 
   ranking: bigint
   ranks: Omit<RankTransaction, 'profileId' | 'platform'>[] // omit the database relation fields
-  ranksPositive: number
-  ranksNegative: number
+  votesPositive: number
+  votesNegative: number
 }
 /**
  * `RankTransaction` objects are converted to a `ProfileMap` for database ops
@@ -903,8 +903,8 @@ export class Indexer {
     const value = BigInt(output.satoshis)
     const sentiment = Boolean(Number(this.getScriptPartHex(parts.SENTIMENT, scriptBuf)))
     const platform = this.getScriptPartHex(parts.PLATFORM, scriptBuf)
-    const profileId = this.getScriptPartHex(parts.PROFILE, scriptBuf)
-    return { value, sentiment, platform, profileId }
+    const sats = BigInt(output.satoshis)
+    return { platform, profileId, sats, sentiment }
   }
   /**
    * Parse raw `NNG.Hash` flatbuffer for the 32-byte block hash or txid
@@ -967,17 +967,22 @@ export class Indexer {
       const profile = map.get(profileId)
       if (profile) {
         profile.ranks.push(partialRank)
-        profile.ranking += rank.sentiment ? rank.value : -rank.value
-        rank.sentiment ? profile.ranksPositive++ : profile.ranksNegative++
+        if (rank.sentiment) {
+          profile.ranking += rank.sats
+          profile.votesPositive++
+        } else {
+          profile.ranking -= rank.sats
+          profile.votesNegative++
+        }
         return
       }
       map.set(rank.profileId, {
         id: rank.profileId,
         platform: rank.platform,
         ranks: [partialRank],
-        ranking: rank.sentiment ? rank.value : -rank.value,
-        ranksPositive: rank.sentiment ? 1 : 0,
-        ranksNegative: rank.sentiment ? 0 : 1
+        ranking: rank.sentiment ? rank.sats : -rank.sats,
+        votesPositive: rank.sentiment ? 1 : 0,
+        votesNegative: rank.sentiment ? 0 : 1,
       })
     })
     return map

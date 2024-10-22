@@ -203,12 +203,12 @@ export default class Database {
             ranking: {
               increment: profile.ranking
             },
-            ranksPositive: {
-              increment: profile.ranksPositive
+            votesPositive: {
+              increment: profile.votesPositive,
             },
-            ranksNegative: {
-              increment: profile.ranksNegative
-            }
+            votesNegative: {
+              increment: profile.votesNegative,
+            },
           },
         })
       )
@@ -242,11 +242,11 @@ export default class Database {
             ranking: {
               decrement: profile.ranking
             },
-            ranksPositive: {
-              decrement: profile.ranksPositive
+            votesPositive: {
+              decrement: profile.votesPositive,
             },
-            ranksNegative: {
-              decrement: profile.ranksNegative
+            votesNegative: {
+              decrement: profile.votesNegative,
             }
           }
         })
