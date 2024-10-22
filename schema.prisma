@@ -23,17 +23,12 @@ model Account {
 
 // Online profiles related to human identity
 model Profile {
-  // 16-byte hexadecimal representation of profile handle
-  id            String
+  id            String // 16-byte hexadecimal representation of profile handle
   accountId     String
-  // e.g. Twitter/X.com
-  platform      String
-  // overall ranking, in satoshis
-  ranking       BigInt?
-  // Total number of RANK txs with positive sentinment
-  ranksPositive Int?
-  // Total number of RANK txs with negative sentiment
-  ranksNegative Int?
+  platform      String // e.g. Twitter/X.com
+  ranking       BigInt // overall ranking, in satoshis
+  votesPositive Int // Total number of RANK txs with positive sentinment
+  votesNegative Int // Total number of RANK txs with negative sentiment
   ranks         RankTransaction[]
   account       Account?          @relation(fields: [accountId], references: [id])
 
@@ -46,28 +41,30 @@ model Profile {
 }
 
 model RankTransaction {
-  txid      String   @id
+  // RankTransaction data
+  txid      String  @id // 32-byte hex
   height    Int? // null for mempool transactions
   timestamp BigInt // Block timestamp or indexer first-seen time
-  value     BigInt // in satoshis
-  sentiment Boolean // 
-  profileId String // 
-  platform  String 
+  // RankOutput data
+  platform  String // references platform field on Profile model
+  profileId String // references id field on Profile model
+  sentiment String // 1-byte sentiment, 0x00 = negative, 0x01 = positive, and potentially more
+  sats     BigInt // amount of sats burned
+  // each RANK tx is associated with a Profile, else it is invalid
   profile   Profile @relation(fields: [profileId, platform], references: [id, platform])
-  // RankTransactions will be deleted if their connected Block is deleted
-  block Block? @relation(fields: [height], references: [height], onDelete: Cascade)
-  
+  block     Block?  @relation(fields: [height], references: [height], onDelete: Cascade)
+
   @@index([profileId(type: hash), sentiment(type: hash)])
   @@index([profileId(type: hash)])
   @@index([height(sort: Desc)])
 }
 
 model Block {
-  hash        String @unique
-  height      Int    @unique
+  hash        String            @unique
+  height      Int               @unique
   timestamp   BigInt
-  ranksLength Int   @default(0)
-  ranks RankTransaction[]
+  ranksLength Int               @default(0)
+  ranks       RankTransaction[]
 
   @@index([hash(type: hash)])
   @@index([height(sort: Desc)])
