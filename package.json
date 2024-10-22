@@ -1,17 +1,17 @@
 {
-  "name": "indexer-ts",
-  "version": "1.0.0",
-  "description": "Indexer for Lotus reputation system",
+  "name": "@lotusia/rank-indexer-ts",
+  "version": "0.0.1",
+  "description": "Core indexer for rank-suite",
   "main": "app.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/LotusiaStewardship/lotus-reputation/indexer-ts.git"
+    "url": "https://github.com/LotusiaStewardship/rank-indexer-ts"
   },
-  "author": "",
-  "license": "ISC",
+  "author": "Lotusia Stewardship",
+  "license": "MIT",
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/nanomsg": "^4.2.3",
