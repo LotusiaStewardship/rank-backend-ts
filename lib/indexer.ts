@@ -15,41 +15,41 @@ import {
 } from '../util/constants'
 import { IndexerLogEntry, log } from '../util'
 /** NNG types */
-type NNGMessageType = 
-| 'mempooltxadd'
-| 'mempooltxrem'
-| 'blkconnected'
-| 'blkdisconctd'
+type NNGMessageType =
+  | 'mempooltxadd'
+  | 'mempooltxrem'
+  | 'blkconnected'
+  | 'blkdisconctd'
 type NNGMessageProcessor = (bb: ByteBuffer) => Promise<void>
-type NNGPendingMessageProcessor = [ NNGMessageProcessor, ByteBuffer ]
+type NNGPendingMessageProcessor = [NNGMessageProcessor, ByteBuffer]
 type NNGQueue = {
   busy: boolean
-  pending: NNGPendingMessageProcessor[],
+  pending: NNGPendingMessageProcessor[]
 }
 /** RANK script types */
 type ScriptPartChunk = keyof typeof RANK_SCRIPT_PARTS
 type ScriptPart = {
-  offset: number,
-  len: number,
+  offset: number
+  len: number
   values?: string[]
 }
 /** OP_RETURN <RANK> <sentiment> <profileId> [<postId> <commentHex>] */
 type RankOutput = {
   platform: string // e.g. Twitter/X.com, etc.
   profileId: string // who the ranking is for
-  sentiment: boolean // true = positive, false = negative
+  sentiment: string // true = positive, false = negative
   sats: bigint // sats for sentiment
 }
 /**  */
 export type RankTransaction = RankOutput & {
-  txid: string 
+  txid: string
   height?: number // undefined if mempool
   timestamp: bigint // unix timestamp
 }
 /**  */
 export type Profile = {
   id: string
-  platform: string 
+  platform: string
   ranking: bigint
   ranks: Omit<RankTransaction, 'profileId' | 'platform'>[] // omit the database relation fields
   votesPositive: number
@@ -57,26 +57,24 @@ export type Profile = {
 }
 /**
  * `RankTransaction` objects are converted to a `ProfileMap` for database ops
- * 
+ *
  * `string` is `profileId`
  */
 export type ProfileMap = Map<string, Profile>
 /** */
 export type Block = {
-  hash: string,
-  height: number,
-  timestamp: bigint,
+  hash: string
+  height: number
+  timestamp: bigint
   ranksLength: number // default is 0 if a block is cringe
-  prevhash?: string, // for reorg checks only; does not get saved to database
+  prevhash?: string // for reorg checks only; does not get saved to database
 }
 /**  */
 type MempoolCache = Map<string, RankTransaction>
 /** First block with a RANK transaction */
-const GENESIS_BLOCK_V1: Block = {
+const GENESIS_BLOCK_V1: Partial<Block> = {
   hash: '00000000019cc1ddc04bc541f531f1424d04d0c37443867f1f6137cc7f7d09e5',
   height: 811624,
-  timestamp: 1721079817n,
-  ranksLength: 1
 }
 /** Signal to would-be promises that they should think twice before resolving */
 export class Indexer {
@@ -87,20 +85,22 @@ export class Indexer {
   private rpcUri: string
   private mempool: MempoolCache
   private queue: NNGQueue
-  private parts: { // 😏
-    required: { [chunk in Exclude<ScriptPartChunk, 'POST' | 'COMMENT'>]: ScriptPart },
-    optional: { [chunk in Extract<ScriptPartChunk, 'POST' | 'COMMENT'>]: ScriptPart }
+  // 😏
+  private parts: {
+    required: {
+      [chunk in Exclude<ScriptPartChunk, 'POST' | 'COMMENT'>]: ScriptPart
+    }
+    optional: {
+      [chunk in Extract<ScriptPartChunk, 'POST' | 'COMMENT'>]: ScriptPart
+    }
   }
   private checkpoint: Block
   /**
-   * 
-   * @param nngUri 
-   * @param rpcUri 
+   *
+   * @param nngUri
+   * @param rpcUri
    */
-  constructor(
-    nngUri: string,
-    rpcUri: string
-  ) {
+  constructor(nngUri: string, rpcUri: string) {
     // Module setup
     this.db = new Database()
     this.nngUri = nngUri
@@ -123,24 +123,36 @@ export class Indexer {
     this.queue = { busy: false, pending: [] }
     this.parts = {
       required: {
-        LOKAD: { offset: 2, len: 4, values: Object.values(RANK_SCRIPT_PARTS.LOKAD) },
-        SENTIMENT: { offset: 6, len: 1, values: Object.values(RANK_SCRIPT_PARTS.SENTIMENT) },
-        PLATFORM: { offset: 8, len: 1, values: Object.values(RANK_SCRIPT_PARTS.PLATFORM) },
+        LOKAD: {
+          offset: 2,
+          len: 4,
+          values: Object.values(RANK_SCRIPT_PARTS.LOKAD),
+        },
+        SENTIMENT: {
+          offset: 6,
+          len: 1,
+          values: Object.values(RANK_SCRIPT_PARTS.SENTIMENT),
+        },
+        PLATFORM: {
+          offset: 8,
+          len: 1,
+          values: Object.values(RANK_SCRIPT_PARTS.PLATFORM),
+        },
         PROFILE: { offset: 10, len: 16 }, // As long as it is 16 bytes it is good
       },
       optional: {
         POST: { offset: 26, len: 32 }, // sha256 hash of post metadata + body, if applicable
-        COMMENT: { offset: 58, len: 164 } // optional on-chain comment to accompany vote (223 bytes - 59 bytes)
-      }
+        COMMENT: { offset: 58, len: 164 }, // optional on-chain comment to accompany vote (223 bytes - 59 bytes)
+      },
     }
   }
   /**
-   * 
-   * @param data 
-   * @returns 
+   *
+   * @param data
+   * @returns
    */
   private toLogEntries(data: Block | RankTransaction): IndexerLogEntry[] {
-    return Object.entries(data).map(([ k, v ]) => [ k, String(v) ])
+    return Object.entries(data).map(([k, v]) => [k, String(v)])
   }
   /**
    * Perform all required operations to initialize the indexer and sync with lotusd
@@ -156,26 +168,25 @@ export class Indexer {
     await this.db.connect()
     log([
       ['init', 'database'],
-      ['status', 'connected']
+      ['status', 'connected'],
     ])
     // TODO: Need to actually detect NNG connectivity...
     try {
       this.rpc.connect(this.rpcUri)
       this.sub.connect(this.nngUri)
       if (!this.rpc.connected || !this.sub.connected) {
-        throw new Error(`NNG failed to connect. Make sure NNG is enabled in your lotus.conf and try again.`)
+        throw new Error(
+          `NNG failed to connect. Make sure NNG is enabled in your lotus.conf and try again.`,
+        )
       }
-    } catch (e: any) {
-      return this.close(
-        ERR.NNG_CONNECT,
-        e.message
-      )
+    } catch (e) {
+      return this.close(ERR.NNG_CONNECT, e.message)
     }
     log([
-      [ 'init', 'nng' ],
-      [ 'status', 'connected' ],
-      [ 'rpcUri', `"${this.rpcUri}"` ],
-      [ 'nngUri', `"${this.nngUri}"` ]
+      ['init', 'nng'],
+      ['status', 'connected'],
+      ['rpcUri', `"${this.rpcUri}"`],
+      ['nngUri', `"${this.nngUri}"`],
     ])
     /**
      *    Cleanup
@@ -184,68 +195,58 @@ export class Indexer {
       const t0 = performance.now()
       const mempooltxs = await this.db.getRankTransactionsByHeight(null)
       if (mempooltxs.length > 0) {
-        const t0 = performance.now()
         const profiles = this.toProfileMap(mempooltxs)
         await this.db.rewindProfiles(profiles)
         const t1 = (performance.now() - t0).toFixed(3)
         log([
-          [ 'init', 'cleanup' ],
-          [ 'txsLength', `${mempooltxs.length}` ],
-          [ 'action', 'rewindProfiles' ],
-          [ 'elapsed', `${t1}ms` ]
+          ['init', 'cleanup'],
+          ['txsLength', `${mempooltxs.length}`],
+          ['action', 'rewindProfiles'],
+          ['elapsed', `${t1}ms`],
         ])
       }
-    } catch (e: any) {
-      return this.close(
-        ERR.IDX_PROFILE_REWIND,
-        e.message
-      )
+    } catch (e) {
+      return this.close(ERR.IDX_PROFILE_REWIND, e.message)
     }
     /**
      *    Reconcile Checkpoint
      */
     try {
       // Get current checkpoint height/hash for init, otherwise start at genesis
-      const checkpoint = await this.db.getCheckpoint() ?? GENESIS_BLOCK_V1
+      const checkpoint =
+        (await this.db.getCheckpoint()) ?? (GENESIS_BLOCK_V1 as Block)
       this.checkpoint = await this.initReconcileBlockState(checkpoint)
-    } catch (e: any) {
-      return this.close(
-        ERR.IDX_BLOCKS_REWIND,
-        e.message
-      )
+    } catch (e) {
+      return this.close(ERR.IDX_BLOCKS_REWIND, e.message)
     }
     // Log our current checkpoint (i.e. best block)
-    log([
-      [ 'init', 'best' ],
-      ...this.toLogEntries(this.checkpoint)
-    ])
+    log([['init', 'best'], ...this.toLogEntries(this.checkpoint)])
     // Sync blocks
     try {
       await this.initSyncBlocks()
-    } catch (e: any) {
-      return this.close(
-        ERR.IDX_BLOCKS_SYNC,
-        e.message
-      )
+    } catch (e) {
+      return this.close(ERR.IDX_BLOCKS_SYNC, e.message)
     }
     // Sync mempool
     try {
       const ranks = await this.initSyncMempool()
       // Initialize the mempool queue with these RANK txs
       ranks.forEach(rank => this.mempool.set(rank.txid, rank))
-    } catch (e: any) {
-      return this.close(
-        ERR.IDX_MEMPOOL_SYNC,
-        e.message
-      )
+    } catch (e) {
+      return this.close(ERR.IDX_MEMPOOL_SYNC, e.message)
     }
     // Subscribe to required NNG channels
-    const channels = [ 'mempooltxadd', 'mempooltxrem', 'blkconnected', 'blkdisconctd']
+    const channels = [
+      'mempooltxadd',
+      'mempooltxrem',
+      'blkconnected',
+      'blkdisconctd',
+    ]
     this.sub.chan(channels)
     log([
-      [ 'init', 'nng' ],
-      [ 'status', 'subscribed' ],
-      [ 'channels', channels.join(',')]
+      ['init', 'nng'],
+      ['status', 'subscribed'],
+      ['channels', channels.join(',')],
     ])
   }
   /**
@@ -258,29 +259,27 @@ export class Indexer {
     // Return checkpoint if conditions do not require rewinding database state
     if (
       // checkpoint hash is best block tip at best height
-      checkpoint.hash == best.hash && best.height == checkpoint.height ||
+      (checkpoint.hash == best.hash && best.height == checkpoint.height) ||
       // checkpoint hash is previous best block tip and was extended by best block tip
-      checkpoint.hash == best.prevhash && best.height == (checkpoint.height + 1) ||
+      (checkpoint.hash == best.prevhash &&
+        best.height == checkpoint.height + 1) ||
       // best block tip is 2 blocks ahead
-      best.height > (checkpoint.height + 1)
+      best.height > checkpoint.height + 1
     ) {
       return checkpoint
     }
-    log([
-      [ 'init', 'newBest' ],
-      ...this.toLogEntries(best)
-    ])
+    log([['init', 'newBest'], ...this.toLogEntries(best)])
     // rewind backwards to match checkpoint height/hash to RPC
     for (let height = checkpoint.height; height > best.height; height--) {
       const t0 = performance.now()
       const txsLength = await this.rewindBlock(height)
       const t1 = (performance.now() - t0).toFixed(3)
       log([
-        [ 'init', 'reorg' ],
-        [ 'height', `${height}` ],
-        [ 'txsLength', `${txsLength}` ],
-        [ 'action', 'rewindBlock' ],
-        [ 'elapsed', `${t1}ms` ]
+        ['init', 'reorg'],
+        ['height', `${height}`],
+        ['txsLength', `${txsLength}`],
+        ['action', 'rewindBlock'],
+        ['elapsed', `${t1}ms`],
       ])
     }
     // Return the best block as new checkpoint
@@ -290,12 +289,16 @@ export class Indexer {
    * Synchronize database state with lotusd, starting from `this.checkpoint`
    */
   async initSyncBlocks() {
-    let totalBlocks = 0, totalRanks = 0
+    let totalBlocks = 0,
+      totalRanks = 0
     const t0 = performance.now()
     while (true) {
       const startHeight = this.checkpoint.height + 1
       const t0 = performance.now()
-      const blockrange = await this.rpcGetBlockRange(startHeight, NNG_RPC_BLOCKRANGE_SIZE)
+      const blockrange = await this.rpcGetBlockRange(
+        startHeight,
+        NNG_RPC_BLOCKRANGE_SIZE,
+      )
       const blocksLength = blockrange.blocksLength()
       // no blocks if we are now synced
       if (blocksLength < 1) {
@@ -303,17 +306,20 @@ export class Indexer {
       }
       // Save the blockrange we have
       let ranksLength: number
-      [ this.checkpoint, ranksLength ] = await this.saveBlockRange(blockrange, blocksLength)
+      ;[this.checkpoint, ranksLength] = await this.saveBlockRange(
+        blockrange,
+        blocksLength,
+      )
       totalBlocks += blocksLength
       totalRanks += ranksLength
       const t1 = (performance.now() - t0).toFixed(3)
       log([
-        [ 'init', 'syncBlocks' ],
-        [ 'status', 'running' ],
-        [ 'startHeight', `${startHeight}` ],
-        [ 'endHeight', `${this.checkpoint.height}` ],
-        [ `ranksLength`, `${ranksLength}` ],
-        [ 'elapsed', `${t1}ms` ]
+        ['init', 'syncBlocks'],
+        ['status', 'running'],
+        ['startHeight', `${startHeight}`],
+        ['endHeight', `${this.checkpoint.height}`],
+        [`ranksLength`, `${ranksLength}`],
+        ['elapsed', `${t1}ms`],
       ])
       // If we didn't sync full block range, we are now synced
       if (blocksLength < NNG_RPC_BLOCKRANGE_SIZE) {
@@ -322,11 +328,11 @@ export class Indexer {
     }
     const t1 = ((performance.now() - t0) / 1000).toFixed(3)
     log([
-      [ 'init', 'syncBlocks' ],
-      [ 'status', 'finished' ],
-      [ 'totalBlocks', `${totalBlocks}` ],
-      [ 'totalRanks', `${totalRanks}` ],
-      [ 'elapsed', `${t1}s` ]
+      ['init', 'syncBlocks'],
+      ['status', 'finished'],
+      ['totalBlocks', `${totalBlocks}`],
+      ['totalRanks', `${totalRanks}`],
+      ['elapsed', `${t1}s`],
     ])
   }
   /**
@@ -334,10 +340,10 @@ export class Indexer {
    */
   async initSyncMempool() {
     const t0 = performance.now()
-    const entries: IndexerLogEntry[] = [[ 'init', 'syncMempool' ]]
+    const entries: IndexerLogEntry[] = [['init', 'syncMempool']]
     const mempool = await this.rpcGetMempool()
     const txsLength = mempool.txsLength()
-    entries.push([ 'txsLength', `${txsLength}` ])
+    entries.push(['txsLength', `${txsLength}`])
     let ranks: RankTransaction[] = []
     if (txsLength > 0) {
       ranks = this.processBlockOrMempool(mempool)
@@ -346,9 +352,9 @@ export class Indexer {
         await this.db.upsertProfiles(profiles)
         const t1 = (performance.now() - t0).toFixed(3)
         entries.push(
-          [ 'ranksLength', `${ranks.length}` ],
-          [ 'action', 'upsertProfiles' ],
-          [ 'elapsed', `${t1}ms` ]
+          ['ranksLength', `${ranks.length}`],
+          ['action', 'upsertProfiles'],
+          ['elapsed', `${t1}ms`],
         )
       }
     }
@@ -361,10 +367,7 @@ export class Indexer {
    * @param exitCode Process signal as `string` or `(enum) ERR` value if fatal error
    * @param exitError Debug string if fatal error
    */
-  async close(
-    exitCode: number | string,
-    exitError?: string
-  ): Promise<void> {
+  async close(exitCode: number | string, exitError?: string): Promise<void> {
     // ignore shutdown() number since we're exiting anyway
     this.sub?.shutdown(this.nngUri)
     this.sub?.close()
@@ -373,19 +376,19 @@ export class Indexer {
     await this.db?.disconnect()
     if (exitError?.length) {
       log([
-        [ 'shutdown', 'fatal' ],
-        [ 'error', `${ERR[exitCode]}` ],
-        [ `code`, `${exitCode}` ],
-        [ `debug`, `${exitError}` ]
+        ['shutdown', 'fatal'],
+        ['error', `${ERR[exitCode]}`],
+        [`code`, `${exitCode}`],
+        [`debug`, `${exitError}`],
       ])
     } else {
       log([
-        [ 'shutdown', 'clean' ],
-        [ 'signal', `${exitCode}` ],
+        ['shutdown', 'clean'],
+        ['signal', `${exitCode}`],
       ])
     }
     // Next time the check queue is processed, we will exit
-    // SIGINT or SIGTERM are clean shutdowns; if exitCode == string then exitCode == 0
+    // SIGINT/SIGTERM are clean shutdowns; if exitCode == string then exitCode == 0
     setImmediate(() => process.exit(typeof exitCode == 'string' ? 0 : exitCode))
   }
   /**
@@ -410,7 +413,7 @@ export class Indexer {
       // Get the prevblock from database and recurse
       const prevblock = await this.db.getBlockByHeight(checkpoint.height - 1)
       return this.getBestBlock(prevblock)
-    } catch (e: any) {
+    } catch (e) {
       throw new Error(`getBestBlock(${typeof checkpoint}): ${e.message}`)
     }
   }
@@ -423,8 +426,8 @@ export class Indexer {
    */
   private async saveBlockRange(
     blockrange: NNG.GetBlockRangeResponse,
-    blocksLength: number
-  ): Promise<[ Block, number ]> {
+    blocksLength: number,
+  ): Promise<[Block, number]> {
     const blocks: Block[] = []
     const ranks: RankTransaction[] = []
     for (let i = 0; i < blocksLength; i++) {
@@ -442,28 +445,30 @@ export class Indexer {
         // Saving these for later
         blocks.push({ ...checkpoint, ranksLength: result.length })
         ranks.push(...result)
-      } catch (e: any) {
-        throw new Error(`saveBlockRange(${typeof blockrange}, ${blocksLength}): ${e.message}`)
+      } catch (e) {
+        throw new Error(
+          `saveBlockRange(${typeof blockrange}, ${blocksLength}): ${e.message}`,
+        )
       }
     }
     // Save blocks and Profile upserts in one atomic database transaction
     const profiles = this.toProfileMap(ranks)
     try {
       await this.db.saveBlockRange(blocks, profiles)
-    } catch (e: any) {
-      throw new Error(`db.saveBlockRange(${typeof blocks}, ${typeof profiles}): ${e.message}`)
+    } catch (e) {
+      throw new Error(
+        `db.saveBlockRange(${typeof blocks}, ${typeof profiles}): ${e.message}`,
+      )
     }
     // Return the latest block as the new checkpoint block
-    return [ blocks.pop(), ranks.length ]
+    return [blocks.pop(), ranks.length]
   }
   /**
    * Rewind the database state created at `height`
    * @param height `height` parsed from `NNG.BlockHeader`
    * @returns Number of `RankTransaction`s removed from database
    */
-  private async rewindBlock(
-    height: number
-  ): Promise<number> {
+  private async rewindBlock(height: number): Promise<number> {
     try {
       const ranks = await this.db.getRankTransactionsByHeight(height)
       const profiles = this.toProfileMap(ranks)
@@ -471,13 +476,13 @@ export class Indexer {
       // Rewind profile states accordingly and delete block
       await this.db.deleteBlockByHeight(height)
       return ranks.length
-    } catch (e: any) {
+    } catch (e) {
       throw new Error(`rewindBlock(${height}: ${e.message}`)
     }
   }
   /**
    * Process the oldest `NNGPendingMessageProcessor` in the queue
-   * @param recursing 
+   * @param recursing
    * @returns {Promise<void>}
    */
   private nngProcessMessage = async (recursing = false): Promise<void> => {
@@ -489,13 +494,10 @@ export class Indexer {
     // Exclusive attention to the next-in-line (i.e. oldest) queued handler
     this.queue.busy = true
     try {
-      const [ NNGMessageProcessor, ByteBuffer ] = this.queue.pending.shift()
+      const [NNGMessageProcessor, ByteBuffer] = this.queue.pending.shift()
       await NNGMessageProcessor(ByteBuffer)
-    } catch (e: any) {
-      return await this.close(
-        ERR.NNG_PROCESS_MESSAGE,
-        e.message
-      )
+    } catch (e) {
+      return await this.close(ERR.NNG_PROCESS_MESSAGE, e.message)
     }
     // Recursively process queue if necessary
     if (this.queue.pending.length > 0) {
@@ -516,16 +518,16 @@ export class Indexer {
     // Add the appropriate message handler to the back of the processing queue
     switch (msgType) {
       case 'mempooltxadd':
-        this.queue.pending.push([ this.nngMempoolTxAdd, bb ])
+        this.queue.pending.push([this.nngMempoolTxAdd, bb])
         break
       case 'mempooltxrem': // tx removed from mempool due to conflict, reorg, etc.
-        this.queue.pending.push([ this.nngMempoolTxRemove, bb ])
+        this.queue.pending.push([this.nngMempoolTxRemove, bb])
         break
       case 'blkconnected':
-        this.queue.pending.push([ this.nngBlockConnected, bb ])
+        this.queue.pending.push([this.nngBlockConnected, bb])
         break
       case 'blkdisconctd':
-        this.queue.pending.push([ this.nngBlockDisconnected, bb ])
+        this.queue.pending.push([this.nngBlockDisconnected, bb])
         break
     }
     // Set immediate processing of the message queue
@@ -536,11 +538,14 @@ export class Indexer {
    * @param bb `ByteBuffer` data published by lotusd
    * @returns {Promise<void>}
    */
-  private nngMempoolTxAdd: NNGMessageProcessor = async (bb: ByteBuffer): Promise<void> => {
+  private nngMempoolTxAdd: NNGMessageProcessor = async (
+    bb: ByteBuffer,
+  ): Promise<void> => {
     const t0 = performance.now()
-    const mempooltx = NNG.TransactionAddedToMempool
-      .getRootAsTransactionAddedToMempool(bb)
-      .mempoolTx()
+    const mempooltx =
+      NNG.TransactionAddedToMempool.getRootAsTransactionAddedToMempool(
+        bb,
+      ).mempoolTx()
     const txRawArray = mempooltx.tx().rawArray()
     const tx = new Transaction(Buffer.from(txRawArray))
     const rank = this.toRankTransaction(tx)
@@ -551,10 +556,10 @@ export class Indexer {
       // Keep this RANK tx to reconcile with next block
       this.mempool.set(rank.txid, rank)
       log([
-        [ 'nng', 'mempooltxadd' ],
+        ['nng', 'mempooltxadd'],
         ...this.toLogEntries(rank),
-        [ 'action', 'upsertProfiles' ],
-        [ 'elapsed', `${t1}ms` ]
+        ['action', 'upsertProfiles'],
+        ['elapsed', `${t1}ms`],
       ])
     }
   }
@@ -563,10 +568,14 @@ export class Indexer {
    * @param bb `ByteBuffer` data published by lotusd
    * @returns {Promise<void>}
    */
-  private nngMempoolTxRemove: NNGMessageProcessor = async (bb: ByteBuffer): Promise<void> => {
+  private nngMempoolTxRemove: NNGMessageProcessor = async (
+    bb: ByteBuffer,
+  ): Promise<void> => {
     const t0 = performance.now()
-    const tx = NNG.TransactionRemovedFromMempool
-      .getRootAsTransactionRemovedFromMempool(bb)
+    const tx =
+      NNG.TransactionRemovedFromMempool.getRootAsTransactionRemovedFromMempool(
+        bb,
+      )
     const txid = this.toBlockhashOrTxid(tx.txid().hash())
     // Get the RANK tx from in-memory mempool cache
     const rank = this.mempool.get(txid)
@@ -580,10 +589,10 @@ export class Indexer {
       this.mempool.delete(txid)
       // Log the result
       log([
-        [ 'nng', 'mempooltxrem' ],
+        ['nng', 'mempooltxrem'],
         ...this.toLogEntries(rank),
-        [ 'action', 'rewindProfiles' ],
-        [ 'elapsed', `${t1}ms` ]
+        ['action', 'rewindProfiles'],
+        ['elapsed', `${t1}ms`],
       ])
     }
   }
@@ -592,10 +601,11 @@ export class Indexer {
    * @param bb `ByteBuffer` data published by lotusd
    * @returns {Promise<void>}
    */
-  private nngBlockConnected: NNGMessageProcessor = async (bb: ByteBuffer): Promise<void> => {
-    const entries: IndexerLogEntry[] = [[ 'nng', 'blkconnected' ]]
+  private nngBlockConnected: NNGMessageProcessor = async (
+    bb: ByteBuffer,
+  ): Promise<void> => {
+    const entries: IndexerLogEntry[] = [['nng', 'blkconnected']]
     const t0 = performance.now()
-    //let log = 'NNG: blkconnected: '
     const connectedBlock = NNG.BlockConnected.getRootAsBlockConnected(bb)
     // Get the NNG block and convert header to database `Block` entry
     const block = connectedBlock.block()
@@ -604,16 +614,17 @@ export class Indexer {
     const ranks = this.processBlockOrMempool(block)
     best.ranksLength = ranks.length
     entries.push(...this.toLogEntries(best))
-    // Prepare Profiles array in case any RANK txs need to be upserted
+    // Prepare ProfileMap in case any RANK txs need to be upserted
     let profiles: ReturnType<typeof this.toProfileMap> = new Map()
-    let txids: Pick<RankTransaction, 'txid'>[] = []
+    const rankTxids: Pick<RankTransaction, 'txid'>[] = []
     if (ranks.length > 0) {
       // Find any RANK txs that were missing from mempool cache (i.e. not already upserted)
       const missing = ranks.filter(rank => {
         // If mempool has RANK tx from block then it can be removed
         if (this.mempool.has(rank.txid)) {
           // save this txid for database connect statement
-          txids.push({ txid: rank.txid })
+          rankTxids.push({ txid: rank.txid })
+          // Mempool no longer contains this RANK tx
           this.mempool.delete(rank.txid)
           return false
         }
@@ -623,14 +634,12 @@ export class Indexer {
       // Convert missing RANK txs to profiles for upsert
       if (missing.length > 0) {
         profiles = this.toProfileMap(missing)
-        entries.push([ 'upserted', `${missing.length}` ])
       }
-      entries.push([ 'confirmed', `${txids.length}` ])
     }
     // Save latest checkpoint plus any missing RANK txs
-    await this.db.saveBlock(best, txids, profiles)
+    await this.db.saveBlock(best, rankTxids, profiles)
     const t1 = (performance.now() - t0).toFixed(3)
-    entries.push([ 'elapsed', `${t1}ms` ])
+    entries.push(['elapsed', `${t1}ms`])
     // TODO: we may need to add some additional state checks here, but maybe not
 
     // Update checkpoint to this block
@@ -643,10 +652,13 @@ export class Indexer {
    * @param bb `ByteBuffer` data published by lotusd
    * @returns {Promise<void>}
    */
-  private nngBlockDisconnected: NNGMessageProcessor = async (bb: ByteBuffer): Promise<void> => {
+  private nngBlockDisconnected: NNGMessageProcessor = async (
+    bb: ByteBuffer,
+  ): Promise<void> => {
     const t0 = performance.now()
     // Set up disconnected block for comparison to current best (checkpoint)
-    const disconnectedBlock = NNG.BlockDisconnected.getRootAsBlockDisconnected(bb).block()
+    const disconnectedBlock =
+      NNG.BlockDisconnected.getRootAsBlockDisconnected(bb).block()
     const block = this.toBlock(disconnectedBlock.header(), true)
     // Rewind the current block
     const txsLength = await this.rewindBlock(block.height)
@@ -655,55 +667,67 @@ export class Indexer {
     this.checkpoint = await this.db.getCheckpoint()
     // Log the result
     log([
-      [ 'nng', 'blkdisconctd' ],
+      ['nng', 'blkdisconctd'],
       ...this.toLogEntries(block),
-      [ 'txsLength', `${txsLength}` ],
-      [ 'action', 'rewindBlock' ],
-      [ 'elapsed', `${t1}ms` ]
+      ['txsLength', `${txsLength}`],
+      ['action', 'rewindBlock'],
+      ['elapsed', `${t1}ms`],
     ])
   }
   /**
    * Send RPC command to lotusd over NNG interface (`this.rpc`)
-   * @param param0 Object containing `rpcType` property and optional object for specific request type
-   * @returns {Promise<ByteBuffer>} The parsed `ByteBuffer` response for the specific RPC call, processed in other methods
+   * @param rpcType Valid RPC request string, e.g. `GetMempoolRequest`
+   * @param params Object containing data required to build `NNG.RpcRequest` for provided `rpcType`, if applicable
+   * @returns {Promise<ByteBuffer>} `NNG.RpcResult` converted to `ByteBuffer`
    */
   private async rpcCall(
     rpcType: keyof typeof NNG.RpcRequest,
     params?: {
-      blockRangeRequest?: { startHeight: number, numBlocks: number },
-      blockRequest?: { height: number },
-    }
+      blockRangeRequest?: { startHeight: number; numBlocks: number }
+      blockRequest?: { height: number }
+    },
   ): Promise<ByteBuffer> {
     // Set up builder and get proper flatbuffer offset for rpcType
     const builder = new Builder()
     let offset: number
     switch (rpcType) {
-      case "GetMempoolRequest":
+      case 'GetMempoolRequest':
         offset = NNG.GetMempoolRequest.createGetMempoolRequest(builder)
         break
-      case "GetBlockRangeRequest":
-        const { startHeight, numBlocks } = params.blockRangeRequest
-        offset = NNG.GetBlockRangeRequest.createGetBlockRangeRequest(builder, startHeight, numBlocks)
-        break
-      case "GetBlockRequest":
-        const { height } = params.blockRequest
-        offset = NNG.GetBlockRequest.createGetBlockRequest(builder, NNG.BlockIdentifier.Height,
-          NNG.BlockHeight.createBlockHeight(builder, height)
+      case 'GetBlockRangeRequest':
+        offset = NNG.GetBlockRangeRequest.createGetBlockRangeRequest(
+          builder,
+          params.blockRangeRequest.startHeight,
+          params.blockRangeRequest.numBlocks,
         )
         break
-      // malformed call
-      default:
-        return
+      case 'GetBlockRequest':
+        offset = NNG.GetBlockRequest.createGetBlockRequest(
+          builder,
+          NNG.BlockIdentifier.Height,
+          NNG.BlockHeight.createBlockHeight(
+            builder,
+            params.blockRequest.height,
+          ),
+        )
+        break
     }
-    const rpcCall = NNG.RpcCall.createRpcCall(builder, NNG.RpcRequest[rpcType], offset)
+    const rpcCall = NNG.RpcCall.createRpcCall(
+      builder,
+      NNG.RpcRequest[rpcType],
+      offset,
+    )
     builder.finish(rpcCall)
     // Wrap the event listener and `rpc.send()` in a Promise to await response
-    // Promise is resolved via `.once()` event after lotusd responds 
-    // Then we can parse the blocks for RANK transactions
-    const bb = <ByteBuffer> await new Promise((resolve, reject) => {
+    // Promise is resolved via `.once()` event after lotusd responds
+    // Then we can process the response data accordingly
+    const bb = <ByteBuffer>await new Promise((resolve, reject) => {
       const rpcSocketSendTimeout = setTimeout(
-        () => reject(`rpcCall(${rpcType}, ${typeof params}): Socket.send() timeout reached (${NNG_REQUEST_TIMEOUT_LENGTH}ms)`),
-        NNG_REQUEST_TIMEOUT_LENGTH
+        () =>
+          reject(
+            `rpcCall(${rpcType}, ${typeof params}): Socket timeout (${NNG_REQUEST_TIMEOUT_LENGTH}ms)`,
+          ),
+        NNG_REQUEST_TIMEOUT_LENGTH,
       )
       // set up response listener before sending request; avoids race condition
       this.rpc.once('data', (buf: Buffer) => {
@@ -720,7 +744,9 @@ export class Indexer {
           return null
         // what's happening
         default:
-          throw new Error(`rpcCall(${rpcType}, ${typeof params}): ${result.errorMsg()} (code: ${result.errorCode()})`)
+          throw new Error(
+            `rpcCall(${rpcType}, ${typeof params}): ${result.errorMsg()} (code: ${result.errorCode()})`,
+          )
       }
     }
     return new ByteBuffer(result.dataArray())
@@ -732,9 +758,13 @@ export class Indexer {
    */
   private async rpcGetBlock(height: number): Promise<NNG.Block> {
     try {
-      const bb = await this.rpcCall('GetBlockRequest', { blockRequest: { height }})
-      return bb?.bytes()?.length ? NNG.GetBlockResponse.getRootAsGetBlockResponse(bb).block() : null
-    } catch (e: any) {
+      const bb = await this.rpcCall('GetBlockRequest', {
+        blockRequest: { height },
+      })
+      return bb?.bytes()?.length
+        ? NNG.GetBlockResponse.getRootAsGetBlockResponse(bb).block()
+        : null
+    } catch (e) {
       throw new Error(`rpcGetBlock(${height}): ${e.message}`)
     }
   }
@@ -746,7 +776,7 @@ export class Indexer {
     try {
       const bb = await this.rpcCall('GetMempoolRequest')
       return NNG.GetMempoolResponse.getRootAsGetMempoolResponse(bb)
-    } catch (e: any) {
+    } catch (e) {
       throw new Error(`rpcGetMempool(): ${e.message}`)
     }
   }
@@ -758,21 +788,23 @@ export class Indexer {
    */
   private async rpcGetBlockRange(
     startHeight: number,
-    numBlocks: number
+    numBlocks: number,
   ): Promise<NNG.GetBlockRangeResponse> {
     try {
       const bb = await this.rpcCall('GetBlockRangeRequest', {
-        blockRangeRequest: { startHeight, numBlocks }
+        blockRangeRequest: { startHeight, numBlocks },
       })
       return NNG.GetBlockRangeResponse.getRootAsGetBlockRangeResponse(bb)
-    } catch (e: any) {
-      throw new Error(`rpcGetBlockRange(${startHeight}, ${numBlocks}): ${e.message}`)
+    } catch (e) {
+      throw new Error(
+        `rpcGetBlockRange(${startHeight}, ${numBlocks}): ${e.message}`,
+      )
     }
   }
   /**
-   * 
+   *
    * @param data
-   * @returns 
+   * @returns
    */
   private processBlockOrMempool(data: NNG.Block | NNG.GetMempoolResponse) {
     const ranks: RankTransaction[] = []
@@ -789,7 +821,7 @@ export class Indexer {
         if (rank) {
           ranks.push(rank)
         }
-      } catch (e: any) {
+      } catch (e) {
         throw new Error(`processBlockOrMempool(${typeof data}): ${e.message}`)
       }
     }
@@ -803,14 +835,14 @@ export class Indexer {
    */
   private toRankTransaction(
     tx: Transaction,
-    block: Block = null
+    block: Block = null,
   ): RankTransaction {
     const outputs = this.processTransactionOutputs(tx.outputs)
     if (outputs.length > 0) {
       const rank: RankTransaction = {
         txid: tx.txid,
         timestamp: block?.timestamp ?? BigInt(Date.now()),
-        ...outputs.shift() // Only first output has RankTransaction data
+        ...outputs.shift(), // Only first output has RankTransaction data
       }
       // Add height if tx is confirmed
       if (block?.height) {
@@ -826,7 +858,7 @@ export class Indexer {
    * @returns {RankOutputs[]} Array of `RankTransaction` objects
    */
   private processTransactionOutputs(
-    outputs: Transaction.Output[]
+    outputs: Transaction.Output[],
   ): RankOutput[] {
     const ranks: RankOutput[] = []
     try {
@@ -840,8 +872,10 @@ export class Indexer {
       }
       // tx may not have change output; return all RANK outputs we found
       return ranks
-    } catch (e: any) {
-      throw new Error(`processTransactionOutputs(${typeof outputs}): ${e.message}`)
+    } catch (e) {
+      throw new Error(
+        `processTransactionOutputs(${typeof outputs}): ${e.message}`,
+      )
     }
   }
   /**
@@ -849,9 +883,7 @@ export class Indexer {
    * @param script Bitcore `Script`
    * @returns {false | Buffer}
    */
-  private isRankScript(
-    script: Script
-  ): false | Buffer {
+  private isRankScript(script: Script): false | Buffer {
     // we only care about OP_RETURN outputs
     if (!script.isDataOut()) {
       return false
@@ -859,16 +891,16 @@ export class Indexer {
     const scriptBuf = script.toBuffer()
     // make sure the script has all required bytes
     if (scriptBuf.length < RANK_SCRIPT_MIN_BYTE_LENGTH) {
-      return false;
+      return false
     }
-    // validate all required RANK parameters
+    // validate all required parameters for RANK script parts
     for (const part of Object.values(this.parts.required)) {
-      const hex = this.getScriptPartHex(part, scriptBuf)
+      const hex = this.getScriptPart(part, scriptBuf, 'hex')
       if (
-        // script part value is valid, if applicable
-        (part.values && !part.values.includes(hex))
-        // script part length meets requirement
-        || Buffer.from(hex, 'hex').length != part.len
+        // script part value is invalid, if applicable
+        (part.values && !part.values.includes(hex)) ||
+        // script part byte length does not meet requirement
+        Buffer.from(hex, 'hex').length != part.len
       ) {
         return false
       }
@@ -877,32 +909,31 @@ export class Indexer {
     return scriptBuf
   }
   /**
-   * Parse the provided `scriptBuf` for the ScriptPart hex data
+   * Parse the provided `scriptBuf` for the ScriptPart data, encoded as hex or UTF-8
    * @param part {ScriptPart} The ScriptPart for which to parse
-   * @param scriptBuf {Buffer} The script buffer (`OP_RETURN` only)
+   * @param scriptBuf {Buffer} The script buffer (`OP_RETURN` output only)
    * @returns {string}
    */
-  private getScriptPartHex(
+  private getScriptPart(
     part: ScriptPart,
-    scriptBuf: Buffer
+    scriptBuf: Buffer,
+    encoding: 'utf-8' | 'hex',
   ): string {
     return scriptBuf
-      .subarray(part.offset, (part.offset + part.len))
-      .toString('hex')
+      .subarray(part.offset, part.offset + part.len)
+      .toString(encoding)
   }
   /**
-   * Convert raw `Transaction.Output` to RANK output 
+   * Convert raw `Transaction.Output` to RANK output
    * @param output Transaction output in Bitcore-compatible format
    * @returns {RankOutput}
    */
-  private toRankOutput(
-    output: Transaction.Output
-  ): RankOutput {
+  private toRankOutput(output: Transaction.Output): RankOutput {
     const parts = this.parts.required
     const scriptBuf = output.script.toBuffer()
-    const value = BigInt(output.satoshis)
-    const sentiment = Boolean(Number(this.getScriptPartHex(parts.SENTIMENT, scriptBuf)))
-    const platform = this.getScriptPartHex(parts.PLATFORM, scriptBuf)
+    const platform = this.getScriptPart(parts.PLATFORM, scriptBuf, 'hex')
+    const profileId = this.getScriptPart(parts.PROFILE, scriptBuf, 'hex')
+    const sentiment = this.getScriptPart(parts.SENTIMENT, scriptBuf, 'hex')
     const sats = BigInt(output.satoshis)
     return { platform, profileId, sats, sentiment }
   }
@@ -935,10 +966,10 @@ export class Indexer {
     return Buffer.from(nHeight).readUInt32LE()
   }
   /**
-   * 
-   * @param header 
-   * @param includePrevHash 
-   * @returns 
+   *
+   * @param header
+   * @param includePrevHash
+   * @returns
    */
   private toBlock(header: NNG.BlockHeader, includePrevhash = false): Block {
     try {
@@ -950,7 +981,7 @@ export class Indexer {
         block.prevhash = this.toBlockhashOrTxid(header.prevBlockHash().hash())
       }
       return block
-    } catch (e: any) {
+    } catch (e) {
       throw new Error(`toBlock(${header}, ${includePrevhash}): ${e.message}`)
     }
   }
@@ -963,8 +994,8 @@ export class Indexer {
     const map: ProfileMap = new Map()
     // Sort the RANK txs for upsert
     ranks.forEach(rank => {
-      const { profileId, platform, ...partialRank } = rank
-      const profile = map.get(profileId)
+      const { profileId: id, platform, ...partialRank } = rank
+      const profile = map.get(id)
       if (profile) {
         profile.ranks.push(partialRank)
         if (rank.sentiment) {
@@ -977,8 +1008,8 @@ export class Indexer {
         return
       }
       map.set(rank.profileId, {
-        id: rank.profileId,
-        platform: rank.platform,
+        id,
+        platform,
         ranks: [partialRank],
         ranking: rank.sentiment ? rank.sats : -rank.sats,
         votesPositive: rank.sentiment ? 1 : 0,

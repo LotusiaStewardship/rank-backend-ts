@@ -1,5 +1,5 @@
-import { Indexer } from "./lib/indexer";
-import { NNG_PUB_URL, NNG_RPC_URL } from "./util/constants";
+import { Indexer } from './lib/indexer'
+import { NNG_PUB_URL, NNG_RPC_URL } from './util/constants'
 /**
  * RUNTIME
  */
