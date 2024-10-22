@@ -8,3 +8,5 @@ migrations/
 test*
 # generated .js files
 *.js
+# Keep all in local_modules
+!local_modules/**/*
