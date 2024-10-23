@@ -1,10 +1,8 @@
 /**
  * NNG configuration
  */
-export const NNG_RPC_URL = 'ipc:///home/matthew/.lotus/rpc.pipe'
-//export const NNG_RPC_URL = 'tcp://172.16.2.20:10634'
-export const NNG_PUB_URL = 'ipc:///home/matthew/.lotus/pub.pipe'
-//export const NNG_PUB_URL = 'tcp://172.16.2.20:10633'
+export const NNG_PUB_DEFAULT_SOCKET_PATH = '~/.lotus/pub.pipe'
+export const NNG_RPC_DEFAULT_SOCKET_PATH = '~/.lotus/rpc.pipe'
 export const NNG_RPC_RCVMAXSIZE_CONSENSUS = 2097152
 export const NNG_RPC_BLOCKRANGE_SIZE = 20
 export const NNG_SOCKET_RECONN = 300 // time (ms) between reconnect attempts
