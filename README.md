@@ -1,5 +1,7 @@
 # RANK Transaction Indexer – v0.1.0
 
+### **Tested on openSUSE Tumbleweed x86_64 with NodeJS 20.18.0+**
+
 `rank-indexer-ts` connects to the Lotus blockchain daemon using NNG (via npm `nanomsg` library) in order to index all transactions containing a valid RANK output. RANK outputs are indexed into a PostgreSQL database. Retrieving records from this database is made possible by [`rank-api-ts`](https://github.com/LotusiaStewardship/rank-api-ts). More information on the entire RANK suite and protocol can be found in the [`rank-suite`](https://github.com/LotusiaStewardship/rank-suite) repository.
 
 `rank-indexer-ts` is *fast*. Benchmarks performed on moderate hardware show a transaction processing rate of over 9,000 RANK tx/s during initial sync. During runtime, the indexer will queue NNG messages and process them in the order they were received, ensuring the state of the index remains intact.
@@ -14,13 +16,7 @@ As of v0.1.0, `rank-indexer-ts` is considered **stable** and **performant**. Imp
 - Clone `rank-indexer-ts` repo:
 
     ```
-    git clone https://github.com/LotusiaStewardship/rank-indexer-ts.git
-    ```
-
-- Install `node-gyp` globally:
-
-    ```
-    sudo npm install --global node-gyp
+    git clone --recurse-submodules https://github.com/LotusiaStewardship/rank-indexer-ts.git
     ```
 
 ### PostgreSQL - Linux
@@ -77,7 +73,7 @@ As of v0.1.0, `rank-indexer-ts` is considered **stable** and **performant**. Imp
     npx prisma db push
     ```
 
-    **OPTIONAL**: Clean install to remove dev dependencies (`omit=dev` is defined in `.npmrc`):
+4. Clean install to remove dev dependencies (`omit=dev` is defined in `.npmrc`):
 
     ```
     npm clean-install
