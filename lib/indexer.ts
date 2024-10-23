@@ -1,5 +1,6 @@
 import { Script, Transaction } from '@abcpros/bitcore-lib-xpi'
 import { Builder, ByteBuffer } from 'flatbuffers'
+import { isIP } from 'validator'
 import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
 import Database from './database'
@@ -12,8 +13,11 @@ import {
   NNG_SOCKET_MAXRECONN,
   NNG_SOCKET_RECONN,
   ERR,
+  NNG_PUB_DEFAULT_SOCKET_PATH,
+  NNG_RPC_DEFAULT_SOCKET_PATH
 } from '../util/constants'
 import { IndexerLogEntry, log } from '../util'
+import { resolve } from 'node:path/posix'
 /** NNG types */
 type NNGMessageType =
   | 'mempooltxadd'
@@ -79,9 +83,9 @@ const GENESIS_BLOCK_V1: Partial<Block> = {
 /** Signal to would-be promises that they should think twice before resolving */
 export class Indexer {
   private db: Database
-  private sub: Socket
+  private pub: Socket
   private rpc: Socket
-  private nngUri: string
+  private pubUri: string
   private rpcUri: string
   private mempool: MempoolCache
   private queue: NNGQueue
@@ -97,21 +101,43 @@ export class Indexer {
   private checkpoint: Block
   /**
    *
-   * @param nngUri
+   * @param pubUri
    * @param rpcUri
    */
-  constructor(nngUri: string, rpcUri: string) {
+  constructor(protocol?: 'ipc' | 'tcp', pubUri?: string, rpcUri?: string) {
+    // Validate NNG parameters
+    switch (protocol) {
+      case 'ipc':
+        this.pubUri = `ipc://${resolve(pubUri)}`
+        this.rpcUri = `ipc://${resolve(rpcUri)}`
+        break
+      case 'tcp':
+        let invalidIP: string = null
+        if (!isIP(pubUri)) {
+          invalidIP = pubUri
+        }
+        if (!isIP(rpcUri)) {
+          invalidIP = rpcUri
+        }
+        if (invalidIP) {
+          throw new Error(`protocol tcp expects valid IP address, got "${invalidIP}"`)
+        }
+        this.pubUri = `tcp://${pubUri}`
+        this.rpcUri = `tcp://${rpcUri}`
+        break
+      default:
+        this.pubUri = `ipc://${resolve(NNG_PUB_DEFAULT_SOCKET_PATH)}`
+        this.rpcUri = `ipc://${resolve(NNG_RPC_DEFAULT_SOCKET_PATH)}`
+    }
     // Module setup
     this.db = new Database()
-    this.nngUri = nngUri
-    this.rpcUri = rpcUri
     // Pub/Sub socket setup
-    this.sub = socket('sub', { chan: [] })
-    this.sub.on('error', this.close)
-    this.sub.on('data', this.nngReceiveMessage)
-    this.sub.rcvmaxsize(NNG_RPC_RCVMAXSIZE_CONSENSUS)
-    this.sub.reconn(NNG_SOCKET_RECONN)
-    this.sub.maxreconn(NNG_SOCKET_MAXRECONN)
+    this.pub = socket('sub', { chan: [] })
+    this.pub.on('error', this.close)
+    this.pub.on('data', this.nngReceiveMessage)
+    this.pub.rcvmaxsize(NNG_RPC_RCVMAXSIZE_CONSENSUS)
+    this.pub.reconn(NNG_SOCKET_RECONN)
+    this.pub.maxreconn(NNG_SOCKET_MAXRECONN)
     // RPC socket setup
     this.rpc = socket('req')
     this.rpc.on('error', this.close)
@@ -173,8 +199,8 @@ export class Indexer {
     // TODO: Need to actually detect NNG connectivity...
     try {
       this.rpc.connect(this.rpcUri)
-      this.sub.connect(this.nngUri)
-      if (!this.rpc.connected || !this.sub.connected) {
+      this.pub.connect(this.pubUri)
+      if (!this.rpc.connected || !this.pub.connected) {
         throw new Error(
           `NNG failed to connect. Make sure NNG is enabled in your lotus.conf and try again.`,
         )
@@ -186,7 +212,7 @@ export class Indexer {
       ['init', 'nng'],
       ['status', 'connected'],
       ['rpcUri', `"${this.rpcUri}"`],
-      ['nngUri', `"${this.nngUri}"`],
+      ['pubUri', `"${this.pubUri}"`],
     ])
     /**
      *    Cleanup
@@ -242,7 +268,7 @@ export class Indexer {
       'blkconnected',
       'blkdisconctd',
     ]
-    this.sub.chan(channels)
+    this.pub.chan(channels)
     log([
       ['init', 'nng'],
       ['status', 'subscribed'],
@@ -369,8 +395,8 @@ export class Indexer {
    */
   async close(exitCode: number | string, exitError?: string): Promise<void> {
     // ignore shutdown() number since we're exiting anyway
-    this.sub?.shutdown(this.nngUri)
-    this.sub?.close()
+    this.pub?.shutdown(this.pubUri)
+    this.pub?.close()
     this.rpc?.shutdown(this.rpcUri)
     this.rpc?.close()
     await this.db?.disconnect()

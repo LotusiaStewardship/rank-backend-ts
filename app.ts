@@ -1,7 +1,10 @@
 import { Indexer } from './lib/indexer'
-import { NNG_PUB_URL, NNG_RPC_URL } from './util/constants'
 /**
  * RUNTIME
  */
-const indexer = new Indexer(NNG_PUB_URL, NNG_RPC_URL)
+const indexer = new Indexer(
+  String(process.argv[2]) as 'ipc' | 'tcp', // protocol
+  String(process.argv[3]), // pub.pipe
+  String(process.argv[4]), // rpc.pipe
+)
 indexer.init()
