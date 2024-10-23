@@ -1,6 +1,6 @@
 {
   "name": "@lotusia/rank-indexer-ts",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Core indexer for rank-suite",
   "main": "app.js",
   "scripts": {
