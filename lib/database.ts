@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client'
 import { randomUUID } from 'crypto'
-import { Block, RankTransaction, Profile, ProfileMap } from './indexer'
+import type { Block, RankTransaction, Profile, ProfileMap } from './indexer'
 
 export default class Database {
   private db: PrismaClient
@@ -156,7 +156,9 @@ export default class Database {
         ...this.toProfileUpsertStatements(profiles),
       ])
     } catch (e) {
-      throw new Error(e.message)
+      throw new Error(
+        `saveBlockRange(${blocks.length} blocks, ${profiles.size} profiles): ${e.message}`,
+      )
     }
   }
   /**
