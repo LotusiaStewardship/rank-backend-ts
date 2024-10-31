@@ -15,7 +15,7 @@ import {
   NNG_SOCKET_RECONN,
   ERR,
   NNG_PUB_DEFAULT_SOCKET_PATH,
-  NNG_RPC_DEFAULT_SOCKET_PATH
+  NNG_RPC_DEFAULT_SOCKET_PATH,
 } from '../util/constants'
 import { IndexerLogEntry, log } from '../util'
 import { resolve } from 'node:path/posix'
@@ -121,7 +121,9 @@ export class Indexer {
           invalidIP = rpcUri
         }
         if (invalidIP) {
-          throw new Error(`protocol tcp expects valid IP address, got "${invalidIP}"`)
+          throw new Error(
+            `protocol tcp expects valid IP address, got "${invalidIP}"`,
+          )
         }
         this.pubUri = `tcp://${pubUri}`
         this.rpcUri = `tcp://${rpcUri}`
