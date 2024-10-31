@@ -1014,32 +1014,45 @@ export class Indexer {
   /**
    * Convert `RankTransaction` Array into Map of `Profile`s
    * @param ranks Array of `RankTransaction` objects
-   * @returns {ProfileUpserts} Map where key is `profileId` and value is `Profile` object
+   * @returns {ProfileMap} Map where key is `profileId` and value is `Profile` object
    */
   private toProfileMap(ranks: RankTransaction[]): ProfileMap {
     const map: ProfileMap = new Map()
     // Sort the RANK txs for upsert
     ranks.forEach(rank => {
+      // Determine positive/negative stats per RANK sentiment
+      let ranking: bigint
+      let votesPositive: number
+      let votesNegative: number
+      // Do a switch here in case sentiment is more than binary in the future
+      switch (rank.sentiment) {
+        case RANK_SCRIPT_PARTS.SENTIMENT.POSITIVE:
+          ranking = rank.sats
+          votesPositive = 1
+          votesNegative = 0
+          break
+        case RANK_SCRIPT_PARTS.SENTIMENT.NEGATIVE:
+          ranking = -rank.sats
+          votesPositive = 0
+          votesNegative = 1
+          break
+      }
       const { profileId: id, platform, ...partialRank } = rank
       const profile = map.get(id)
       if (profile) {
         profile.ranks.push(partialRank)
-        if (rank.sentiment) {
-          profile.ranking += rank.sats
-          profile.votesPositive++
-        } else {
-          profile.ranking -= rank.sats
-          profile.votesNegative++
-        }
+        profile.ranking += ranking
+        profile.votesPositive += votesPositive
+        profile.votesNegative += votesNegative
         return
       }
       map.set(rank.profileId, {
         id,
         platform,
         ranks: [partialRank],
-        ranking: rank.sentiment ? rank.sats : -rank.sats,
-        votesPositive: rank.sentiment ? 1 : 0,
-        votesNegative: rank.sentiment ? 0 : 1,
+        ranking,
+        votesPositive,
+        votesNegative,
       })
     })
     return map
