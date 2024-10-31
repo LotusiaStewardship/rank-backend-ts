@@ -19,17 +19,24 @@ export default class Database {
   /**
    *
    * @param profileId
-   * @param platform
    * @returns
    */
-  async apiGetProfile(
-    profileId: string,
-    platform: string,
-  ): Promise<Partial<Profile> | undefined> {
+  async apiGetAccountByProfileId(profileId: string) {
     try {
-      return await this.db.profile.findFirst({ where: { id: profileId } })
+      return await this.db.profile.findFirst({
+        where: {
+          id: profileId,
+        },
+        select: {
+          account: {
+            select: {
+              profiles: true,
+            },
+          },
+        },
+      })
     } catch (e) {
-      throw new Error(`isExistingProfile: ${e.message}`)
+      throw new Error(`apiGetAccountByProfileId: ${e.message}`)
     }
   }
   /**
