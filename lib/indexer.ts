@@ -4,6 +4,7 @@ import { isIP } from 'validator'
 import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
 import Database from './database'
+import { toPlatformName, toProfileName } from '@lotusia/rank-suite/util'
 import {
   RANK_SCRIPT_PARTS,
   RANK_SCRIPT_MIN_BYTE_LENGTH,
@@ -961,7 +962,12 @@ export class Indexer {
     const profileId = this.getScriptPart(parts.PROFILE, scriptBuf, 'hex')
     const sentiment = this.getScriptPart(parts.SENTIMENT, scriptBuf, 'hex')
     const sats = BigInt(output.satoshis)
-    return { platform, profileId, sats, sentiment }
+    return {
+      platform: toPlatformName(platform).toLowerCase(),
+      profileId: toProfileName(profileId),
+      sats,
+      sentiment,
+    }
   }
   /**
    * Parse raw `NNG.Hash` flatbuffer for the 32-byte block hash or txid
