@@ -1,17 +1,30 @@
 {
   "name": "@lotusia/rank-indexer-ts",
   "version": "0.1.0",
-  "description": "Core indexer for rank-suite",
+  "description": "Core indexer for @lotusia/rank-suite",
   "main": "app.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/LotusiaStewardship/rank-indexer-ts"
+    "url": "git+https://github.com/LotusiaStewardship/rank-indexer-ts.git"
   },
+  "keywords": [
+    "lotus-rank",
+    "rank",
+    "ranking",
+    "rank-indexer",
+    "lotus",
+    "lotus-xpi",
+    "xpi"
+  ],
   "author": "Lotusia Stewardship",
   "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/LotusiaStewardship/rank-indexer-ts/issues"
+  },
+  "homepage": "https://github.com/LotusiaStewardship/rank-indexer-ts#readme",
   "devDependencies": {
     "prettier": "^3.3.3",
     "prisma": "^5.21.1",
@@ -19,12 +32,11 @@
   },
   "dependencies": {
     "@abcpros/bitcore-lib-xpi": "^8.25.37",
+    "@lotusia/rank-suite": "file:../../",
     "@prisma/client": "^5.21.1",
-    "@types/express": "^4.17.21",
     "@types/nanomsg": "^4.2.3",
     "@types/node": "^20.16.14",
     "@types/validator": "^13.12.2",
-    "express": "^4.21.1",
     "flatbuffers": "^24.3.25",
     "nanomsg": "file:submodules/nanomsg",
     "typescript": "^5.6.3",
