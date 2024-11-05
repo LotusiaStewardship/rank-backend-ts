@@ -52,7 +52,7 @@ model RankTransaction {
   sats     BigInt // amount of sats burned
   // each RANK tx is associated with a Profile, else it is invalid
   profile   Profile @relation(fields: [profileId, platform], references: [id, platform])
-  block     Block?  @relation(fields: [height], references: [height], onDelete: Cascade)
+  block     Block?  @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
 
   @@index([profileId(type: hash), sentiment(type: hash)])
   @@index([profileId(type: hash)])
@@ -66,6 +66,7 @@ model Block {
   ranksLength Int               @default(0)
   ranks       RankTransaction[]
 
+  @@unique([height, timestamp])
   @@index([hash(type: hash)])
   @@index([height(sort: Desc)])
   @@index([height, ranksLength(sort: Desc)])
