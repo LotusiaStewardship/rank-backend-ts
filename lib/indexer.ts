@@ -4,20 +4,35 @@ import { isIP } from 'validator'
 import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
 import Database from './database'
-import { toPlatformName, toProfileName } from '@lotusia/rank-suite/util'
 import {
-  RANK_SCRIPT_PARTS,
+  toProfileUTF8,
+  toPlatformUTF8,
+  toSentimentUTF8,
+  log,
+} from '@lotusia/rank-suite/util/functions'
+import {
+  RANK_SCRIPT_CHUNKS,
   RANK_SCRIPT_MIN_BYTE_LENGTH,
+  NNG_PUB_DEFAULT_SOCKET_PATH,
+  NNG_RPC_DEFAULT_SOCKET_PATH,
   NNG_REQUEST_TIMEOUT_LENGTH,
   NNG_RPC_BLOCKRANGE_SIZE,
   NNG_RPC_RCVMAXSIZE_CONSENSUS,
   NNG_SOCKET_MAXRECONN,
   NNG_SOCKET_RECONN,
   ERR,
-  NNG_PUB_DEFAULT_SOCKET_PATH,
-  NNG_RPC_DEFAULT_SOCKET_PATH,
-} from '../util/constants'
-import { IndexerLogEntry, log } from '../util'
+  RANK_BLOCK_GENESIS_V1,
+} from '@lotusia/rank-suite/util/constants'
+import type {
+  IndexerLogEntry,
+  RankOutput,
+  RankTransaction,
+  Block,
+  ProfileMap,
+  ScriptChunk,
+  ScriptChunkField,
+  ScriptChunkSentimentUTF8,
+} from '@lotusia/rank-suite'
 import { resolve } from 'node:path/posix'
 /** NNG types */
 type NNGMessageType =
@@ -31,58 +46,17 @@ type NNGQueue = {
   busy: boolean
   pending: NNGPendingMessageProcessor[]
 }
-/** RANK script types */
-type ScriptPartChunk = keyof typeof RANK_SCRIPT_PARTS
-type ScriptPart = {
-  offset: number
-  len: number
-  values?: string[]
-}
-/** OP_RETURN <RANK> <sentiment> <profileId> [<postId> <commentHex>] */
-type RankOutput = {
-  platform: string // e.g. Twitter/X.com, etc.
-  profileId: string // who the ranking is for
-  sentiment: string // true = positive, false = negative
-  sats: bigint // sats for sentiment
-}
-/**  */
-export type RankTransaction = RankOutput & {
-  txid: string
-  height?: number // undefined if mempool
-  timestamp: bigint // unix timestamp
-}
-/**  */
-export type Profile = {
-  id: string
-  platform: string
-  ranking: bigint
-  ranks: Omit<RankTransaction, 'profileId' | 'platform'>[] // omit the database relation fields
-  votesPositive: number
-  votesNegative: number
-}
-/**
- * `RankTransaction` objects are converted to a `ProfileMap` for database ops
- *
- * `string` is `profileId`
- */
-export type ProfileMap = Map<string, Profile>
-/** */
-export type Block = {
-  hash: string
-  height: number
-  timestamp: bigint
-  ranksLength: number // default is 0 if a block is cringe
-  prevhash?: string // for reorg checks only; does not get saved to database
-}
-/**  */
+/** Runtime cache for quickly reconciling conflicting RANK txs with blocks */
 type MempoolCache = Map<string, RankTransaction>
-/** First block with a RANK transaction */
-const GENESIS_BLOCK_V1: Partial<Block> = {
-  hash: '00000000019cc1ddc04bc541f531f1424d04d0c37443867f1f6137cc7f7d09e5',
-  height: 811624,
-}
-/** Signal to would-be promises that they should think twice before resolving */
-export class Indexer {
+/**
+ * Processes all transactions to find, parse, and index OP_RETURN outputs with
+ * the `RANK` LOKAD prefix.
+ *
+ * Maintains a persistent connection to lotusd over the NNG interface. Subscribes
+ * to the appropriate lotusd publishing endpoints and reacts to new messages
+ * accordingly.
+ */
+export default class Indexer {
   private db: Database
   private pub: Socket
   private rpc: Socket
@@ -93,10 +67,10 @@ export class Indexer {
   // 😏
   private parts: {
     required: {
-      [chunk in Exclude<ScriptPartChunk, 'POST' | 'COMMENT'>]: ScriptPart
+      [chunk in Exclude<ScriptChunkField, 'POST' | 'COMMENT'>]: ScriptChunk
     }
     optional: {
-      [chunk in Extract<ScriptPartChunk, 'POST' | 'COMMENT'>]: ScriptPart
+      [chunk in Extract<ScriptChunkField, 'POST' | 'COMMENT'>]: ScriptChunk
     }
   }
   private checkpoint: Block

@@ -1,6 +1,11 @@
 import { PrismaClient } from '@prisma/client'
 import { randomUUID } from 'crypto'
-import type { Block, RankTransaction, Profile, ProfileMap } from './indexer'
+import type {
+  Block,
+  RankTransaction,
+  Profile,
+  ProfileMap,
+} from '@lotusia/rank-suite'
 
 export default class Database {
   private db: PrismaClient
