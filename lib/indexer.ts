@@ -549,15 +549,20 @@ export default class Indexer {
       NNG.TransactionAddedToMempool.getRootAsTransactionAddedToMempool(
         bb,
       ).mempoolTx()
-    const txRawArray = mempooltx.tx().rawArray()
-    const tx = new Transaction(Buffer.from(txRawArray))
-    const rank = this.toRankTransaction(tx)
-    if (rank) {
+    const rawArray = mempooltx.tx().rawArray()
+    const tx = new Transaction(Buffer.from(rawArray))
+    const output = this.processTransactionOutputs(tx.outputs)
+    if (output) {
+      const rank = {
+        txid: tx.txid,
+        timestamp: mempooltx.time(),
+        ...output,
+      } as RankTransaction
       const profiles = this.toProfileMap([rank])
       await this.db.upsertProfiles(profiles)
       const t1 = (performance.now() - t0).toFixed(3)
       // Keep this RANK tx to reconcile with next block
-      this.mempool.set(rank.txid, rank)
+      this.mempool.set(tx.txid, rank)
       log([
         ['nng', 'mempooltxadd'],
         ...this.toLogEntries(rank),
@@ -809,20 +814,28 @@ export default class Indexer {
    * @param data
    * @returns
    */
-  private processBlockOrMempool(data: NNG.Block | NNG.GetMempoolResponse) {
+  private processBlockOrMempool(
+    data: NNG.Block | NNG.GetMempoolResponse,
+  ): RankTransaction[] {
     const ranks: RankTransaction[] = []
     const txsLength = data.txsLength()
     const block = data instanceof NNG.Block ? this.toBlock(data.header()) : null
     // skip coinbase tx if processing block data
     for (let i = block ? 1 : 0; i < txsLength; i++) {
       try {
-        const txRaw = data.txs(i).tx().rawArray()
+        const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
-        const tx = new Transaction(Buffer.from(txRaw))
-        // Try to convert to RANK tx; keep if successful
-        const rank = this.toRankTransaction(tx, block)
-        if (rank) {
-          ranks.push(rank)
+        const tx = new Transaction(Buffer.from(rawArray))
+        // Process tx outputs for RANK outputs; convert any to RANK txs
+        const output = this.processTransactionOutputs(tx.outputs)
+        if (output) {
+          ranks.push({
+            txid: tx.txid,
+            height: block?.height,
+            timestamp:
+              block?.timestamp ?? BigInt(Math.round(Date.now() / 1000)),
+            ...output,
+          })
         }
       } catch (e) {
         throw new Error(`processBlockOrMempool(${typeof data}): ${e.message}`)
@@ -831,50 +844,21 @@ export default class Indexer {
     return ranks
   }
   /**
-   * Convert Bitcore `Transaction.Output[]` into a `RankTransaction`, using `Block` data if applicable
-   * @param tx Bitcore `Transaction`
-   * @param block `Block` converted from `NNG.BlockHeader`
-   * @returns {RankTransaction}
+   * Parse the Bitcore-compatible tx outputs for RANK outputs and return them
+   * @param outputs Transaction `output` array in Bitcore format
+   * @returns {RankOutputs} Processed RANK output(s), or null if none found
    */
-  private toRankTransaction(
-    tx: Transaction,
-    block: Block = null,
-  ): RankTransaction {
-    const outputs = this.processTransactionOutputs(tx.outputs)
-    if (outputs.length > 0) {
-      const rank: RankTransaction = {
-        txid: tx.txid,
-        timestamp: block?.timestamp ?? BigInt(Date.now()),
-        ...outputs.shift(), // Only first output has RankTransaction data
-      }
-      // Add height if tx is confirmed
-      if (block?.height) {
-        rank.height = block.height
-      }
-      return rank
-    }
-    return null
-  }
-  /**
-   * Parse the Bitcore-compatible transaction for RANK outputs and return all `RankTransaction` objects
-   * @param tx Transaction object in Bitcore format
-   * @returns {RankOutputs[]} Array of `RankTransaction` objects
-   */
-  private processTransactionOutputs(
-    outputs: Transaction.Output[],
-  ): RankOutput[] {
-    const ranks: RankOutput[] = []
+  private processTransactionOutputs(outputs: Transaction.Output[]): RankOutput {
     try {
-      for (let outIdx = 0; outIdx < outputs.length; outIdx++) {
-        const output = outputs[outIdx]
-        // Return RANK output array with 0 or more items
-        if (!this.isRankScript(output.script)) {
-          return ranks
-        }
-        ranks.push(this.toRankOutput(output))
+      // first output MUST be RANK output, else invalid
+      if (!this.isRankScript(outputs[0].script)) {
+        return null
       }
-      // tx may not have change output; return all RANK outputs we found
-      return ranks
+      const rank = this.parseRawRankOutput(outputs[0])
+      // TODO: additional processing for RANK extension outputs
+
+      // Return processed output(s)
+      return rank
     } catch (e) {
       throw new Error(
         `processTransactionOutputs(${typeof outputs}): ${e.message}`,
