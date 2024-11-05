@@ -194,6 +194,7 @@ export default class Indexer {
     /**
      *    Cleanup
      */
+    // rewind all unconfirmed state from the database
     try {
       const t0 = performance.now()
       const mempooltxs = await this.db.getRankTransactionsByHeight(null)
@@ -203,7 +204,7 @@ export default class Indexer {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['init', 'cleanup'],
-          ['txsLength', `${mempooltxs.length}`],
+          ['ranksLength', `${mempooltxs.length}`],
           ['action', 'rewindProfiles'],
           ['elapsed', `${t1}ms`],
         ])
