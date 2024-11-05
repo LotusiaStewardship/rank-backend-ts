@@ -1,4 +1,4 @@
-import { Indexer } from './lib/indexer'
+import Indexer from '../lib/indexer'
 /**
  * RUNTIME
  */
