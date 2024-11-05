@@ -129,17 +129,17 @@ export default class Indexer {
         LOKAD: {
           offset: 2,
           len: 4,
-          values: Object.values(RANK_SCRIPT_PARTS.LOKAD),
+          map: RANK_SCRIPT_CHUNKS.LOKAD,
         },
         SENTIMENT: {
           offset: 6,
           len: 1,
-          values: Object.values(RANK_SCRIPT_PARTS.SENTIMENT),
+          map: RANK_SCRIPT_CHUNKS.SENTIMENT,
         },
         PLATFORM: {
           offset: 8,
           len: 1,
-          values: Object.values(RANK_SCRIPT_PARTS.PLATFORM),
+          map: RANK_SCRIPT_CHUNKS.PLATFORM,
         },
         PROFILE: { offset: 10, len: 16 }, // As long as it is 16 bytes it is good
       },
@@ -217,7 +217,7 @@ export default class Indexer {
     try {
       // Get current checkpoint height/hash for init, otherwise start at genesis
       const checkpoint =
-        (await this.db.getCheckpoint()) ?? (GENESIS_BLOCK_V1 as Block)
+        (await this.db.getCheckpoint()) ?? (RANK_BLOCK_GENESIS_V1 as Block)
       this.checkpoint = await this.initReconcileBlockState(checkpoint)
     } catch (e) {
       return this.close(ERR.IDX_BLOCKS_REWIND, e.message)
@@ -886,7 +886,7 @@ export default class Indexer {
    * @param script Bitcore `Script`
    * @returns {false | Buffer}
    */
-  private isRankScript(script: Script): false | Buffer {
+  private isRankScript(script: Script): boolean {
     // we only care about OP_RETURN outputs
     if (!script.isDataOut()) {
       return false
@@ -898,51 +898,49 @@ export default class Indexer {
     }
     // validate all required parameters for RANK script parts
     for (const part of Object.values(this.parts.required)) {
-      const hex = this.getScriptPart(part, scriptBuf, 'hex')
+      const partBuf = this.getScriptChunk(part, scriptBuf)
       if (
         // script part value is invalid, if applicable
-        (part.values && !part.values.includes(hex)) ||
+        // need to read in big endian for SCRIPT_CHUNK map keys
+        // e.g. 0x52414e4b == 1380011595 (big endian / nodejs)
+        //      0x52414e4b == 1263419730 (little endian / lotusd)
+        (part.map && !part.map.has(partBuf.readUIntBE(0, part.len))) ||
         // script part byte length does not meet requirement
-        Buffer.from(hex, 'hex').length != part.len
+        partBuf.length != part.len
       ) {
         return false
       }
     }
-    // valid RANK output confirmed; return for processing
-    return scriptBuf
+    // valid RANK output confirmed
+    return true
   }
   /**
-   * Parse the provided `scriptBuf` for the ScriptPart data, encoded as hex or UTF-8
-   * @param part {ScriptPart} The ScriptPart for which to parse
+   * Parse the provided `scriptBuf` for the ScriptChunk data, encoded as hex or UTF-8
+   * @param part {ScriptChunk} The ScriptChunk for which to parse
    * @param scriptBuf {Buffer} The script buffer (`OP_RETURN` output only)
-   * @returns {string}
+   * @returns {Buffer}
    */
-  private getScriptPart(
-    part: ScriptPart,
-    scriptBuf: Buffer,
-    encoding: 'utf-8' | 'hex',
-  ): string {
-    return scriptBuf
-      .subarray(part.offset, part.offset + part.len)
-      .toString(encoding)
+  private getScriptChunk(part: ScriptChunk, scriptBuf: Buffer): Buffer {
+    return scriptBuf.subarray(part.offset, part.offset + part.len)
   }
   /**
-   * Convert raw `Transaction.Output` to RANK output
-   * @param output Transaction output in Bitcore-compatible format
+   * Convert raw Bitcore RANK output to `RankOutput` object
+   * @see {@linkcode RankOutput}
+   * @param output RANK output in Bitcore format
    * @returns {RankOutput}
    */
-  private toRankOutput(output: Transaction.Output): RankOutput {
+  private parseRawRankOutput(output: Transaction.Output): RankOutput {
     const parts = this.parts.required
     const scriptBuf = output.script.toBuffer()
-    const platform = this.getScriptPart(parts.PLATFORM, scriptBuf, 'hex')
-    const profileId = this.getScriptPart(parts.PROFILE, scriptBuf, 'hex')
-    const sentiment = this.getScriptPart(parts.SENTIMENT, scriptBuf, 'hex')
+    const platformBuf = this.getScriptChunk(parts.PLATFORM, scriptBuf)
+    const profileIdBuf = this.getScriptChunk(parts.PROFILE, scriptBuf)
+    const sentimentBuf = this.getScriptChunk(parts.SENTIMENT, scriptBuf)
     const sats = BigInt(output.satoshis)
     return {
-      platform: toPlatformName(platform).toLowerCase(),
-      profileId: toProfileName(profileId),
+      platform: toPlatformUTF8(platformBuf).toLowerCase(),
+      profileId: toProfileUTF8(profileIdBuf).toLowerCase(),
+      sentiment: toSentimentUTF8(sentimentBuf).toLowerCase(),
       sats,
-      sentiment,
     }
   }
   /**
@@ -1007,13 +1005,13 @@ export default class Indexer {
       let votesPositive: number
       let votesNegative: number
       // Do a switch here in case sentiment is more than binary in the future
-      switch (rank.sentiment) {
-        case RANK_SCRIPT_PARTS.SENTIMENT.POSITIVE:
+      switch (rank.sentiment as Lowercase<ScriptChunkSentimentUTF8>) {
+        case 'positive':
           ranking = rank.sats
           votesPositive = 1
           votesNegative = 0
           break
-        case RANK_SCRIPT_PARTS.SENTIMENT.NEGATIVE:
+        case 'negative':
           ranking = -rank.sats
           votesPositive = 0
           votesNegative = 1
