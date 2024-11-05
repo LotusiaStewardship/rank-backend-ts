@@ -488,23 +488,21 @@ export default class Indexer {
    * @param recursing
    * @returns {Promise<void>}
    */
-  private nngProcessMessage = async (recursing = false): Promise<void> => {
-    // Consecutive queued handlers need to wait their turn
-    // But we bypass for recursive calls
-    if (this.queue.busy && !recursing) {
-      return
-    }
-    // Exclusive attention to the next-in-line (i.e. oldest) queued handler
+  private nngProcessMessage = async (): Promise<void> => {
+    // Queue is now busy processing queued NNG handlers
+    // Prevents clobbering; maintains healthy database state
     this.queue.busy = true
     try {
+      // Oldest queued handler/message is processed first
       const [NNGMessageProcessor, ByteBuffer] = this.queue.pending.shift()
       await NNGMessageProcessor(ByteBuffer)
     } catch (e) {
+      // Should never get here; shut down if we do
       return await this.close(ERR.NNG_PROCESS_MESSAGE, e.message)
     }
     // Recursively process queue if necessary
     if (this.queue.pending.length > 0) {
-      return this.nngProcessMessage(true)
+      return this.nngProcessMessage()
     }
     // Queue is finished processing all pending handlers
     this.queue.busy = false
@@ -533,8 +531,10 @@ export default class Indexer {
         this.queue.pending.push([this.nngBlockDisconnected, bb])
         break
     }
-    // Set immediate processing of the message queue
-    setImmediate(this.nngProcessMessage)
+    // Set immediate processing of the message queue if not already busy
+    if (!this.queue.busy) {
+      setImmediate(this.nngProcessMessage)
+    }
   }
   /**
    * Process NNG `mempooltxadd` messages
