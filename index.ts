@@ -1,9 +1,9 @@
 import { Script, Transaction } from '@abcpros/bitcore-lib-xpi'
 import { Builder, ByteBuffer } from 'flatbuffers'
 import { isIP } from 'validator'
-import * as NNG from './nng-interface'
+import * as NNG from './lib/nng-interface'
 import { Socket, socket } from 'nanomsg'
-import Database from './database'
+import Database from './lib/database'
 import {
   toProfileUTF8,
   toPlatformUTF8,
