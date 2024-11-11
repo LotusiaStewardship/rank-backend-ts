@@ -1,15 +1,15 @@
 import { Script, Transaction } from '@abcpros/bitcore-lib-xpi'
 import { Builder, ByteBuffer } from 'flatbuffers'
 import { isIP } from 'validator'
-import * as NNG from './lib/nng-interface'
+import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
-import Database from './lib/database'
+import Database from './database'
 import {
   toProfileUTF8,
   toPlatformUTF8,
   toSentimentUTF8,
   log,
-} from '@lotusia/rank-suite/util/functions'
+} from '../util/functions'
 import {
   RANK_SCRIPT_CHUNKS,
   RANK_SCRIPT_MIN_BYTE_LENGTH,
@@ -22,7 +22,7 @@ import {
   NNG_SOCKET_RECONN,
   ERR,
   RANK_BLOCK_GENESIS_V1,
-} from '@lotusia/rank-suite/util/constants'
+} from '../util/constants'
 import type {
   IndexerLogEntry,
   RankOutput,
@@ -32,7 +32,7 @@ import type {
   ScriptChunk,
   ScriptChunkField,
   ScriptChunkSentimentUTF8,
-} from '@lotusia/rank-suite'
+} from '../util/types'
 import { resolve } from 'node:path/posix'
 /** NNG types */
 type NNGMessageType =
