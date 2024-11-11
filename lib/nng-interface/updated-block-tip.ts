@@ -4,7 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { BlockHash } from '../nng-interface/block-hash.js';
+import { BlockHash } from './block-hash.js';
 
 
 export class UpdatedBlockTip {

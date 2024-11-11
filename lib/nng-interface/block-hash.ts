@@ -4,7 +4,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 
-import { Hash } from '../nng-interface/hash.js';
+import { Hash } from './hash.js';
 
 
 export class BlockHash {
