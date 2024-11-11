@@ -11,8 +11,7 @@ import {
   log,
 } from '../util/functions'
 import {
-  RANK_SCRIPT_CHUNKS,
-  RANK_SCRIPT_MIN_BYTE_LENGTH,
+  ERR,
   NNG_PUB_DEFAULT_SOCKET_PATH,
   NNG_RPC_DEFAULT_SOCKET_PATH,
   NNG_REQUEST_TIMEOUT_LENGTH,
@@ -20,8 +19,9 @@ import {
   NNG_RPC_RCVMAXSIZE_CONSENSUS,
   NNG_SOCKET_MAXRECONN,
   NNG_SOCKET_RECONN,
-  ERR,
   RANK_BLOCK_GENESIS_V1,
+  RANK_SCRIPT_CHUNKS,
+  RANK_SCRIPT_MIN_BYTE_LENGTH,
 } from '../util/constants'
 import type {
   IndexerLogEntry,
@@ -64,8 +64,7 @@ export default class Indexer {
   private rpcUri: string
   private mempool: MempoolCache
   private queue: NNGQueue
-  // 😏
-  private parts: {
+  private chunks: {
     required: {
       [chunk in Exclude<ScriptChunkField, 'POST' | 'COMMENT'>]: ScriptChunk
     }
@@ -124,7 +123,7 @@ export default class Indexer {
     // Runtime state setup
     this.mempool = new Map()
     this.queue = { busy: false, pending: [] }
-    this.parts = {
+    this.chunks = {
       required: {
         LOKAD: {
           offset: 2,
@@ -267,7 +266,7 @@ export default class Indexer {
       // checkpoint hash is previous best block tip and was extended by best block tip
       (checkpoint.hash == best.prevhash &&
         best.height == checkpoint.height + 1) ||
-      // best block tip is 2 blocks ahead
+      // best block tip is 2+ blocks ahead
       best.height > checkpoint.height + 1
     ) {
       return checkpoint
@@ -624,7 +623,7 @@ export default class Indexer {
     best.ranksLength = ranks.length
     entries.push(...this.toLogEntries(best))
     // Prepare ProfileMap in case any RANK txs need to be upserted
-    let profiles: ReturnType<typeof this.toProfileMap> = new Map()
+    let profiles: ProfileMap = new Map()
     const rankTxids: Pick<RankTransaction, 'txid'>[] = []
     if (ranks.length > 0) {
       // Find any RANK txs that were missing from mempool cache (i.e. not already upserted)
@@ -648,7 +647,7 @@ export default class Indexer {
     // Save latest checkpoint plus any missing RANK txs
     await this.db.saveBlock(best, rankTxids, profiles)
     const t1 = (performance.now() - t0).toFixed(3)
-    entries.push(['elapsed', `${t1}ms`])
+    entries.push(['action', 'saveBlock'], ['elapsed', `${t1}ms`])
     // TODO: we may need to add some additional state checks here, but maybe not
 
     // Update checkpoint to this block
@@ -832,7 +831,7 @@ export default class Indexer {
         if (output) {
           ranks.push({
             txid: tx.txid,
-            height: block?.height,
+            height: block?.height, // undefined if mempool tx
             timestamp:
               block?.timestamp ?? BigInt(Math.round(Date.now() / 1000)),
             ...output,
@@ -847,7 +846,7 @@ export default class Indexer {
   /**
    * Parse the Bitcore-compatible tx outputs for RANK outputs and return them
    * @param outputs Transaction `output` array in Bitcore format
-   * @returns {RankOutputs} Processed RANK output(s), or null if none found
+   * @returns {RankOutput} Processed RANK output, or null if none found
    */
   private processTransactionOutputs(outputs: Transaction.Output[]): RankOutput {
     try {
@@ -881,17 +880,17 @@ export default class Indexer {
     if (scriptBuf.length < RANK_SCRIPT_MIN_BYTE_LENGTH) {
       return false
     }
-    // validate all required parameters for RANK script parts
-    for (const part of Object.values(this.parts.required)) {
-      const partBuf = this.getScriptChunk(part, scriptBuf)
+    // validate all required parameters for RANK script chunks
+    for (const chunk of Object.values(this.chunks.required)) {
+      const chunkBuf = this.getScriptChunk(chunk, scriptBuf)
       if (
-        // script part value is invalid, if applicable
+        // script chunk value is invalid, if applicable
         // need to read in big endian for SCRIPT_CHUNK map keys
         // e.g. 0x52414e4b == 1380011595 (big endian / nodejs)
         //      0x52414e4b == 1263419730 (little endian / lotusd)
-        (part.map && !part.map.has(partBuf.readUIntBE(0, part.len))) ||
-        // script part byte length does not meet requirement
-        partBuf.length != part.len
+        (chunk.map && !chunk.map.has(chunkBuf.readUIntBE(0, chunk.len))) ||
+        // script chunk byte length does not meet requirement
+        chunkBuf.length != chunk.len
       ) {
         return false
       }
@@ -900,13 +899,13 @@ export default class Indexer {
     return true
   }
   /**
-   * Parse the provided `scriptBuf` for the ScriptChunk data, encoded as hex or UTF-8
-   * @param part {ScriptChunk} The ScriptChunk for which to parse
+   * Parse the provided `scriptBuf` for the ScriptChunk data and return the resulting Buffer
+   * @param chunk {ScriptChunk} The ScriptChunk for which to parse
    * @param scriptBuf {Buffer} The script buffer (`OP_RETURN` output only)
    * @returns {Buffer}
    */
-  private getScriptChunk(part: ScriptChunk, scriptBuf: Buffer): Buffer {
-    return scriptBuf.subarray(part.offset, part.offset + part.len)
+  private getScriptChunk(chunk: ScriptChunk, scriptBuf: Buffer): Buffer {
+    return scriptBuf.subarray(chunk.offset, chunk.offset + chunk.len)
   }
   /**
    * Convert raw Bitcore RANK output to `RankOutput` object
@@ -915,11 +914,11 @@ export default class Indexer {
    * @returns {RankOutput}
    */
   private parseRawRankOutput(output: Transaction.Output): RankOutput {
-    const parts = this.parts.required
+    const chunks = this.chunks.required
     const scriptBuf = output.script.toBuffer()
-    const platformBuf = this.getScriptChunk(parts.PLATFORM, scriptBuf)
-    const profileIdBuf = this.getScriptChunk(parts.PROFILE, scriptBuf)
-    const sentimentBuf = this.getScriptChunk(parts.SENTIMENT, scriptBuf)
+    const platformBuf = this.getScriptChunk(chunks.PLATFORM, scriptBuf)
+    const profileIdBuf = this.getScriptChunk(chunks.PROFILE, scriptBuf)
+    const sentimentBuf = this.getScriptChunk(chunks.SENTIMENT, scriptBuf)
     const sats = BigInt(output.satoshis)
     return {
       platform: toPlatformUTF8(platformBuf).toLowerCase(),
