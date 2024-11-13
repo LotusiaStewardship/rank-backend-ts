@@ -4,20 +4,35 @@ import { isIP } from 'validator'
 import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
 import Database from './database'
-import { toPlatformName, toProfileName } from '@lotusia/rank-suite/util'
 import {
-  RANK_SCRIPT_PARTS,
-  RANK_SCRIPT_MIN_BYTE_LENGTH,
+  toProfileUTF8,
+  toPlatformUTF8,
+  toSentimentUTF8,
+  log,
+} from '../util/functions'
+import {
+  ERR,
+  NNG_PUB_DEFAULT_SOCKET_PATH,
+  NNG_RPC_DEFAULT_SOCKET_PATH,
   NNG_REQUEST_TIMEOUT_LENGTH,
   NNG_RPC_BLOCKRANGE_SIZE,
   NNG_RPC_RCVMAXSIZE_CONSENSUS,
   NNG_SOCKET_MAXRECONN,
   NNG_SOCKET_RECONN,
-  ERR,
-  NNG_PUB_DEFAULT_SOCKET_PATH,
-  NNG_RPC_DEFAULT_SOCKET_PATH,
+  RANK_BLOCK_GENESIS_V1,
+  RANK_SCRIPT_CHUNKS,
+  RANK_SCRIPT_MIN_BYTE_LENGTH,
 } from '../util/constants'
-import { IndexerLogEntry, log } from '../util'
+import type {
+  IndexerLogEntry,
+  RankOutput,
+  RankTransaction,
+  Block,
+  ProfileMap,
+  ScriptChunk,
+  ScriptChunkField,
+  ScriptChunkSentimentUTF8,
+} from '../util/types'
 import { resolve } from 'node:path/posix'
 /** NNG types */
 type NNGMessageType =
@@ -31,58 +46,17 @@ type NNGQueue = {
   busy: boolean
   pending: NNGPendingMessageProcessor[]
 }
-/** RANK script types */
-type ScriptPartChunk = keyof typeof RANK_SCRIPT_PARTS
-type ScriptPart = {
-  offset: number
-  len: number
-  values?: string[]
-}
-/** OP_RETURN <RANK> <sentiment> <profileId> [<postId> <commentHex>] */
-type RankOutput = {
-  platform: string // e.g. Twitter/X.com, etc.
-  profileId: string // who the ranking is for
-  sentiment: string // true = positive, false = negative
-  sats: bigint // sats for sentiment
-}
-/**  */
-export type RankTransaction = RankOutput & {
-  txid: string
-  height?: number // undefined if mempool
-  timestamp: bigint // unix timestamp
-}
-/**  */
-export type Profile = {
-  id: string
-  platform: string
-  ranking: bigint
-  ranks: Omit<RankTransaction, 'profileId' | 'platform'>[] // omit the database relation fields
-  votesPositive: number
-  votesNegative: number
-}
-/**
- * `RankTransaction` objects are converted to a `ProfileMap` for database ops
- *
- * `string` is `profileId`
- */
-export type ProfileMap = Map<string, Profile>
-/** */
-export type Block = {
-  hash: string
-  height: number
-  timestamp: bigint
-  ranksLength: number // default is 0 if a block is cringe
-  prevhash?: string // for reorg checks only; does not get saved to database
-}
-/**  */
+/** Runtime cache for quickly reconciling conflicting RANK txs with blocks */
 type MempoolCache = Map<string, RankTransaction>
-/** First block with a RANK transaction */
-const GENESIS_BLOCK_V1: Partial<Block> = {
-  hash: '00000000019cc1ddc04bc541f531f1424d04d0c37443867f1f6137cc7f7d09e5',
-  height: 811624,
-}
-/** Signal to would-be promises that they should think twice before resolving */
-export class Indexer {
+/**
+ * Processes all transactions to find, parse, and index OP_RETURN outputs with
+ * the `RANK` LOKAD prefix.
+ *
+ * Maintains a persistent connection to lotusd over the NNG interface. Subscribes
+ * to the appropriate lotusd publishing endpoints and reacts to new messages
+ * accordingly.
+ */
+export default class Indexer {
   private db: Database
   private pub: Socket
   private rpc: Socket
@@ -90,13 +64,12 @@ export class Indexer {
   private rpcUri: string
   private mempool: MempoolCache
   private queue: NNGQueue
-  // 😏
-  private parts: {
+  private chunks: {
     required: {
-      [chunk in Exclude<ScriptPartChunk, 'POST' | 'COMMENT'>]: ScriptPart
+      [chunk in Exclude<ScriptChunkField, 'POST' | 'COMMENT'>]: ScriptChunk
     }
     optional: {
-      [chunk in Extract<ScriptPartChunk, 'POST' | 'COMMENT'>]: ScriptPart
+      [chunk in Extract<ScriptChunkField, 'POST' | 'COMMENT'>]: ScriptChunk
     }
   }
   private checkpoint: Block
@@ -105,33 +78,14 @@ export class Indexer {
    * @param pubUri
    * @param rpcUri
    */
-  constructor(protocol?: 'ipc' | 'tcp', pubUri?: string, rpcUri?: string) {
+  constructor(pubUri?: string, rpcUri?: string) {
     // Validate NNG parameters
-    switch (protocol) {
-      case 'ipc':
-        this.pubUri = `ipc://${resolve(pubUri)}`
-        this.rpcUri = `ipc://${resolve(rpcUri)}`
-        break
-      case 'tcp':
-        let invalidIP: string = null
-        if (!isIP(pubUri)) {
-          invalidIP = pubUri
-        }
-        if (!isIP(rpcUri)) {
-          invalidIP = rpcUri
-        }
-        if (invalidIP) {
-          throw new Error(
-            `protocol tcp expects valid IP address, got "${invalidIP}"`,
-          )
-        }
-        this.pubUri = `tcp://${pubUri}`
-        this.rpcUri = `tcp://${rpcUri}`
-        break
-      default:
-        this.pubUri = `ipc://${resolve(NNG_PUB_DEFAULT_SOCKET_PATH)}`
-        this.rpcUri = `ipc://${resolve(NNG_RPC_DEFAULT_SOCKET_PATH)}`
-    }
+    this.pubUri = pubUri
+      ? `ipc://${resolve(pubUri)}`
+      : `ipc://${resolve(NNG_PUB_DEFAULT_SOCKET_PATH)}`
+    this.rpcUri = rpcUri
+      ? `ipc://${resolve(rpcUri)}`
+      : `ipc://${resolve(NNG_RPC_DEFAULT_SOCKET_PATH)}`
     // Module setup
     this.db = new Database()
     // Pub/Sub socket setup
@@ -150,22 +104,22 @@ export class Indexer {
     // Runtime state setup
     this.mempool = new Map()
     this.queue = { busy: false, pending: [] }
-    this.parts = {
+    this.chunks = {
       required: {
         LOKAD: {
           offset: 2,
           len: 4,
-          values: Object.values(RANK_SCRIPT_PARTS.LOKAD),
+          map: RANK_SCRIPT_CHUNKS.LOKAD,
         },
         SENTIMENT: {
           offset: 6,
           len: 1,
-          values: Object.values(RANK_SCRIPT_PARTS.SENTIMENT),
+          map: RANK_SCRIPT_CHUNKS.SENTIMENT,
         },
         PLATFORM: {
           offset: 8,
           len: 1,
-          values: Object.values(RANK_SCRIPT_PARTS.PLATFORM),
+          map: RANK_SCRIPT_CHUNKS.PLATFORM,
         },
         PROFILE: { offset: 10, len: 16 }, // As long as it is 16 bytes it is good
       },
@@ -220,6 +174,7 @@ export class Indexer {
     /**
      *    Cleanup
      */
+    // rewind all unconfirmed state from the database
     try {
       const t0 = performance.now()
       const mempooltxs = await this.db.getRankTransactionsByHeight(null)
@@ -229,7 +184,7 @@ export class Indexer {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['init', 'cleanup'],
-          ['txsLength', `${mempooltxs.length}`],
+          ['ranksLength', `${mempooltxs.length}`],
           ['action', 'rewindProfiles'],
           ['elapsed', `${t1}ms`],
         ])
@@ -243,7 +198,7 @@ export class Indexer {
     try {
       // Get current checkpoint height/hash for init, otherwise start at genesis
       const checkpoint =
-        (await this.db.getCheckpoint()) ?? (GENESIS_BLOCK_V1 as Block)
+        (await this.db.getCheckpoint()) ?? (RANK_BLOCK_GENESIS_V1 as Block)
       this.checkpoint = await this.initReconcileBlockState(checkpoint)
     } catch (e) {
       return this.close(ERR.IDX_BLOCKS_REWIND, e.message)
@@ -292,7 +247,7 @@ export class Indexer {
       // checkpoint hash is previous best block tip and was extended by best block tip
       (checkpoint.hash == best.prevhash &&
         best.height == checkpoint.height + 1) ||
-      // best block tip is 2 blocks ahead
+      // best block tip is 2+ blocks ahead
       best.height > checkpoint.height + 1
     ) {
       return checkpoint
@@ -514,23 +469,21 @@ export class Indexer {
    * @param recursing
    * @returns {Promise<void>}
    */
-  private nngProcessMessage = async (recursing = false): Promise<void> => {
-    // Consecutive queued handlers need to wait their turn
-    // But we bypass for recursive calls
-    if (this.queue.busy && !recursing) {
-      return
-    }
-    // Exclusive attention to the next-in-line (i.e. oldest) queued handler
+  private nngProcessMessage = async (): Promise<void> => {
+    // Queue is now busy processing queued NNG handlers
+    // Prevents clobbering; maintains healthy database state
     this.queue.busy = true
     try {
+      // Oldest queued handler/message is processed first
       const [NNGMessageProcessor, ByteBuffer] = this.queue.pending.shift()
       await NNGMessageProcessor(ByteBuffer)
     } catch (e) {
+      // Should never get here; shut down if we do
       return await this.close(ERR.NNG_PROCESS_MESSAGE, e.message)
     }
     // Recursively process queue if necessary
     if (this.queue.pending.length > 0) {
-      return this.nngProcessMessage(true)
+      return this.nngProcessMessage()
     }
     // Queue is finished processing all pending handlers
     this.queue.busy = false
@@ -559,8 +512,10 @@ export class Indexer {
         this.queue.pending.push([this.nngBlockDisconnected, bb])
         break
     }
-    // Set immediate processing of the message queue
-    setImmediate(this.nngProcessMessage)
+    // Set immediate processing of the message queue if not already busy
+    if (!this.queue.busy) {
+      setImmediate(this.nngProcessMessage)
+    }
   }
   /**
    * Process NNG `mempooltxadd` messages
@@ -575,15 +530,20 @@ export class Indexer {
       NNG.TransactionAddedToMempool.getRootAsTransactionAddedToMempool(
         bb,
       ).mempoolTx()
-    const txRawArray = mempooltx.tx().rawArray()
-    const tx = new Transaction(Buffer.from(txRawArray))
-    const rank = this.toRankTransaction(tx)
-    if (rank) {
+    const rawArray = mempooltx.tx().rawArray()
+    const tx = new Transaction(Buffer.from(rawArray))
+    const output = this.processTransactionOutputs(tx.outputs)
+    if (output) {
+      const rank = {
+        txid: tx.txid,
+        timestamp: mempooltx.time(),
+        ...output,
+      } as RankTransaction
       const profiles = this.toProfileMap([rank])
       await this.db.upsertProfiles(profiles)
       const t1 = (performance.now() - t0).toFixed(3)
       // Keep this RANK tx to reconcile with next block
-      this.mempool.set(rank.txid, rank)
+      this.mempool.set(tx.txid, rank)
       log([
         ['nng', 'mempooltxadd'],
         ...this.toLogEntries(rank),
@@ -644,7 +604,7 @@ export class Indexer {
     best.ranksLength = ranks.length
     entries.push(...this.toLogEntries(best))
     // Prepare ProfileMap in case any RANK txs need to be upserted
-    let profiles: ReturnType<typeof this.toProfileMap> = new Map()
+    let profiles: ProfileMap = new Map()
     const rankTxids: Pick<RankTransaction, 'txid'>[] = []
     if (ranks.length > 0) {
       // Find any RANK txs that were missing from mempool cache (i.e. not already upserted)
@@ -668,7 +628,7 @@ export class Indexer {
     // Save latest checkpoint plus any missing RANK txs
     await this.db.saveBlock(best, rankTxids, profiles)
     const t1 = (performance.now() - t0).toFixed(3)
-    entries.push(['elapsed', `${t1}ms`])
+    entries.push(['action', 'saveBlock'], ['elapsed', `${t1}ms`])
     // TODO: we may need to add some additional state checks here, but maybe not
 
     // Update checkpoint to this block
@@ -688,7 +648,7 @@ export class Indexer {
     // Set up disconnected block for comparison to current best (checkpoint)
     const disconnectedBlock =
       NNG.BlockDisconnected.getRootAsBlockDisconnected(bb).block()
-    const block = this.toBlock(disconnectedBlock.header(), true)
+    const block = this.toBlock(disconnectedBlock.header())
     // Rewind the current block
     const txsLength = await this.rewindBlock(block.height)
     const t1 = (performance.now() - t0).toFixed(3)
@@ -835,20 +795,28 @@ export class Indexer {
    * @param data
    * @returns
    */
-  private processBlockOrMempool(data: NNG.Block | NNG.GetMempoolResponse) {
+  private processBlockOrMempool(
+    data: NNG.Block | NNG.GetMempoolResponse,
+  ): RankTransaction[] {
     const ranks: RankTransaction[] = []
     const txsLength = data.txsLength()
     const block = data instanceof NNG.Block ? this.toBlock(data.header()) : null
     // skip coinbase tx if processing block data
     for (let i = block ? 1 : 0; i < txsLength; i++) {
       try {
-        const txRaw = data.txs(i).tx().rawArray()
+        const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
-        const tx = new Transaction(Buffer.from(txRaw))
-        // Try to convert to RANK tx; keep if successful
-        const rank = this.toRankTransaction(tx, block)
-        if (rank) {
-          ranks.push(rank)
+        const tx = new Transaction(Buffer.from(rawArray))
+        // Process tx outputs for RANK outputs; convert any to RANK txs
+        const output = this.processTransactionOutputs(tx.outputs)
+        if (output) {
+          ranks.push({
+            txid: tx.txid,
+            height: block?.height, // undefined if mempool tx
+            timestamp:
+              block?.timestamp ?? BigInt(Math.round(Date.now() / 1000)),
+            ...output,
+          })
         }
       } catch (e) {
         throw new Error(`processBlockOrMempool(${typeof data}): ${e.message}`)
@@ -857,50 +825,21 @@ export class Indexer {
     return ranks
   }
   /**
-   * Convert Bitcore `Transaction.Output[]` into a `RankTransaction`, using `Block` data if applicable
-   * @param tx Bitcore `Transaction`
-   * @param block `Block` converted from `NNG.BlockHeader`
-   * @returns {RankTransaction}
+   * Parse the Bitcore-compatible tx outputs for RANK outputs and return them
+   * @param outputs Transaction `output` array in Bitcore format
+   * @returns {RankOutput} Processed RANK output, or null if none found
    */
-  private toRankTransaction(
-    tx: Transaction,
-    block: Block = null,
-  ): RankTransaction {
-    const outputs = this.processTransactionOutputs(tx.outputs)
-    if (outputs.length > 0) {
-      const rank: RankTransaction = {
-        txid: tx.txid,
-        timestamp: block?.timestamp ?? BigInt(Date.now()),
-        ...outputs.shift(), // Only first output has RankTransaction data
-      }
-      // Add height if tx is confirmed
-      if (block?.height) {
-        rank.height = block.height
-      }
-      return rank
-    }
-    return null
-  }
-  /**
-   * Parse the Bitcore-compatible transaction for RANK outputs and return all `RankTransaction` objects
-   * @param tx Transaction object in Bitcore format
-   * @returns {RankOutputs[]} Array of `RankTransaction` objects
-   */
-  private processTransactionOutputs(
-    outputs: Transaction.Output[],
-  ): RankOutput[] {
-    const ranks: RankOutput[] = []
+  private processTransactionOutputs(outputs: Transaction.Output[]): RankOutput {
     try {
-      for (let outIdx = 0; outIdx < outputs.length; outIdx++) {
-        const output = outputs[outIdx]
-        // Return RANK output array with 0 or more items
-        if (!this.isRankScript(output.script)) {
-          return ranks
-        }
-        ranks.push(this.toRankOutput(output))
+      // first output MUST be RANK output, else invalid
+      if (!this.isRankScript(outputs[0].script)) {
+        return null
       }
-      // tx may not have change output; return all RANK outputs we found
-      return ranks
+      const rank = this.parseRawRankOutput(outputs[0])
+      // TODO: additional processing for RANK extension outputs
+
+      // Return processed output(s)
+      return rank
     } catch (e) {
       throw new Error(
         `processTransactionOutputs(${typeof outputs}): ${e.message}`,
@@ -912,7 +851,7 @@ export class Indexer {
    * @param script Bitcore `Script`
    * @returns {false | Buffer}
    */
-  private isRankScript(script: Script): false | Buffer {
+  private isRankScript(script: Script): boolean {
     // we only care about OP_RETURN outputs
     if (!script.isDataOut()) {
       return false
@@ -922,53 +861,51 @@ export class Indexer {
     if (scriptBuf.length < RANK_SCRIPT_MIN_BYTE_LENGTH) {
       return false
     }
-    // validate all required parameters for RANK script parts
-    for (const part of Object.values(this.parts.required)) {
-      const hex = this.getScriptPart(part, scriptBuf, 'hex')
+    // validate all required parameters for RANK script chunks
+    for (const chunk of Object.values(this.chunks.required)) {
+      const chunkBuf = this.getScriptChunk(chunk, scriptBuf)
       if (
-        // script part value is invalid, if applicable
-        (part.values && !part.values.includes(hex)) ||
-        // script part byte length does not meet requirement
-        Buffer.from(hex, 'hex').length != part.len
+        // script chunk value is invalid, if applicable
+        // need to read in big endian for SCRIPT_CHUNK map keys
+        // e.g. 0x52414e4b == 1380011595 (big endian / nodejs)
+        //      0x52414e4b == 1263419730 (little endian / lotusd)
+        (chunk.map && !chunk.map.has(chunkBuf.readUIntBE(0, chunk.len))) ||
+        // script chunk byte length does not meet requirement
+        chunkBuf.length != chunk.len
       ) {
         return false
       }
     }
-    // valid RANK output confirmed; return for processing
-    return scriptBuf
+    // valid RANK output confirmed
+    return true
   }
   /**
-   * Parse the provided `scriptBuf` for the ScriptPart data, encoded as hex or UTF-8
-   * @param part {ScriptPart} The ScriptPart for which to parse
+   * Parse the provided `scriptBuf` for the ScriptChunk data and return the resulting Buffer
+   * @param chunk {ScriptChunk} The ScriptChunk for which to parse
    * @param scriptBuf {Buffer} The script buffer (`OP_RETURN` output only)
-   * @returns {string}
+   * @returns {Buffer}
    */
-  private getScriptPart(
-    part: ScriptPart,
-    scriptBuf: Buffer,
-    encoding: 'utf-8' | 'hex',
-  ): string {
-    return scriptBuf
-      .subarray(part.offset, part.offset + part.len)
-      .toString(encoding)
+  private getScriptChunk(chunk: ScriptChunk, scriptBuf: Buffer): Buffer {
+    return scriptBuf.subarray(chunk.offset, chunk.offset + chunk.len)
   }
   /**
-   * Convert raw `Transaction.Output` to RANK output
-   * @param output Transaction output in Bitcore-compatible format
+   * Convert raw Bitcore RANK output to `RankOutput` object
+   * @see {@linkcode RankOutput}
+   * @param output RANK output in Bitcore format
    * @returns {RankOutput}
    */
-  private toRankOutput(output: Transaction.Output): RankOutput {
-    const parts = this.parts.required
+  private parseRawRankOutput(output: Transaction.Output): RankOutput {
+    const chunks = this.chunks.required
     const scriptBuf = output.script.toBuffer()
-    const platform = this.getScriptPart(parts.PLATFORM, scriptBuf, 'hex')
-    const profileId = this.getScriptPart(parts.PROFILE, scriptBuf, 'hex')
-    const sentiment = this.getScriptPart(parts.SENTIMENT, scriptBuf, 'hex')
+    const platformBuf = this.getScriptChunk(chunks.PLATFORM, scriptBuf)
+    const profileIdBuf = this.getScriptChunk(chunks.PROFILE, scriptBuf)
+    const sentimentBuf = this.getScriptChunk(chunks.SENTIMENT, scriptBuf)
     const sats = BigInt(output.satoshis)
     return {
-      platform: toPlatformName(platform).toLowerCase(),
-      profileId: toProfileName(profileId),
+      platform: toPlatformUTF8(platformBuf).toLowerCase(),
+      profileId: toProfileUTF8(profileIdBuf).toLowerCase(),
+      sentiment: toSentimentUTF8(sentimentBuf).toLowerCase(),
       sats,
-      sentiment,
     }
   }
   /**
@@ -1033,13 +970,13 @@ export class Indexer {
       let votesPositive: number
       let votesNegative: number
       // Do a switch here in case sentiment is more than binary in the future
-      switch (rank.sentiment) {
-        case RANK_SCRIPT_PARTS.SENTIMENT.POSITIVE:
+      switch (rank.sentiment as Lowercase<ScriptChunkSentimentUTF8>) {
+        case 'positive':
           ranking = rank.sats
           votesPositive = 1
           votesNegative = 0
           break
-        case RANK_SCRIPT_PARTS.SENTIMENT.NEGATIVE:
+        case 'negative':
           ranking = -rank.sats
           votesPositive = 0
           votesNegative = 1

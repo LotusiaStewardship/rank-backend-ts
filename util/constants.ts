@@ -1,3 +1,13 @@
+import type {
+  ScriptChunkLokadMap,
+  ScriptChunkPlatformMap,
+  ScriptChunkSentimentMap,
+  ScriptChunkLokadUTF8,
+  ScriptChunkPlatformUTF8,
+  ScriptChunkSentimentUTF8,
+  PlatformParameters,
+  Block,
+} from './types'
 /**
  * NNG configuration
  */
@@ -9,31 +19,44 @@ export const NNG_SOCKET_RECONN = 300 // time (ms) between reconnect attempts
 export const NNG_SOCKET_MAXRECONN = 3000 // max time (ms) before giving up reconnect
 export const NNG_REQUEST_TIMEOUT_LENGTH = 2000 // max time (ms) before aborting a Socket.send()
 /**
- * RANK script declarations
+ * RANK script configuration
  */
-export enum SCRIPT_PART_LOKAD {
-  RANK = '52414e4b' // "RANK"
-}
-export enum SCRIPT_PART_PLATFORM {
-  TWITTER = '01'
-}
-export enum SCRIPT_PART_SENTIMENT {
-  POSITIVE = '51', // OP_1 | OP_TRUE
-  NEGATIVE = '00', // OP_0 | OP_FALSE
-}
 export const RANK_SCRIPT_MIN_BYTE_LENGTH = 26 // required byte length for valid RANK tx
-export const RANK_SCRIPT_PARTS = {
-  LOKAD: SCRIPT_PART_LOKAD,
-  PLATFORM: SCRIPT_PART_PLATFORM,
-  SENTIMENT: SCRIPT_PART_SENTIMENT,
+/** First block with a RANK transaction */
+export const RANK_BLOCK_GENESIS_V1: Partial<Block> = {
+  hash: '00000000019cc1ddc04bc541f531f1424d04d0c37443867f1f6137cc7f7d09e5',
+  height: 811624,
+}
+/**
+ * RANK script types and constants
+ */
+export const SCRIPT_CHUNK_LOKAD: ScriptChunkLokadMap = new Map()
+SCRIPT_CHUNK_LOKAD.set(0x52414e4b, 'RANK')
+export const SCRIPT_CHUNK_PLATFORM: ScriptChunkPlatformMap = new Map()
+SCRIPT_CHUNK_PLATFORM.set(0x00, 'WEB_URL') // any URL; the PROFILE script chunk is not necessary
+SCRIPT_CHUNK_PLATFORM.set(0x01, 'TWITTER') // twitter.com/x.com
+export const SCRIPT_CHUNK_SENTIMENT: ScriptChunkSentimentMap = new Map()
+SCRIPT_CHUNK_SENTIMENT.set(0x51, 'POSITIVE') // OP_1 | OP_TRUE
+SCRIPT_CHUNK_SENTIMENT.set(0x00, 'NEGATIVE') // OP_0 | OP_FALSE
+export const RANK_SCRIPT_CHUNKS = {
+  LOKAD: SCRIPT_CHUNK_LOKAD,
+  PLATFORM: SCRIPT_CHUNK_PLATFORM,
+  SENTIMENT: SCRIPT_CHUNK_SENTIMENT,
   PROFILE: null,
   POST: null,
   COMMENT: null,
 }
 /**
- * Twitter stuff
+ * Platform stuff
  */
-export const TWITTER_PROFILE_LENGTH = 16 // maximum length of profile handle
+export const PLATFORMS: {
+  [name in ScriptChunkPlatformUTF8]: Partial<PlatformParameters>
+} = {
+  WEB_URL: {},
+  TWITTER: {
+    profileMaxLength: 16,
+  },
+}
 /**
  * Error codes
  */
