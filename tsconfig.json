@@ -1,6 +1,6 @@
 {
   "exclude": [
-    "local_modules",
+    "submodules",
     "node_modules"
   ],
   "compilerOptions": {
