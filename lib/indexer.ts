@@ -648,7 +648,7 @@ export default class Indexer {
     // Set up disconnected block for comparison to current best (checkpoint)
     const disconnectedBlock =
       NNG.BlockDisconnected.getRootAsBlockDisconnected(bb).block()
-    const block = this.toBlock(disconnectedBlock.header(), true)
+    const block = this.toBlock(disconnectedBlock.header())
     // Rewind the current block
     const txsLength = await this.rewindBlock(block.height)
     const t1 = (performance.now() - t0).toFixed(3)
