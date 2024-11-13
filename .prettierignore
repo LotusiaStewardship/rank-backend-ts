@@ -1,4 +1,6 @@
-local_modules/**
+submodules/**/*
 lib/nng-interface/**
 *.js
 *.fbs
+**/*.json
+**/*.jsonc
