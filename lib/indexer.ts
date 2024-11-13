@@ -78,33 +78,14 @@ export default class Indexer {
    * @param pubUri
    * @param rpcUri
    */
-  constructor(protocol?: 'ipc' | 'tcp', pubUri?: string, rpcUri?: string) {
+  constructor(pubUri?: string, rpcUri?: string) {
     // Validate NNG parameters
-    switch (protocol) {
-      case 'ipc':
-        this.pubUri = `ipc://${resolve(pubUri)}`
-        this.rpcUri = `ipc://${resolve(rpcUri)}`
-        break
-      case 'tcp':
-        let invalidIP: string = null
-        if (!isIP(pubUri)) {
-          invalidIP = pubUri
-        }
-        if (!isIP(rpcUri)) {
-          invalidIP = rpcUri
-        }
-        if (invalidIP) {
-          throw new Error(
-            `protocol tcp expects valid IP address, got "${invalidIP}"`,
-          )
-        }
-        this.pubUri = `tcp://${pubUri}`
-        this.rpcUri = `tcp://${rpcUri}`
-        break
-      default:
-        this.pubUri = `ipc://${resolve(NNG_PUB_DEFAULT_SOCKET_PATH)}`
-        this.rpcUri = `ipc://${resolve(NNG_RPC_DEFAULT_SOCKET_PATH)}`
-    }
+    this.pubUri = pubUri
+      ? `ipc://${resolve(pubUri)}`
+      : `ipc://${resolve(NNG_PUB_DEFAULT_SOCKET_PATH)}`
+    this.rpcUri = rpcUri
+      ? `ipc://${resolve(rpcUri)}`
+      : `ipc://${resolve(NNG_RPC_DEFAULT_SOCKET_PATH)}`
     // Module setup
     this.db = new Database()
     // Pub/Sub socket setup
