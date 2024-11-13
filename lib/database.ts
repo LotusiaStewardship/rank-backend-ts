@@ -181,36 +181,38 @@ export default class Database {
    */
   toProfileUpsertStatements(profiles: ProfileMap) {
     const upserts: ReturnType<typeof this.db.profile.upsert>[] = []
-    for (const [profileId, profile] of profiles) {
+    for (const [id, profile] of profiles) {
+      const { platform, ranks, ranking, votesPositive, votesNegative } = profile
       upserts.push(
         this.db.profile.upsert({
           where: {
-            id_platform: {
-              id: profileId,
-              platform: profile.platform,
-            },
+            id_platform: { id, platform },
           },
           // profile doesn't exist
           create: {
-            ...profile,
+            id,
+            platform,
+            ranking,
+            votesPositive,
+            votesNegative,
             account: { create: { id: randomUUID() } },
             ranks: {
-              createMany: { data: profile.ranks },
+              createMany: { data: ranks },
             },
           },
           // profile exists
           update: {
             ranks: {
-              createMany: { data: profile.ranks },
+              createMany: { data: ranks },
             },
             ranking: {
-              increment: profile.ranking,
+              increment: ranking,
             },
             votesPositive: {
-              increment: profile.votesPositive,
+              increment: votesPositive,
             },
             votesNegative: {
-              increment: profile.votesNegative,
+              increment: votesNegative,
             },
           },
         }),
@@ -225,31 +227,29 @@ export default class Database {
    */
   toProfileRewindStatements(profiles: ProfileMap) {
     const rewinds: ReturnType<typeof this.db.profile.update>[] = []
-    for (const [profileId, profile] of profiles) {
+    for (const [id, profile] of profiles) {
+      const { platform, ranks, ranking, votesPositive, votesNegative } = profile
       rewinds.push(
         this.db.profile.update({
           where: {
-            id_platform: {
-              id: profileId,
-              platform: profile.platform,
-            },
+            id_platform: { id, platform },
           },
           data: {
             ranks: {
               deleteMany: {
                 txid: {
-                  in: profile.ranks.map(rank => rank.txid),
+                  in: ranks.map(rank => rank.txid),
                 },
               },
             },
             ranking: {
-              decrement: profile.ranking,
+              decrement: ranking,
             },
             votesPositive: {
-              decrement: profile.votesPositive,
+              decrement: votesPositive,
             },
             votesNegative: {
-              decrement: profile.votesNegative,
+              decrement: votesNegative,
             },
           },
         }),
