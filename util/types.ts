@@ -2,18 +2,30 @@ import { RANK_SCRIPT_CHUNKS } from './constants'
 // General types
 export type IndexerLogEntry = [string, string]
 export type PlatformParameters = {
-  profileMaxLength: number
+  profileId: {
+    len: number
+  }
+  postId: {
+    len: number
+    regex: RegExp
+    reader: 'readBigUInt64BE'
+  }
 }
 // RANK script types
 export type ScriptChunkLokadUTF8 = 'RANK'
-export type ScriptChunkPlatformUTF8 = 'WEB_URL' | 'TWITTER'
-export type ScriptChunkSentimentUTF8 = 'POSITIVE' | 'NEGATIVE'
+export type ScriptChunkPlatformUTF8 = 'twitter'
+export type ScriptChunkSentimentUTF8 = 'positive' | 'negative'
 export type ScriptChunkLokadMap = Map<number, ScriptChunkLokadUTF8>
 export type ScriptChunkPlatformMap = Map<number, ScriptChunkPlatformUTF8>
 export type ScriptChunkSentimentMap = Map<number, ScriptChunkSentimentUTF8>
-export type ScriptChunkField = keyof typeof RANK_SCRIPT_CHUNKS
+export type ScriptChunkField =
+  | 'lokad'
+  | 'sentiment'
+  | 'platform'
+  | 'profile'
+  | 'post'
+  | 'comment'
 export type ScriptChunk = {
-  offset: number
   len: number
   map?: ScriptChunkLokadMap | ScriptChunkPlatformMap | ScriptChunkSentimentMap
 }
@@ -21,13 +33,15 @@ export type ScriptChunk = {
 export type RankOutput = {
   platform: string // e.g. Twitter/X.com, etc.
   profileId: string // who the ranking is for
+  postId?: string // optional post ID if ranking specific content
   sentiment: string // positive or negative sentiment (can support more)
-  sats: bigint // sats for sentiment
+  comment?: string // optional comment
 }
 /**  */
 export type RankTransaction = RankOutput & {
   txid: string
   height?: number // undefined if mempool
+  sats: bigint
   timestamp: bigint // unix timestamp
 }
 /** */

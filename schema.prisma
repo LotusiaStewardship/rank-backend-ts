@@ -48,8 +48,9 @@ model RankTransaction {
   // RankOutput data
   platform  String // references platform field on Profile model
   profileId String // references id field on Profile model
+  postId    String? // optional reference to platform post ID (e.g. x.com/:profileId/status/:postId)
   sentiment String // 1-byte sentiment, 0x00 = negative, 0x01 = positive, and potentially more
-  sats     BigInt // amount of sats burned
+  sats      BigInt // amount of sats burned
   // each RANK tx is associated with a Profile, else it is invalid
   profile   Profile @relation(fields: [profileId, platform], references: [id, platform])
   block     Block?  @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)

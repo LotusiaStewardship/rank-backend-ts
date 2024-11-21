@@ -1,12 +1,12 @@
 import type {
+  ScriptChunk,
   ScriptChunkLokadMap,
   ScriptChunkPlatformMap,
   ScriptChunkSentimentMap,
-  ScriptChunkLokadUTF8,
   ScriptChunkPlatformUTF8,
-  ScriptChunkSentimentUTF8,
   PlatformParameters,
   Block,
+  ScriptChunkField,
 } from './types'
 /**
  * NNG configuration
@@ -33,28 +33,51 @@ export const RANK_BLOCK_GENESIS_V1: Partial<Block> = {
 export const SCRIPT_CHUNK_LOKAD: ScriptChunkLokadMap = new Map()
 SCRIPT_CHUNK_LOKAD.set(0x52414e4b, 'RANK')
 export const SCRIPT_CHUNK_PLATFORM: ScriptChunkPlatformMap = new Map()
-SCRIPT_CHUNK_PLATFORM.set(0x00, 'WEB_URL') // any URL; the PROFILE script chunk is not necessary
-SCRIPT_CHUNK_PLATFORM.set(0x01, 'TWITTER') // twitter.com/x.com
+//SCRIPT_CHUNK_PLATFORM.set(0x00, 'web_url') // any URL; the PROFILE script chunk is not necessary
+SCRIPT_CHUNK_PLATFORM.set(0x01, 'twitter') // twitter.com/x.com
 export const SCRIPT_CHUNK_SENTIMENT: ScriptChunkSentimentMap = new Map()
-SCRIPT_CHUNK_SENTIMENT.set(0x51, 'POSITIVE') // OP_1 | OP_TRUE
-SCRIPT_CHUNK_SENTIMENT.set(0x00, 'NEGATIVE') // OP_0 | OP_FALSE
-export const RANK_SCRIPT_CHUNKS = {
-  LOKAD: SCRIPT_CHUNK_LOKAD,
-  PLATFORM: SCRIPT_CHUNK_PLATFORM,
-  SENTIMENT: SCRIPT_CHUNK_SENTIMENT,
-  PROFILE: null,
-  POST: null,
-  COMMENT: null,
+SCRIPT_CHUNK_SENTIMENT.set(0x51, 'positive') // OP_1 | OP_TRUE
+SCRIPT_CHUNK_SENTIMENT.set(0x00, 'negative') // OP_0 | OP_FALSE
+export const RANK_SCRIPT_CHUNKS: {
+  [name in ScriptChunkField]: ScriptChunk
+} = {
+  lokad: {
+    len: 4,
+    map: SCRIPT_CHUNK_LOKAD,
+  },
+  sentiment: {
+    len: 1,
+    map: SCRIPT_CHUNK_SENTIMENT,
+  },
+  platform: {
+    len: 1,
+    map: SCRIPT_CHUNK_PLATFORM,
+  },
+  profile: {
+    len: null,
+  },
+  post: {
+    len: null,
+  },
+  comment: {
+    len: null,
+  },
 }
 /**
  * Platform stuff
  */
 export const PLATFORMS: {
-  [name in ScriptChunkPlatformUTF8]: Partial<PlatformParameters>
+  [name in ScriptChunkPlatformUTF8]: PlatformParameters
 } = {
-  WEB_URL: {},
-  TWITTER: {
-    profileMaxLength: 16,
+  twitter: {
+    profileId: {
+      len: 16,
+    },
+    postId: {
+      len: 8, // 64-bit uint: https://developer.x.com/en/docs/x-ids
+      regex: /[0-9]+/,
+      reader: 'readBigUInt64BE',
+    },
   },
 }
 /**
