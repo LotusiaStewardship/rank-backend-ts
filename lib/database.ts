@@ -180,13 +180,16 @@ export default class Database {
    * @returns
    */
   toProfileUpsertStatements(profiles: ProfileMap) {
-    const upserts: ReturnType<typeof this.db.profile.upsert>[] = []
+    const upserts: ReturnType<
+      typeof this.db.post.upsert | typeof this.db.profile.upsert
+    >[] = []
     for (const [id, profile] of profiles) {
       const { platform, ranks, ranking, votesPositive, votesNegative } = profile
+      // push profile upsert first
       upserts.push(
         this.db.profile.upsert({
           where: {
-            id_platform: { id, platform },
+            platform_id: { platform, id },
           },
           // profile doesn't exist
           create: {
@@ -217,6 +220,73 @@ export default class Database {
           },
         }),
       )
+      // push any post upsert(s) after Profile exists
+      if (profile.posts) {
+        for (const [id, post] of profile.posts) {
+          const {
+            platform,
+            profileId,
+            ranks,
+            ranking,
+            votesPositive,
+            votesNegative,
+          } = post
+          const increments = {
+            ranking: {
+              increment: ranking,
+            },
+            votesPositive: {
+              increment: votesPositive,
+            },
+            votesNegative: {
+              increment: votesNegative,
+            },
+          }
+          // upsert the post first
+          upserts.push(
+            this.db.post.upsert({
+              where: {
+                platform_profileId_id: {
+                  platform,
+                  profileId,
+                  id,
+                },
+              },
+              // post doesn't exist
+              create: {
+                id,
+                platform,
+                profileId,
+                ranking,
+                votesPositive,
+                votesNegative,
+                ranks: {
+                  createMany: { data: ranks },
+                },
+              },
+              // post exists
+              update: {
+                ranks: {
+                  createMany: { data: ranks },
+                },
+                ...increments,
+              },
+            }),
+          )
+          // update profile rankings after post upsert
+          upserts.push(
+            this.db.profile.update({
+              where: {
+                platform_id: {
+                  platform,
+                  id: profileId,
+                },
+              },
+              data: increments,
+            }),
+          )
+        }
+      }
     }
     return upserts
   }
@@ -226,13 +296,16 @@ export default class Database {
    * @returns
    */
   toProfileRewindStatements(profiles: ProfileMap) {
-    const rewinds: ReturnType<typeof this.db.profile.update>[] = []
+    const rewinds: ReturnType<
+      typeof this.db.post.update | typeof this.db.profile.update
+    >[] = []
     for (const [id, profile] of profiles) {
       const { platform, ranks, ranking, votesPositive, votesNegative } = profile
+      // push profile rewind first
       rewinds.push(
         this.db.profile.update({
           where: {
-            id_platform: { id, platform },
+            platform_id: { platform, id },
           },
           data: {
             ranks: {
@@ -254,6 +327,56 @@ export default class Database {
           },
         }),
       )
+      // push any post rewind(s) after
+      if (profile.posts) {
+        for (const [id, post] of profile.posts) {
+          const {
+            platform,
+            profileId,
+            ranks,
+            ranking,
+            votesPositive,
+            votesNegative,
+          } = post
+          const decrements = {
+            ranking: {
+              decrement: ranking,
+            },
+            votesPositive: {
+              decrement: votesPositive,
+            },
+            votesNegative: {
+              decrement: votesNegative,
+            },
+          }
+          rewinds.push(
+            this.db.post.update({
+              where: {
+                platform_profileId_id: {
+                  platform,
+                  profileId,
+                  id,
+                },
+              },
+              data: {
+                ranks: {
+                  deleteMany: {
+                    txid: {
+                      in: ranks.map(rank => rank.txid),
+                    },
+                  },
+                },
+                // MUST decrement profile counters since post counts towards profile
+                profile: {
+                  update: decrements,
+                },
+                // decrement post counters
+                ...decrements,
+              },
+            }),
+          )
+        }
+      }
     }
     return rewinds
   }

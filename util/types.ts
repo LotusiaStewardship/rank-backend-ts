@@ -52,14 +52,21 @@ export type Block = {
   ranksLength: number // default is 0 if a block is cringe
   prevhash?: string // for reorg checks only; does not get saved to database
 }
-/**  */
-export type Profile = {
-  id: string
+export type RankTarget = {
+  id: string // profileId, postId, etc
   platform: string
   ranking: bigint
   ranks: Omit<RankTransaction, 'profileId' | 'platform'>[] // omit the database relation fields
   votesPositive: number
   votesNegative: number
+}
+/**  */
+export type Profile = RankTarget & {
+  posts?: PostMap
+}
+/**  */
+export type Post = RankTarget & {
+  profileId: string
 }
 /**
  * `RankTransaction` objects are converted to a `ProfileMap` for database ops
@@ -67,3 +74,4 @@ export type Profile = {
  * `string` is `profileId`
  */
 export type ProfileMap = Map<string, Profile>
+export type PostMap = Map<string, Post>

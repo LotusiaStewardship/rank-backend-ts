@@ -32,6 +32,7 @@ import type {
   RankTransaction,
   Block,
   ProfileMap,
+  RankTarget,
   ScriptChunk,
   ScriptChunkField,
   ScriptChunkPlatformUTF8,
@@ -971,7 +972,7 @@ export default class Indexer {
    * @returns {ProfileMap} Map where key is `profileId` and value is `Profile` object
    */
   private toProfileMap(ranks: RankTransaction[]): ProfileMap {
-    const map: ProfileMap = new Map()
+    const profiles: ProfileMap = new Map()
     // Sort the RANK txs for upsert
     ranks.forEach(rank => {
       // Determine positive/negative stats per RANK sentiment
@@ -979,7 +980,7 @@ export default class Indexer {
       let votesPositive: number
       let votesNegative: number
       // Do a switch here in case sentiment is more than binary in the future
-      switch (rank.sentiment as Lowercase<ScriptChunkSentimentUTF8>) {
+      switch (rank.sentiment as ScriptChunkSentimentUTF8) {
         case 'positive':
           ranking = rank.sats
           votesPositive = 1
@@ -991,24 +992,49 @@ export default class Indexer {
           votesNegative = 1
           break
       }
-      const { profileId: id, platform, ...partialRank } = rank
-      const profile = map.get(id)
-      if (profile) {
-        profile.ranks.push(partialRank)
-        profile.ranking += ranking
-        profile.votesPositive += votesPositive
-        profile.votesNegative += votesNegative
-        return
-      }
-      map.set(rank.profileId, {
-        id,
+      const { platform, profileId, postId, ...partialRank } = rank
+      const target: RankTarget = {
+        id: null,
         platform,
-        ranks: [partialRank],
+        ranks: [],
         ranking,
         votesPositive,
         votesNegative,
+      }
+      let profile = profiles.get(profileId)
+      if (profile) {
+        profile.ranking += ranking
+        profile.votesPositive += votesPositive
+        profile.votesNegative += votesNegative
+      } else {
+        profile = {
+          ...target,
+          id: profileId,
+        }
+        profiles.set(profileId, profile)
+      }
+      // If we don't have a postId, then this RANK tx belongs to the Profile
+      if (!postId) {
+        profile.ranks.push(partialRank)
+        return
+      }
+      // Otherwise, we set up the Post and attach this RANK tx to it
+      const post = profile.posts?.get(postId)
+      if (post) {
+        post.ranking += ranking
+        post.votesPositive += votesPositive
+        post.votesNegative += votesNegative
+        post.ranks.push(partialRank)
+        return
+      }
+      profile.posts = new Map()
+      profile.posts.set(postId, {
+        ...target,
+        id: postId,
+        profileId,
+        ranks: [partialRank],
       })
     })
-    return map
+    return profiles
   }
 }

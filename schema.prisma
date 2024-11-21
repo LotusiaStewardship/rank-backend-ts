@@ -30,14 +30,31 @@ model Profile {
   votesPositive Int // Total number of RANK txs with positive sentinment
   votesNegative Int // Total number of RANK txs with negative sentiment
   ranks         RankTransaction[]
+  posts         Post[]
   account       Account?          @relation(fields: [accountId], references: [id])
 
-  @@id([id, platform])
+  @@id([platform, id])
   @@index([id(type: hash)])
   // these indexes are best used with a `LIMIT BY`
   // ref: https://www.postgresql.org/docs/current/indexes-ordering.html#INDEXES-ORDERING
   @@index([id(type: hash), ranking(type: btree, sort: Desc)], name: "profile_idx_ranked_highest")
   @@index([id(type: hash), ranking(type: btree, sort: Asc)], name: "profile_idx_ranked_lowest")
+}
+
+model Post {
+  id            String // Platform-unique post ID
+  platform      String // e.g. Twitter/x.com
+  profileId     String // Platform profile ID (i.e. username)
+  ranking       BigInt // Overall post ranking, in satoshis
+  votesPositive Int // Total number of RANK txs with positive sentiment
+  votesNegative Int // Total number of RANK txs with negative sentiment
+  // Each Post correlates with a Profile
+  profile       Profile           @relation(fields: [profileId, platform], references: [id, platform])
+  // RANK txs specific to this Post
+  ranks         RankTransaction[]
+
+  // Each post will require these three entries
+  @@id([platform, profileId, id])
 }
 
 model RankTransaction {
@@ -52,7 +69,10 @@ model RankTransaction {
   sentiment String // 1-byte sentiment, 0x00 = negative, 0x01 = positive, and potentially more
   sats      BigInt // amount of sats burned
   // each RANK tx is associated with a Profile, else it is invalid
-  profile   Profile @relation(fields: [profileId, platform], references: [id, platform])
+  profile   Profile @relation(fields: [platform, profileId], references: [platform, id])
+  // each RANK tx MAY be associated with a Post
+  post      Post?   @relation(fields: [platform, profileId, postId], references: [platform, profileId, id])
+  // each RANK tx from the mempool does not yet have a Block
   block     Block?  @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
 
   @@index([profileId(type: hash), sentiment(type: hash)])
