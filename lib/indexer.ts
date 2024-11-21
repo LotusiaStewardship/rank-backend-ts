@@ -22,6 +22,7 @@ import {
   NNG_SOCKET_RECONN,
   PLATFORMS,
   RANK_BLOCK_GENESIS_V1,
+  RANK_OUTPUT_MIN_VALUE,
   RANK_SCRIPT_CHUNKS,
   RANK_SCRIPT_MIN_BYTE_LENGTH,
 } from '../util/constants'
@@ -827,6 +828,10 @@ export default class Indexer {
       const { script, satoshis } = outputs[0]
       // first output script MUST be OP_RETURN else ignore
       if (!script.isDataOut()) {
+        return null
+      }
+      // OP_RETURN output value MUST be >= defined minimum
+      if (satoshis < RANK_OUTPUT_MIN_VALUE) {
         return null
       }
       // exclude OP_RETURN chunk and make sure remaining chunk count is valid

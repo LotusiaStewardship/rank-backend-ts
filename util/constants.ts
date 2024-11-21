@@ -21,7 +21,7 @@ export const NNG_REQUEST_TIMEOUT_LENGTH = 2000 // max time (ms) before aborting 
 /**
  * RANK script configuration
  */
-export const RANK_SCRIPT_MIN_BYTE_LENGTH = 26 // required byte length for valid RANK tx
+export const RANK_OUTPUT_MIN_VALUE = 1_000_000 // minimum burn value in sats
 /** First block with a RANK transaction */
 export const RANK_BLOCK_GENESIS_V1: Partial<Block> = {
   hash: '00000000019cc1ddc04bc541f531f1424d04d0c37443867f1f6137cc7f7d09e5',
