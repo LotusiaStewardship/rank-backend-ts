@@ -74,9 +74,10 @@ export const PLATFORMS: {
       len: 16,
     },
     postId: {
-      len: 8, // 64-bit uint: https://developer.x.com/en/docs/x-ids
+      chunkLength: 8, // 64-bit uint: https://developer.x.com/en/docs/x-ids
       regex: /[0-9]+/,
       reader: 'readBigUInt64BE',
+      type: 'BigInt',
     },
   },
 }
