@@ -1,10 +1,11 @@
-import { Script, Transaction } from '@abcpros/bitcore-lib-xpi'
+import { Chunk, Transaction } from '@abcpros/bitcore-lib-xpi'
 import { Builder, ByteBuffer } from 'flatbuffers'
 import { isIP } from 'validator'
 import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
 import Database from './database'
 import {
+  toCommentUTF8,
   toProfileUTF8,
   toPlatformUTF8,
   toSentimentUTF8,
@@ -19,9 +20,10 @@ import {
   NNG_RPC_RCVMAXSIZE_CONSENSUS,
   NNG_SOCKET_MAXRECONN,
   NNG_SOCKET_RECONN,
+  PLATFORMS,
   RANK_BLOCK_GENESIS_V1,
+  RANK_OUTPUT_MIN_VALUE,
   RANK_SCRIPT_CHUNKS,
-  RANK_SCRIPT_MIN_BYTE_LENGTH,
 } from '../util/constants'
 import type {
   IndexerLogEntry,
@@ -29,8 +31,10 @@ import type {
   RankTransaction,
   Block,
   ProfileMap,
+  RankTarget,
   ScriptChunk,
   ScriptChunkField,
+  ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
 } from '../util/types'
 import { resolve } from 'node:path/posix'
@@ -66,10 +70,10 @@ export default class Indexer {
   private queue: NNGQueue
   private chunks: {
     required: {
-      [chunk in Exclude<ScriptChunkField, 'POST' | 'COMMENT'>]: ScriptChunk
+      [chunk in Exclude<ScriptChunkField, 'post' | 'comment'>]: ScriptChunk
     }
     optional: {
-      [chunk in Extract<ScriptChunkField, 'POST' | 'COMMENT'>]: ScriptChunk
+      [chunk in Extract<ScriptChunkField, 'post' | 'comment'>]: ScriptChunk
     }
   }
   private checkpoint: Block
@@ -106,26 +110,14 @@ export default class Indexer {
     this.queue = { busy: false, pending: [] }
     this.chunks = {
       required: {
-        LOKAD: {
-          offset: 2,
-          len: 4,
-          map: RANK_SCRIPT_CHUNKS.LOKAD,
-        },
-        SENTIMENT: {
-          offset: 6,
-          len: 1,
-          map: RANK_SCRIPT_CHUNKS.SENTIMENT,
-        },
-        PLATFORM: {
-          offset: 8,
-          len: 1,
-          map: RANK_SCRIPT_CHUNKS.PLATFORM,
-        },
-        PROFILE: { offset: 10, len: 16 }, // As long as it is 16 bytes it is good
+        lokad: RANK_SCRIPT_CHUNKS.lokad,
+        sentiment: RANK_SCRIPT_CHUNKS.sentiment,
+        platform: RANK_SCRIPT_CHUNKS.platform,
+        profile: RANK_SCRIPT_CHUNKS.profile, // As long as it is 16 bytes it is good
       },
       optional: {
-        POST: { offset: 26, len: 32 }, // sha256 hash of post metadata + body, if applicable
-        COMMENT: { offset: 58, len: 164 }, // optional on-chain comment to accompany vote (223 bytes - 59 bytes)
+        post: RANK_SCRIPT_CHUNKS.post, // post ID
+        comment: RANK_SCRIPT_CHUNKS.comment, // optional on-chain comment to accompany vote (223 bytes - 59 bytes)
       },
     }
   }
@@ -537,6 +529,7 @@ export default class Indexer {
       const rank = {
         txid: tx.txid,
         timestamp: mempooltx.time(),
+        sats: BigInt(tx.outputs[0].satoshis),
         ...output,
       } as RankTransaction
       const profiles = this.toProfileMap([rank])
@@ -813,6 +806,7 @@ export default class Indexer {
           ranks.push({
             txid: tx.txid,
             height: block?.height, // undefined if mempool tx
+            sats: BigInt(tx.outputs[0].satoshis),
             timestamp:
               block?.timestamp ?? BigInt(Math.round(Date.now() / 1000)),
             ...output,
@@ -831,13 +825,77 @@ export default class Indexer {
    */
   private processTransactionOutputs(outputs: Transaction.Output[]): RankOutput {
     try {
-      // first output MUST be RANK output, else invalid
-      if (!this.isRankScript(outputs[0].script)) {
+      const { script, satoshis } = outputs[0]
+      // first output script MUST be OP_RETURN else ignore
+      if (!script.isDataOut()) {
         return null
       }
-      const rank = this.parseRawRankOutput(outputs[0])
-      // TODO: additional processing for RANK extension outputs
-
+      // OP_RETURN output value MUST be >= defined minimum
+      if (satoshis < RANK_OUTPUT_MIN_VALUE) {
+        return null
+      }
+      // exclude OP_RETURN chunk and make sure remaining chunk count is valid
+      // chunks array is COPIED via .slice() so is SAFE to shift/splice/etc.
+      const chunks = script.chunks.slice(1)
+      const required = Object.values(this.chunks.required)
+      if (chunks.length < required.length) {
+        return null
+      }
+      // verify script chunks contain valid hard-coded chunk parameters
+      // this also inherently validates script chunk order
+      for (let i = 0; i < required.length; i++) {
+        const chunk = required[i]
+        if (!chunk.map) {
+          continue
+        }
+        // sentiment does not get parsed by bitcore into buf; convert opcodenum to buf
+        if (!chunks[i].buf) {
+          // put opcodenum in an array before Buffer.from
+          chunks[i].buf = Buffer.from([chunks[i].opcodenum])
+          chunks[i].len = chunks[i].buf.length
+        }
+        if (!chunk.map.has(chunks[i].buf.readUintBE(0, chunks[i].len))) {
+          return null
+        }
+      }
+      // gather parameters for platform
+      const platformChunk = this.chunks.required.platform
+      const platform = platformChunk.map.get(
+        chunks[2].buf.readUIntBE(0, platformChunk.len),
+      ) as ScriptChunkPlatformUTF8
+      const { profileId } = PLATFORMS[platform]
+      // script chunk after platform MUST be profile and be padded to required length
+      if (chunks[3].len < profileId.len) {
+        return null
+      }
+      // splice original chunk array to remove all required chunks
+      // then remove lokad chunk to process remaining required chunks into RankOutput
+      const rank = this.processScriptChunks(
+        chunks.splice(0, required.length).slice(1),
+      )
+      // Process optional chunks
+      if (chunks.length > 0) {
+        const { postId } = PLATFORMS[platform]
+        for (let i = 0; i < chunks.length; i++) {
+          let decoded: string
+          const chunk = chunks[i]
+          switch (i) {
+            // postId or comment
+            case 0:
+              // match platform postId requirements, otherwise assume comment data
+              decoded = chunk.buf[postId.reader]().toString()
+              if (chunk.len == postId.len && decoded.match(postId.regex)) {
+                rank.postId = decoded
+              } else {
+                rank.comment = toCommentUTF8(chunk.buf)
+              }
+              break
+            // comment
+            case 1:
+              break
+          }
+        }
+      }
       // Return processed output(s)
       return rank
     } catch (e) {
@@ -847,65 +905,16 @@ export default class Indexer {
     }
   }
   /**
-   * Check if the provided output `script` is a RANK script
-   * @param script Bitcore `Script`
-   * @returns {false | Buffer}
-   */
-  private isRankScript(script: Script): boolean {
-    // we only care about OP_RETURN outputs
-    if (!script.isDataOut()) {
-      return false
-    }
-    const scriptBuf = script.toBuffer()
-    // make sure the script has all required bytes
-    if (scriptBuf.length < RANK_SCRIPT_MIN_BYTE_LENGTH) {
-      return false
-    }
-    // validate all required parameters for RANK script chunks
-    for (const chunk of Object.values(this.chunks.required)) {
-      const chunkBuf = this.getScriptChunk(chunk, scriptBuf)
-      if (
-        // script chunk value is invalid, if applicable
-        // need to read in big endian for SCRIPT_CHUNK map keys
-        // e.g. 0x52414e4b == 1380011595 (big endian / nodejs)
-        //      0x52414e4b == 1263419730 (little endian / lotusd)
-        (chunk.map && !chunk.map.has(chunkBuf.readUIntBE(0, chunk.len))) ||
-        // script chunk byte length does not meet requirement
-        chunkBuf.length != chunk.len
-      ) {
-        return false
-      }
-    }
-    // valid RANK output confirmed
-    return true
-  }
-  /**
-   * Parse the provided `scriptBuf` for the ScriptChunk data and return the resulting Buffer
-   * @param chunk {ScriptChunk} The ScriptChunk for which to parse
-   * @param scriptBuf {Buffer} The script buffer (`OP_RETURN` output only)
-   * @returns {Buffer}
-   */
-  private getScriptChunk(chunk: ScriptChunk, scriptBuf: Buffer): Buffer {
-    return scriptBuf.subarray(chunk.offset, chunk.offset + chunk.len)
-  }
-  /**
-   * Convert raw Bitcore RANK output to `RankOutput` object
-   * @see {@linkcode RankOutput}
-   * @param output RANK output in Bitcore format
+   * Convert required RANK output chunks to `RankOutput` object
+   * @param chunks Bitcore script chunk array
    * @returns {RankOutput}
+   * @see {@linkcode RankOutput}
    */
-  private parseRawRankOutput(output: Transaction.Output): RankOutput {
-    const chunks = this.chunks.required
-    const scriptBuf = output.script.toBuffer()
-    const platformBuf = this.getScriptChunk(chunks.PLATFORM, scriptBuf)
-    const profileIdBuf = this.getScriptChunk(chunks.PROFILE, scriptBuf)
-    const sentimentBuf = this.getScriptChunk(chunks.SENTIMENT, scriptBuf)
-    const sats = BigInt(output.satoshis)
+  private processScriptChunks(chunks: Chunk[]): RankOutput {
     return {
-      platform: toPlatformUTF8(platformBuf).toLowerCase(),
-      profileId: toProfileUTF8(profileIdBuf).toLowerCase(),
-      sentiment: toSentimentUTF8(sentimentBuf).toLowerCase(),
-      sats,
+      sentiment: toSentimentUTF8(chunks.shift().buf).toLowerCase(),
+      platform: toPlatformUTF8(chunks.shift().buf).toLowerCase(),
+      profileId: toProfileUTF8(chunks.shift().buf).toLowerCase(),
     }
   }
   /**
@@ -962,7 +971,7 @@ export default class Indexer {
    * @returns {ProfileMap} Map where key is `profileId` and value is `Profile` object
    */
   private toProfileMap(ranks: RankTransaction[]): ProfileMap {
-    const map: ProfileMap = new Map()
+    const profiles: ProfileMap = new Map()
     // Sort the RANK txs for upsert
     ranks.forEach(rank => {
       // Determine positive/negative stats per RANK sentiment
@@ -970,7 +979,7 @@ export default class Indexer {
       let votesPositive: number
       let votesNegative: number
       // Do a switch here in case sentiment is more than binary in the future
-      switch (rank.sentiment as Lowercase<ScriptChunkSentimentUTF8>) {
+      switch (rank.sentiment as ScriptChunkSentimentUTF8) {
         case 'positive':
           ranking = rank.sats
           votesPositive = 1
@@ -982,24 +991,49 @@ export default class Indexer {
           votesNegative = 1
           break
       }
-      const { profileId: id, platform, ...partialRank } = rank
-      const profile = map.get(id)
-      if (profile) {
-        profile.ranks.push(partialRank)
-        profile.ranking += ranking
-        profile.votesPositive += votesPositive
-        profile.votesNegative += votesNegative
-        return
-      }
-      map.set(rank.profileId, {
-        id,
+      const { platform, profileId, postId, ...partialRank } = rank
+      const target: RankTarget = {
+        id: null,
         platform,
-        ranks: [partialRank],
+        ranks: [],
         ranking,
         votesPositive,
         votesNegative,
+      }
+      let profile = profiles.get(profileId)
+      if (profile) {
+        profile.ranking += ranking
+        profile.votesPositive += votesPositive
+        profile.votesNegative += votesNegative
+      } else {
+        profile = {
+          ...target,
+          id: profileId,
+        }
+        profiles.set(profileId, profile)
+      }
+      // If we don't have a postId, then this RANK tx belongs to the Profile
+      if (!postId) {
+        profile.ranks.push(partialRank)
+        return
+      }
+      // Otherwise, we set up the Post and attach this RANK tx to it
+      const post = profile.posts?.get(postId)
+      if (post) {
+        post.ranking += ranking
+        post.votesPositive += votesPositive
+        post.votesNegative += votesNegative
+        post.ranks.push(partialRank)
+        return
+      }
+      profile.posts = new Map()
+      profile.posts.set(postId, {
+        ...target,
+        id: postId,
+        profileId,
+        ranks: [partialRank],
       })
     })
-    return map
+    return profiles
   }
 }

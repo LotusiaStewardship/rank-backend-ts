@@ -39,6 +39,9 @@ export const toSentimentUTF8 = function (
 ): ScriptChunkSentimentUTF8 | undefined {
   return SCRIPT_CHUNK_SENTIMENT.get(sentimentBuf.readUint8())
 }
+export const toCommentUTF8 = function (commentBuf: Buffer): string | undefined {
+  return new TextDecoder('utf-8').decode(commentBuf)
+}
 /**
  *
  * @param entries
