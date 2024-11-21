@@ -24,7 +24,6 @@ import {
   RANK_BLOCK_GENESIS_V1,
   RANK_OUTPUT_MIN_VALUE,
   RANK_SCRIPT_CHUNKS,
-  RANK_SCRIPT_MIN_BYTE_LENGTH,
 } from '../util/constants'
 import type {
   IndexerLogEntry,
