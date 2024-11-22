@@ -14,16 +14,15 @@ type ParameterHandler = (
 ) => void
 
 export class API {
-  //private db: Database
-  db: Database
+  private db: Database
   private app: Express
   private router: Router
   /**
    *
    * @param db
    */
-  constructor(db: Database) {
-    this.db = db
+  constructor() {
+    this.db = new Database()
     //this.app = express()
     this.router = Router({
       caseSensitive: false,
@@ -45,10 +44,18 @@ export class API {
     this.app.use('/api/v1', this.router)
   }
   /**
-   * Return a running, configured HTTP server on the configured port
+   * Initialze database connection
    */
-  get server() {
-    return this.app.listen(API_SERVER_PORT)
+  async init() {
+    await this.db.connect()
+  }
+  /**
+   *
+   * @param exitCode
+   * @param exitError
+   */
+  async close(exitCode: number | string, exitError?: string) {
+    await this.db?.disconnect()
   }
   /**
    * Parameter Handlers
