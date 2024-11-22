@@ -148,7 +148,7 @@ export default class API {
         case 'String':
           break
       }
-      req.params.postid = postId
+      req.params.postId = postId
       next()
     },
   }
