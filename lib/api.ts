@@ -36,8 +36,8 @@ export default class API {
     this.router.param('profileId', this.param.profileId)
     this.router.param('postId', this.param.postId)
     // Router endpoint configuration
-    this.router.get('/:platform/:profileId', this.GET.profile)
-    this.router.get('/:platform/:profileId/:postId', this.GET.post)
+    this.router.get('/:platform/:profileId', this.get.profile)
+    this.router.get('/:platform/:profileId/:postId', this.get.post)
     this.router.get(
       '/stats/top/profiles/:timeframe',
       this.getStatsTopProfilesByTimeframe,
@@ -156,7 +156,7 @@ export default class API {
   /**
    * GET Method Handlers
    */
-  private GET: { [name in 'profile' | 'post']: GETMethodHandler } = {
+  private get: { [name in 'profile' | 'post']: GETMethodHandler } = {
     /**
      *
      * @param req
@@ -174,7 +174,7 @@ export default class API {
         )
         const t1 = (performance.now() - t0).toFixed(3)
         log([
-          ['api', 'GET.profile'],
+          ['api', 'get.profile'],
           ['platform', `${platform}`],
           ['profileId', `${profileId}`],
           ['elapsed', `${t1}ms`],
@@ -184,7 +184,7 @@ export default class API {
         // Assume not found but log error to console
         log([
           ['api', 'error'],
-          ['action', 'GET.profile'],
+          ['action', 'get.profile'],
           ...this.toLogEntries(req.params),
           ['message', `"${String(e)}"`],
         ])
@@ -213,7 +213,7 @@ export default class API {
         )
         const t1 = (performance.now() - t0).toFixed(3)
         log([
-          ['api', 'GET.post'],
+          ['api', 'get.post'],
           ['platform', `${platform}`],
           ['profileId', `${profileId}`],
           ['postId', `${postId}`],
@@ -224,7 +224,7 @@ export default class API {
         // Assume not found but log error to console
         log([
           ['api', 'error'],
-          ['action', 'GET.post'],
+          ['action', 'get.post'],
           ...this.toLogEntries(req.params),
           ['message', `"${String(e)}"`],
         ])
