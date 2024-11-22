@@ -9,6 +9,10 @@ import type {
   ScriptChunkField,
 } from './types'
 /**
+ * API configuration
+ */
+export const API_SERVER_PORT = 10655
+/**
  * NNG configuration
  */
 export const NNG_PUB_DEFAULT_SOCKET_PATH = '~/.lotus/pub.pipe'

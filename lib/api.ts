@@ -2,7 +2,7 @@ import { Express, Router, Request, Response, NextFunction } from 'express'
 import express from 'express'
 import Database from './database'
 import type { PlatformParameters, ScriptChunkPlatformUTF8 } from '../util/types'
-import { PLATFORMS } from '../util/constants'
+import { API_SERVER_PORT, PLATFORMS } from '../util/constants'
 import { log } from '../util/functions'
 
 type GETMethodHandler = (req: Request, res: Response) => void
@@ -48,7 +48,7 @@ export class API {
    * Return a running, configured HTTP server on the configured port
    */
   get server() {
-    return this.app.listen(1234)
+    return this.app.listen(API_SERVER_PORT)
   }
   /**
    * Parameter Handlers
