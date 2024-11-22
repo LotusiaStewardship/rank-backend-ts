@@ -4,6 +4,7 @@ import Database from './database'
 import type { PlatformParameters, ScriptChunkPlatformUTF8 } from '../util/types'
 import { API_SERVER_PORT, PLATFORMS } from '../util/constants'
 import { log } from '../util/functions'
+import { Server } from 'http'
 
 type GETMethodHandler = (req: Request, res: Response) => void
 type ParameterHandler = (
@@ -13,10 +14,11 @@ type ParameterHandler = (
   param: ScriptChunkPlatformUTF8 | string,
 ) => void
 
-export class API {
+export default class API {
   private db: Database
   private app: Express
   private router: Router
+  private server: Server
   /**
    *
    * @param db
@@ -44,10 +46,11 @@ export class API {
     this.app.use('/api/v1', this.router)
   }
   /**
-   * Initialze database connection
+   * Initialze database connection and HTTP server
    */
   async init() {
     await this.db.connect()
+    this.server = this.app.listen(API_SERVER_PORT)
   }
   /**
    *
@@ -56,6 +59,8 @@ export class API {
    */
   async close(exitCode: number | string, exitError?: string) {
     await this.db?.disconnect()
+    this.server?.closeAllConnections()
+    this.server?.close()
   }
   /**
    * Parameter Handlers
