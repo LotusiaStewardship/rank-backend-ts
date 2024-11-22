@@ -6,7 +6,9 @@ import { API_SERVER_PORT, PLATFORMS } from '../util/constants'
 import { log } from '../util/functions'
 import { Server } from 'http'
 
-type GETMethodHandler = (req: Request, res: Response) => void
+type Endpoint = 'profile' | 'post' | 'stats'
+type EndpointHandler = (req: Request, res: Response) => void
+type Parameter = 'platform' | 'profileId' | 'postId'
 type ParameterHandler = (
   req: Request,
   res: Response,
@@ -67,7 +69,7 @@ export default class API {
    * Parameter Handlers
    */
   private param: {
-    [param in 'platform' | 'profileId' | 'postId']: ParameterHandler
+    [param in Parameter]: ParameterHandler
   } = {
     /**
      *
@@ -156,7 +158,7 @@ export default class API {
   /**
    * GET Method Handlers
    */
-  private get: { [name in 'profile' | 'post']: GETMethodHandler } = {
+  private get: { [name in Endpoint]: EndpointHandler } = {
     /**
      *
      * @param req
