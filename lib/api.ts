@@ -34,6 +34,7 @@ export default class API {
     // Router parameter configuration
     this.router.param('platform', this.param.platform)
     this.router.param('profileId', this.param.profileId)
+    this.router.param('postId', this.param.postId)
     // Router endpoint configuration
     this.router.get('/:platform/:profileId', this.GET.profile)
     this.router.get('/:platform/:profileId/:postId', this.GET.post)
