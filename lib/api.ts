@@ -188,7 +188,11 @@ export default class API {
           ...this.toLogEntries(req.params),
           ['message', `"${String(e)}"`],
         ])
-        return this.sendJSON(res, {}, 404)
+        return this.sendJSON(
+          res,
+          { error: 'profile not found', params: req.params },
+          404,
+        )
       }
     },
     /**
@@ -224,7 +228,11 @@ export default class API {
           ...this.toLogEntries(req.params),
           ['message', `"${String(e)}"`],
         ])
-        return this.sendJSON(res, {}, 404)
+        return this.sendJSON(
+          res,
+          { error: 'post not found', params: req.params },
+          404,
+        )
       }
     },
   }
