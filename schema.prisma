@@ -37,8 +37,8 @@ model Profile {
   @@index([id(type: hash)])
   // these indexes are best used with a `LIMIT BY`
   // ref: https://www.postgresql.org/docs/current/indexes-ordering.html#INDEXES-ORDERING
-  @@index([id(type: hash), ranking(type: btree, sort: Desc)], name: "profile_idx_ranked_highest")
-  @@index([id(type: hash), ranking(type: btree, sort: Asc)], name: "profile_idx_ranked_lowest")
+  @@index([platform(type: hash), ranking(type: btree, sort: Desc)], name: "profile_idx_ranked_highest")
+  @@index([platform(type: hash), ranking(type: btree, sort: Asc)], name: "profile_idx_ranked_lowest")
 }
 
 model Post {
@@ -55,6 +55,8 @@ model Post {
 
   // Each post will require these three entries
   @@id([platform, profileId, id])
+  @@index([platform(type: hash), ranking(type: btree, sort: Desc)], name: "post_idx_ranked_highest")
+  @@index([platform(type: hash), ranking(type: btree, sort: Asc)], name: "post_idx_ranked_lowest")
 }
 
 model RankTransaction {

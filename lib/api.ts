@@ -8,13 +8,21 @@ import { Server } from 'http'
 
 type Endpoint = 'profile' | 'post' | 'stats'
 type EndpointHandler = (req: Request, res: Response) => void
-type Parameter = 'platform' | 'profileId' | 'postId'
+type Parameter = 'platform' | 'profileId' | 'postId' | 'statsRoute'
 type ParameterHandler = (
   req: Request,
   res: Response,
   next: NextFunction,
   param: ScriptChunkPlatformUTF8 | string,
 ) => void
+
+enum StatsRoutes {
+  'profiles/top-ranked' = 'getStatsPlatformProfilesTopRanked',
+  'profiles/lowest-ranked' = 'getStatsPlatformProfilesLowestRanked',
+  'posts/top-ranked' = 'getStatsPlatformPostsTopRanked',
+  'posts/lowest-ranked' = 'getStatsPlatformPostsLowestRanked',
+}
+type StatsRoute = keyof typeof StatsRoutes
 
 export default class API {
   private db: Database
@@ -37,13 +45,11 @@ export default class API {
     this.router.param('platform', this.param.platform)
     this.router.param('profileId', this.param.profileId)
     this.router.param('postId', this.param.postId)
-    // Router endpoint configuration
-    this.router.get('/:platform/:profileId', this.get.profile)
+    this.router.param('statsRoute', this.param.statsRoute)
+    // Router endpoint configuration (DEEPEST ROUTES FIRST!)
+    this.router.get('/stats/:platform/:statsRoute(.+)', this.get.stats)
     this.router.get('/:platform/:profileId/:postId', this.get.post)
-    this.router.get(
-      '/stats/top/profiles/:timeframe',
-      this.getStatsTopProfilesByTimeframe,
-    )
+    this.router.get('/:platform/:profileId', this.get.profile)
     // App/Server setup
     this.app = express()
     this.app.use('/api/v1', this.router)
@@ -154,6 +160,19 @@ export default class API {
       req.params.postId = postId
       next()
     },
+    statsRoute: async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+      statsRoute: StatsRoute,
+    ) => {
+      // Must be a defined route
+      if (StatsRoutes[statsRoute]) {
+        req.params.statsRoute = statsRoute
+        return next()
+      }
+      return this.sendJSON(res, { error: `invalid path specified` }, 400)
+    },
   }
   /**
    * GET Method Handlers
@@ -237,14 +256,47 @@ export default class API {
         )
       }
     },
+    /**
+     *
+     * @param req
+     * @param res
+     */
+    stats: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        const platform = req.params.platform as ScriptChunkPlatformUTF8
+        const statsRoute = req.params.statsRoute as StatsRoute
+        const dbMethod: keyof typeof this.db = StatsRoutes[statsRoute]
+        const result = await this.db[dbMethod](platform)
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.stats'],
+          ['platform', `${platform}`],
+          ['statsRoute', `"${statsRoute}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(res, result, 200)
+      } catch (e) {
+        log([
+          ['api', 'error'],
+          ['action', 'get.stats'],
+          ...this.toLogEntries(req.params),
+          ['message', `"${String(e)}"`],
+        ])
+        return this.sendJSON(
+          res,
+          { error: 'stats not found', params: req.params },
+          404,
+        )
+      }
+    },
   }
   /**
    *
+   * @param res
+   * @param data
+   * @param statusCode
    */
-  private getStatsTopProfilesByTimeframe = async (
-    req: Request,
-    res: Response,
-  ) => {}
   private sendJSON(res: Response, data: object, statusCode?: number) {
     res
       .contentType('application/javascript')
