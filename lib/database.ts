@@ -335,7 +335,7 @@ export default class Database {
         // Create all of the blocks first for `height` pkey
         this.db.block.createMany({ data: blocks }),
         // Upsert all profiles
-        // RANK txs upserted here are connected to above blocks
+        // These RANK txs are automatically connected to their block by height
         ...this.toProfileUpsertStatements(profiles),
       ])
     } catch (e) {
