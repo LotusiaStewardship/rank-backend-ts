@@ -4,6 +4,7 @@ import { isIP } from 'validator'
 import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
 import { resolve } from 'node:path/posix'
+import { Worker } from 'node:worker_threads'
 import Database from './database'
 import {
   toCommentUTF8,
