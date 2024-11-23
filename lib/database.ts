@@ -13,7 +13,9 @@ export default class Database {
   private db: PrismaClient
 
   constructor() {
-    this.db = new PrismaClient()
+    this.db = new PrismaClient({
+      errorFormat: 'minimal',
+    })
   }
 
   async connect() {
