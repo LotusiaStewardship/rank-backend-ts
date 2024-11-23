@@ -13,7 +13,9 @@ export default class Database {
   private db: PrismaClient
 
   constructor() {
-    this.db = new PrismaClient()
+    this.db = new PrismaClient({
+      errorFormat: 'minimal',
+    })
   }
 
   async connect() {
@@ -231,9 +233,7 @@ export default class Database {
    */
   async rewindProfiles(profiles: ProfileMap) {
     try {
-      await this.db.$transaction(this.toProfileRewindStatements(profiles), {
-        isolationLevel: 'RepeatableRead',
-      })
+      await this.db.$transaction(this.toProfileRewindStatements(profiles))
     } catch (e) {
       throw new Error(`rewindProfiles: ${e.message}`)
     }
@@ -244,9 +244,7 @@ export default class Database {
    */
   async upsertProfiles(profiles: ProfileMap) {
     try {
-      await this.db.$transaction(this.toProfileUpsertStatements(profiles), {
-        isolationLevel: 'RepeatableRead',
-      })
+      await this.db.$transaction(this.toProfileUpsertStatements(profiles))
     } catch (e) {
       throw new Error(`upsertProfiles: ${e.message}`)
     }
@@ -337,7 +335,7 @@ export default class Database {
         // Create all of the blocks first for `height` pkey
         this.db.block.createMany({ data: blocks }),
         // Upsert all profiles
-        // RANK txs upserted here are connected to above blocks
+        // These RANK txs are automatically connected to their block by height
         ...this.toProfileUpsertStatements(profiles),
       ])
     } catch (e) {

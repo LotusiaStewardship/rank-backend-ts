@@ -3,6 +3,8 @@ import { Builder, ByteBuffer } from 'flatbuffers'
 import { isIP } from 'validator'
 import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
+import { resolve } from 'node:path/posix'
+import { Worker } from 'node:worker_threads'
 import Database from './database'
 import {
   toCommentUTF8,
@@ -37,7 +39,6 @@ import type {
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
 } from '../util/types'
-import { resolve } from 'node:path/posix'
 /** NNG types */
 type NNGMessageType =
   | 'mempooltxadd'
@@ -212,7 +213,7 @@ export default class Indexer {
       return this.close(ERR.IDX_MEMPOOL_SYNC, e.message)
     }
     // Subscribe to required NNG channels
-    const channels = [
+    const channels: NNGMessageType[] = [
       'mempooltxadd',
       'mempooltxrem',
       'blkconnected',
@@ -449,7 +450,6 @@ export default class Indexer {
       const ranks = await this.db.getRankTransactionsByHeight(height)
       const profiles = this.toProfileMap(ranks)
       await this.db.rewindProfiles(profiles)
-      // Rewind profile states accordingly and delete block
       await this.db.deleteBlockByHeight(height)
       return ranks.length
     } catch (e) {
@@ -457,8 +457,7 @@ export default class Indexer {
     }
   }
   /**
-   * Process the oldest `NNGPendingMessageProcessor` in the queue
-   * @param recursing
+   * Recursively process queued `NNGMessageProcessor` methods and their associated `ByteBuffer` data
    * @returns {Promise<void>}
    */
   private nngProcessMessage = async (): Promise<void> => {
@@ -638,14 +637,13 @@ export default class Indexer {
     bb: ByteBuffer,
   ): Promise<void> => {
     const t0 = performance.now()
-    // Set up disconnected block for comparison to current best (checkpoint)
     const disconnectedBlock =
       NNG.BlockDisconnected.getRootAsBlockDisconnected(bb).block()
     const block = this.toBlock(disconnectedBlock.header())
-    // Rewind the current block
+    // Rewind the disconnected block
     const txsLength = await this.rewindBlock(block.height)
     const t1 = (performance.now() - t0).toFixed(3)
-    // Get the current checkpoint from the database
+    // Get the latest checkpoint block from the database
     this.checkpoint = await this.db.getCheckpoint()
     // Log the result
     log([
@@ -895,6 +893,7 @@ export default class Indexer {
               break
             // comment
             case 1:
+              rank.comment = toCommentUTF8(chunk.buf)
               break
           }
         }
@@ -926,13 +925,9 @@ export default class Indexer {
    * @returns {string} Block hash or txid as hex string (little endian)
    */
   private toBlockhashOrTxid(hash: NNG.Hash): string {
-    const hashBuf = Buffer.alloc(32)
-    for (let i = 0; i < 32; i++) {
-      const byte = hash.data(i)
-      hashBuf.writeUInt8(byte, i)
-    }
-    // reverse for little endian
-    return hashBuf.reverse().toString('hex')
+    return Buffer.from(hash.bb.bytes().slice(hash.bb_pos, hash.bb_pos + 32))
+      .reverse() // reverse for little endian
+      .toString('hex')
   }
   /**
    * Parse raw `NNG.BlockHeader` flatbuffer for the nHeight
@@ -1016,6 +1011,7 @@ export default class Indexer {
         profiles.set(profileId, profile)
       }
       // If we don't have a postId, then this RANK tx belongs to the Profile
+      // Add the RANK tx and return to process next RANK tx
       if (!postId) {
         profile.ranks.push(partialRank)
         return
