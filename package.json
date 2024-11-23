@@ -2,7 +2,7 @@
   "name": "@lotusia/rank-backend-ts",
   "version": "0.1.0",
   "description": "Core backend services implementing the Lotus RANK protocol",
-  "main": "app.js",
+  "main": "scripts/start.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
