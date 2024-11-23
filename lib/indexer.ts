@@ -449,7 +449,6 @@ export default class Indexer {
       const ranks = await this.db.getRankTransactionsByHeight(height)
       const profiles = this.toProfileMap(ranks)
       await this.db.rewindProfiles(profiles)
-      // Rewind profile states accordingly and delete block
       await this.db.deleteBlockByHeight(height)
       return ranks.length
     } catch (e) {
@@ -457,8 +456,7 @@ export default class Indexer {
     }
   }
   /**
-   * Process the oldest `NNGPendingMessageProcessor` in the queue
-   * @param recursing
+   * Recursively process queued `NNGMessageProcessor` methods and their associated `ByteBuffer` data
    * @returns {Promise<void>}
    */
   private nngProcessMessage = async (): Promise<void> => {
@@ -638,14 +636,13 @@ export default class Indexer {
     bb: ByteBuffer,
   ): Promise<void> => {
     const t0 = performance.now()
-    // Set up disconnected block for comparison to current best (checkpoint)
     const disconnectedBlock =
       NNG.BlockDisconnected.getRootAsBlockDisconnected(bb).block()
     const block = this.toBlock(disconnectedBlock.header())
-    // Rewind the current block
+    // Rewind the disconnected block
     const txsLength = await this.rewindBlock(block.height)
     const t1 = (performance.now() - t0).toFixed(3)
-    // Get the current checkpoint from the database
+    // Get the latest checkpoint block from the database
     this.checkpoint = await this.db.getCheckpoint()
     // Log the result
     log([
@@ -1016,6 +1013,7 @@ export default class Indexer {
         profiles.set(profileId, profile)
       }
       // If we don't have a postId, then this RANK tx belongs to the Profile
+      // Add the RANK tx and return to process next RANK tx
       if (!postId) {
         profile.ranks.push(partialRank)
         return
