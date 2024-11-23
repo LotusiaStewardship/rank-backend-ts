@@ -212,7 +212,7 @@ export default class Indexer {
       return this.close(ERR.IDX_MEMPOOL_SYNC, e.message)
     }
     // Subscribe to required NNG channels
-    const channels = [
+    const channels: NNGMessageType[] = [
       'mempooltxadd',
       'mempooltxrem',
       'blkconnected',
