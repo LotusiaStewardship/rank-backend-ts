@@ -3,6 +3,7 @@ import { Builder, ByteBuffer } from 'flatbuffers'
 import { isIP } from 'validator'
 import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
+import { resolve } from 'node:path/posix'
 import Database from './database'
 import {
   toCommentUTF8,
@@ -37,7 +38,6 @@ import type {
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
 } from '../util/types'
-import { resolve } from 'node:path/posix'
 /** NNG types */
 type NNGMessageType =
   | 'mempooltxadd'
