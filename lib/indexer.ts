@@ -924,13 +924,9 @@ export default class Indexer {
    * @returns {string} Block hash or txid as hex string (little endian)
    */
   private toBlockhashOrTxid(hash: NNG.Hash): string {
-    const hashBuf = Buffer.alloc(32)
-    for (let i = 0; i < 32; i++) {
-      const byte = hash.data(i)
-      hashBuf.writeUInt8(byte, i)
-    }
-    // reverse for little endian
-    return hashBuf.reverse().toString('hex')
+    return Buffer.from(hash.bb.bytes().slice(hash.bb_pos, hash.bb_pos + 32))
+      .reverse() // reverse for little endian
+      .toString('hex')
   }
   /**
    * Parse raw `NNG.BlockHeader` flatbuffer for the nHeight
