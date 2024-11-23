@@ -5,6 +5,7 @@ import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
 import { resolve } from 'node:path/posix'
 import { Worker } from 'node:worker_threads'
+import { EventEmitter } from 'events'
 import Database from './database'
 import {
   toCommentUTF8,
@@ -61,7 +62,7 @@ type MempoolCache = Map<string, RankTransaction>
  * to the appropriate lotusd publishing endpoints and reacts to new messages
  * accordingly.
  */
-export default class Indexer {
+export default class Indexer extends EventEmitter {
   private db: Database
   private pub: Socket
   private rpc: Socket
@@ -83,7 +84,8 @@ export default class Indexer {
    * @param pubUri
    * @param rpcUri
    */
-  constructor(pubUri?: string, rpcUri?: string) {
+  constructor(db: Database, pubUri?: string, rpcUri?: string) {
+    super()
     // Validate NNG parameters
     this.pubUri = pubUri
       ? `ipc://${resolve(pubUri)}`
@@ -92,17 +94,15 @@ export default class Indexer {
       ? `ipc://${resolve(rpcUri)}`
       : `ipc://${resolve(NNG_RPC_DEFAULT_SOCKET_PATH)}`
     // Module setup
-    this.db = new Database()
+    this.db = db
     // Pub/Sub socket setup
     this.pub = socket('sub', { chan: [] })
-    this.pub.on('error', this.close)
     this.pub.on('data', this.nngReceiveMessage)
     this.pub.rcvmaxsize(NNG_RPC_RCVMAXSIZE_CONSENSUS)
     this.pub.reconn(NNG_SOCKET_RECONN)
     this.pub.maxreconn(NNG_SOCKET_MAXRECONN)
     // RPC socket setup
     this.rpc = socket('req')
-    this.rpc.on('error', this.close)
     this.rpc.rcvmaxsize(NNG_RPC_RCVMAXSIZE_CONSENSUS * NNG_RPC_BLOCKRANGE_SIZE)
     this.rpc.reconn(NNG_SOCKET_RECONN)
     this.rpc.maxreconn(NNG_SOCKET_MAXRECONN)
@@ -134,18 +134,9 @@ export default class Indexer {
    * Perform all required operations to initialize the indexer and sync with lotusd
    */
   async init() {
-    // signal handlers
-    process.on('SIGINT', this.close)
-    process.on('SIGTERM', this.close)
     /**
      *    Initialize Modules
      */
-    // connect db
-    await this.db.connect()
-    log([
-      ['init', 'database'],
-      ['status', 'connected'],
-    ])
     // TODO: Need to actually detect NNG connectivity...
     try {
       this.rpc.connect(this.rpcUri)
@@ -156,7 +147,7 @@ export default class Indexer {
         )
       }
     } catch (e) {
-      return this.close(ERR.NNG_CONNECT, e.message)
+      throw [ERR.NNG_CONNECT, e.message]
     }
     log([
       ['init', 'nng'],
@@ -183,7 +174,7 @@ export default class Indexer {
         ])
       }
     } catch (e) {
-      return this.close(ERR.IDX_PROFILE_REWIND, e.message)
+      throw [ERR.IDX_PROFILE_REWIND, e.message]
     }
     /**
      *    Reconcile Checkpoint
@@ -194,7 +185,7 @@ export default class Indexer {
         (await this.db.getCheckpoint()) ?? (RANK_BLOCK_GENESIS_V1 as Block)
       this.checkpoint = await this.initReconcileBlockState(checkpoint)
     } catch (e) {
-      return this.close(ERR.IDX_BLOCKS_REWIND, e.message)
+      throw [ERR.IDX_BLOCKS_REWIND, e.message]
     }
     // Log our current checkpoint (i.e. best block)
     log([['init', 'best'], ...this.toLogEntries(this.checkpoint)])
@@ -202,7 +193,7 @@ export default class Indexer {
     try {
       await this.initSyncBlocks()
     } catch (e) {
-      return this.close(ERR.IDX_BLOCKS_SYNC, e.message)
+      throw [ERR.IDX_BLOCKS_SYNC, e.message]
     }
     // Sync mempool
     try {
@@ -210,7 +201,7 @@ export default class Indexer {
       // Initialize the mempool queue with these RANK txs
       ranks.forEach(rank => this.mempool.set(rank.txid, rank))
     } catch (e) {
-      return this.close(ERR.IDX_MEMPOOL_SYNC, e.message)
+      throw [ERR.IDX_MEMPOOL_SYNC, e.message]
     }
     // Subscribe to required NNG channels
     const channels: NNGMessageType[] = [
@@ -344,29 +335,11 @@ export default class Indexer {
    * @param exitCode Process signal as `string` or `(enum) ERR` value if fatal error
    * @param exitError Debug string if fatal error
    */
-  async close(exitCode: number | string, exitError?: string): Promise<void> {
-    // ignore shutdown() number since we're exiting anyway
+  async close(): Promise<void> {
     this.pub?.shutdown(this.pubUri)
     this.pub?.close()
     this.rpc?.shutdown(this.rpcUri)
     this.rpc?.close()
-    await this.db?.disconnect()
-    if (exitError?.length) {
-      log([
-        ['shutdown', 'fatal'],
-        ['error', `${ERR[exitCode]}`],
-        [`code`, `${exitCode}`],
-        [`debug`, `${exitError}`],
-      ])
-    } else {
-      log([
-        ['shutdown', 'clean'],
-        ['signal', `${exitCode}`],
-      ])
-    }
-    // Next time the check queue is processed, we will exit
-    // SIGINT/SIGTERM are clean shutdowns; if exitCode == string then exitCode == 0
-    setImmediate(() => process.exit(typeof exitCode == 'string' ? 0 : exitCode))
   }
   /**
    * Compare checkpoint `Block` against the RPC counterpart. Recurse backwards until a match is found.
@@ -470,7 +443,8 @@ export default class Indexer {
       await NNGMessageProcessor(ByteBuffer)
     } catch (e) {
       // Should never get here; shut down if we do
-      return await this.close(ERR.NNG_PROCESS_MESSAGE, e.message)
+      this.emit('exception', ERR.NNG_PROCESS_MESSAGE, e.message)
+      return
     }
     // Recursively process queue if necessary
     if (this.queue.pending.length > 0) {
