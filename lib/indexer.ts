@@ -892,6 +892,7 @@ export default class Indexer {
               break
             // comment
             case 1:
+              rank.comment = toCommentUTF8(chunk.buf)
               break
           }
         }
