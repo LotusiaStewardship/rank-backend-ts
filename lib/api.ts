@@ -5,6 +5,7 @@ import type { ScriptChunkPlatformUTF8 } from '../util/types'
 import { API_SERVER_PORT, PLATFORMS } from '../util/constants'
 import { log } from '../util/functions'
 import { Server } from 'http'
+import { EventEmitter } from 'events'
 
 type Endpoint = 'profile' | 'post' | 'stats'
 type EndpointHandler = (req: Request, res: Response) => void
@@ -24,7 +25,7 @@ enum StatsRoutes {
 }
 type StatsRoute = keyof typeof StatsRoutes
 
-export default class API {
+export default class API extends EventEmitter {
   private db: Database
   private app: Express
   private router: Router
@@ -33,8 +34,9 @@ export default class API {
    *
    * @param db
    */
-  constructor() {
-    this.db = new Database()
+  constructor(db: Database) {
+    super()
+    this.db = db
     //this.app = express()
     this.router = Router({
       caseSensitive: false,
@@ -60,16 +62,20 @@ export default class API {
    * Initialze database connection and HTTP server
    */
   async init() {
-    await this.db.connect()
     this.server = this.app.listen(API_SERVER_PORT)
+    log([
+      ['init', 'api'],
+      ['status', 'connected'],
+      ['httpServer', 'listening'],
+      ['httpServerPort', `${API_SERVER_PORT}`],
+    ])
   }
   /**
    *
    * @param exitCode
    * @param exitError
    */
-  async close(exitCode: number | string, exitError?: string) {
-    await this.db?.disconnect()
+  async close() {
     this.server?.closeAllConnections()
     this.server?.close()
   }

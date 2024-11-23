@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client'
 import { randomUUID } from 'crypto'
-import { API_STATS_RESULT_COUNT } from '../util/constants'
+import { API_STATS_RESULT_COUNT, ERR } from '../util/constants'
 import type {
   Block,
   RankTransaction,
@@ -19,7 +19,11 @@ export default class Database {
   }
 
   async connect() {
-    await this.db.$connect()
+    try {
+      await this.db.$connect()
+    } catch (e) {
+      throw [ERR.IDX_DATABASE_CONNECT, e.message]
+    }
   }
 
   async disconnect() {
