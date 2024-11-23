@@ -9,6 +9,11 @@ import type {
   ScriptChunkField,
 } from './types'
 /**
+ * API configuration
+ */
+export const API_SERVER_PORT = 10655
+export const API_STATS_RESULT_COUNT = 5
+/**
  * NNG configuration
  */
 export const NNG_PUB_DEFAULT_SOCKET_PATH = '~/.lotus/pub.pipe'
@@ -74,9 +79,10 @@ export const PLATFORMS: {
       len: 16,
     },
     postId: {
-      len: 8, // 64-bit uint: https://developer.x.com/en/docs/x-ids
+      chunkLength: 8, // 64-bit uint: https://developer.x.com/en/docs/x-ids
       regex: /[0-9]+/,
       reader: 'readBigUInt64BE',
+      type: 'BigInt',
     },
   },
 }

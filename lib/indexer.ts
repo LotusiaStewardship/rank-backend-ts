@@ -884,7 +884,10 @@ export default class Indexer {
             case 0:
               // match platform postId requirements, otherwise assume comment data
               decoded = chunk.buf[postId.reader]().toString()
-              if (chunk.len == postId.len && decoded.match(postId.regex)) {
+              if (
+                chunk.len == postId.chunkLength &&
+                decoded.match(postId.regex)
+              ) {
                 rank.postId = decoded
               } else {
                 rank.comment = toCommentUTF8(chunk.buf)

@@ -6,9 +6,10 @@ export type PlatformParameters = {
     len: number
   }
   postId: {
-    len: number
+    chunkLength: number
     regex: RegExp
-    reader: 'readBigUInt64BE'
+    reader: 'readBigUInt64BE' // additional Buffer reader methods if needed
+    type: 'BigInt' | 'Number' | 'String'
   }
 }
 // RANK script types

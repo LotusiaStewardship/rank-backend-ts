@@ -1,6 +1,13 @@
 import { PrismaClient } from '@prisma/client'
 import { randomUUID } from 'crypto'
-import type { Block, RankTransaction, Profile, ProfileMap } from '../util/types'
+import { API_STATS_RESULT_COUNT } from '../util/constants'
+import type {
+  Block,
+  RankTransaction,
+  Profile,
+  ProfileMap,
+  ScriptChunkPlatformUTF8,
+} from '../util/types'
 
 export default class Database {
   private db: PrismaClient
@@ -16,27 +23,205 @@ export default class Database {
   async disconnect() {
     await this.db.$disconnect()
   }
-  /**
-   *
-   * @param profileId
-   * @returns
-   */
-  async apiGetAccountByProfileId(profileId: string) {
+  async apiGetPlatformProfile(
+    platform: ScriptChunkPlatformUTF8,
+    profileId: string,
+    include?: {
+      ranks?: boolean
+      posts?: boolean
+    },
+  ) {
     try {
-      return await this.db.profile.findFirst({
+      const result = await this.db.profile.findUniqueOrThrow({
         where: {
-          id: profileId,
-        },
-        select: {
-          account: {
-            select: {
-              profiles: true,
-            },
-          },
+          platform_id: { platform, id: profileId },
         },
       })
+      return {
+        platform: result.platform,
+        profileId: result.id,
+        ranking: String(result.ranking),
+        votesPositive: result.votesPositive,
+        votesNegative: result.votesNegative,
+      }
     } catch (e) {
-      throw new Error(`apiGetAccountByProfileId: ${e.message}`)
+      throw new Error(`db.apiGetPlatformProfile: ${e.message}`)
+    }
+  }
+  async apiGetPlatformProfilePost(
+    platform: ScriptChunkPlatformUTF8,
+    profileId: string,
+    postId: string,
+  ) {
+    try {
+      const result = await this.db.post.findUniqueOrThrow({
+        where: {
+          platform_profileId_id: { platform, profileId, id: postId },
+        },
+      })
+      return {
+        platform: result.platform,
+        profileId: result.profileId,
+        postId: result.id,
+        ranking: String(result.ranking),
+        votesPositive: result.votesPositive,
+        votesNegative: result.votesNegative,
+      }
+    } catch (e) {
+      throw new Error(`db.apiGetPlatformProfilePost: ${e.message}`)
+    }
+  }
+  /**
+   *
+   * @param platform
+   * @returns
+   */
+  async getStatsPlatformProfilesTopRanked(platform: ScriptChunkPlatformUTF8) {
+    try {
+      const result = await this.db.profile.findMany({
+        where: {
+          platform,
+          ranking: {
+            gt: 0,
+          },
+        },
+        orderBy: {
+          ranking: 'desc',
+        },
+        take: API_STATS_RESULT_COUNT,
+        select: {
+          platform: true,
+          id: true,
+          ranking: true,
+          votesPositive: true,
+          votesNegative: true,
+        },
+      })
+      return result.map(profile => {
+        return {
+          platform: profile.platform,
+          profileId: profile.id,
+          ranking: String(profile.ranking),
+          votesPositive: profile.votesPositive,
+          votesNegative: profile.votesNegative,
+        }
+      })
+    } catch (e) {
+      throw new Error(`db.getStatsPlatformProfilesTopRanked: ${e.message}`)
+    }
+  }
+  /**
+   *
+   * @param platform
+   * @returns
+   */
+  async getStatsPlatformProfilesLowestRanked(
+    platform: ScriptChunkPlatformUTF8,
+  ) {
+    try {
+      const result = await this.db.profile.findMany({
+        where: {
+          platform,
+        },
+        orderBy: {
+          ranking: 'asc',
+        },
+        take: API_STATS_RESULT_COUNT,
+        select: {
+          platform: true,
+          id: true,
+          ranking: true,
+          votesPositive: true,
+          votesNegative: true,
+        },
+      })
+      return result.map(profile => {
+        return {
+          platform: profile.platform,
+          profileId: profile.id,
+          ranking: String(profile.ranking),
+          votesPositive: profile.votesPositive,
+          votesNegative: profile.votesNegative,
+        }
+      })
+    } catch (e) {
+      throw new Error(`db.getStatsPlatformProfilesLowestRanked: ${e.message}`)
+    }
+  }
+  /**
+   *
+   * @param platform
+   * @returns
+   */
+  async getStatsPlatformPostsTopRanked(platform: ScriptChunkPlatformUTF8) {
+    try {
+      const result = await this.db.post.findMany({
+        where: {
+          platform,
+        },
+        orderBy: {
+          ranking: 'desc',
+        },
+        take: 5,
+        select: {
+          platform: true,
+          profileId: true,
+          id: true,
+          ranking: true,
+          votesPositive: true,
+          votesNegative: true,
+        },
+      })
+      return result.map(post => {
+        return {
+          platform: post.platform,
+          profileId: post.profileId,
+          postId: post.id,
+          ranking: String(post.ranking),
+          votesPositive: post.votesPositive,
+          votesNegative: post.votesNegative,
+        }
+      })
+    } catch (e) {
+      throw new Error(`db.getStatsPlatformPostsLowestRanked: ${e.message}`)
+    }
+  }
+  /**
+   *
+   * @param platform
+   * @returns
+   */
+  async getStatsPlatformPostsLowestRanked(platform: ScriptChunkPlatformUTF8) {
+    try {
+      const result = await this.db.post.findMany({
+        where: {
+          platform,
+        },
+        orderBy: {
+          ranking: 'asc',
+        },
+        take: 5,
+        select: {
+          platform: true,
+          profileId: true,
+          id: true,
+          ranking: true,
+          votesPositive: true,
+          votesNegative: true,
+        },
+      })
+      return result.map(post => {
+        return {
+          platform: post.platform,
+          profileId: post.profileId,
+          postId: post.id,
+          ranking: String(post.ranking),
+          votesPositive: post.votesPositive,
+          votesNegative: post.votesNegative,
+        }
+      })
+    } catch (e) {
+      throw new Error(`db.getStatsPlatformPostsLowestRanked: ${e.message}`)
     }
   }
   /**
