@@ -1,7 +1,7 @@
 import { Express, Router, Request, Response, NextFunction } from 'express'
 import express from 'express'
 import Database from './database'
-import type { PlatformParameters, ScriptChunkPlatformUTF8 } from '../util/types'
+import type { ScriptChunkPlatformUTF8 } from '../util/types'
 import { API_SERVER_PORT, PLATFORMS } from '../util/constants'
 import { log } from '../util/functions'
 import { Server } from 'http'
@@ -53,6 +53,8 @@ export default class API {
     // App/Server setup
     this.app = express()
     this.app.use('/api/v1', this.router)
+    // App settings
+    this.app.set('platformParams', PLATFORMS)
   }
   /**
    * Initialze database connection and HTTP server
@@ -91,11 +93,11 @@ export default class API {
       next: NextFunction,
       platform: ScriptChunkPlatformUTF8,
     ) => {
+      platform = platform.toLowerCase() as ScriptChunkPlatformUTF8
       const platformParams = PLATFORMS[platform]
       if (!platformParams) {
         return this.sendJSON(res, { error: `invalid platform specified` }, 400)
       }
-      this.app.set('platformParams', platformParams)
       req.params.platform = platform
       next()
     },
@@ -113,9 +115,10 @@ export default class API {
       next: NextFunction,
       profileId: string,
     ) => {
-      const { profileId: profileIdParams } = this.app.get(
-        'platformParams',
-      ) as PlatformParameters
+      profileId = profileId.toLowerCase()
+      const platform = req.params.platform as ScriptChunkPlatformUTF8
+      const platformParams = this.app.get('platformParams') as typeof PLATFORMS
+      const { profileId: profileIdParams } = platformParams[platform]
       if (profileId.length > profileIdParams.len) {
         return this.sendJSON(res, { error: `profileId is invalid length` }, 400)
       }
@@ -136,9 +139,10 @@ export default class API {
       next: NextFunction,
       postId: string,
     ) => {
-      const { postId: postIdParams } = this.app.get(
-        'platformParams',
-      ) as PlatformParameters
+      postId = postId.toLowerCase()
+      const platform = req.params.platform as ScriptChunkPlatformUTF8
+      const platformParams = this.app.get('platformParams') as typeof PLATFORMS
+      const { postId: postIdParams } = platformParams[platform]
       if (!postId.match(postIdParams.regex)) {
         return this.sendJSON(res, { error: `postId is invalid format` }, 400)
       }
@@ -166,6 +170,7 @@ export default class API {
       next: NextFunction,
       statsRoute: StatsRoute,
     ) => {
+      statsRoute = statsRoute.toLowerCase() as StatsRoute
       // Must be a defined route
       if (StatsRoutes[statsRoute]) {
         req.params.statsRoute = statsRoute
