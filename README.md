@@ -1,4 +1,4 @@
-# RANK Protocol Backend Services – v0.1.0
+# RANK Protocol Backend Services – v0.2.0
 
 ### **Tested on openSUSE Tumbleweed x86_64 with NodeJS 20.18.0+**
 
@@ -82,7 +82,7 @@ As of v0.1.0, `rank-backend-ts` is considered **stable** and **performant**. Imp
 5. Start the indexer:
 
    ```
-   npx tsc && node scripts/start [protocol] [pub socket path] [rpc socket path]
+   npx tsc && node scripts/start [pub socket path] [rpc socket path]
    ```
 
    Example:
@@ -99,16 +99,17 @@ Once the indexer is running, you will begin to see scrolling messages with `init
 
 ```
 .. snip ..
-2024-10-23T14:10:46.693Z init=syncBlocks status=finished totalBlocks=0 totalRanks=0 elapsed=0.000s
-2024-10-23T14:10:46.705Z init=syncMempool txsLength=8 ranksLength=8 action=upsertProfiles elapsed=11.261ms
-2024-10-23T14:10:46.705Z init=nng status=subscribed channels=mempooltxadd,mempooltxrem,blkconnected,blkdisconctd
+2024-11-23T11:21:21.301Z init=syncBlocks status=finished totalBlocks=0 totalRanks=0 elapsed=0.000s
+2024-11-23T11:21:21.326Z init=syncMempool txsLength=27 ranksLength=27 action=upsertProfiles elapsed=24.528ms
+2024-11-23T11:21:21.326Z init=nng status=subscribed channels=mempooltxadd,mempooltxrem,blkconnected,blkdisconctd
+2024-11-23T11:21:21.327Z init=api status=connected httpServer=listening httpServerPort=10655
 ```
 
 ### Example NNG events
 
 ```
 # mempooltxadd
-2024-10-23T15:23:05.900Z nng=mempooltxadd txid=da7ccad023e6b4c9cde8ff6546e21824c2d4a2378807b950c09de43d83bf9530 timestamp=1729696985898 platform=01 profileId=0000000000616c657875676f726a695f sats=1000000 sentiment=00 action=upsertProfiles elapsed=1.982ms
+2024-11-23T11:23:10.265Z nng=mempooltxadd txid=dabd3946ecf0a01af3792357e6f3c9bf7e98041428c87d32b478f6189b15eaa5 timestamp=1732360990 sats=1000000 sentiment=negative platform=twitter profileId=caincurrency postId=1859129590142153145 action=upsertProfiles elapsed=3.177ms
 
 # mempooltxrem
 2024-10-23T15:23:22.453Z nng=mempooltxrem txid=da7ccad023e6b4c9cde8ff6546e21824c2d4a2378807b950c09de43d83bf9530 timestamp=1729696985898 platform=01 profileId=0000000000616c657875676f726a695f sats=1000000 sentiment=00 action=rewindProfiles elapsed=1.199ms
