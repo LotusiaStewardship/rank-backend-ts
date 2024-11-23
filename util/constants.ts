@@ -12,6 +12,7 @@ import type {
  * API configuration
  */
 export const API_SERVER_PORT = 10655
+export const API_STATS_RESULT_COUNT = 5
 /**
  * NNG configuration
  */

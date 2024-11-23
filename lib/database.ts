@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client'
 import { randomUUID } from 'crypto'
+import { API_STATS_RESULT_COUNT } from '../util/constants'
 import type {
   Block,
   RankTransaction,
@@ -87,7 +88,7 @@ export default class Database {
         orderBy: {
           ranking: 'desc',
         },
-        take: 5,
+        take: API_STATS_RESULT_COUNT,
         select: {
           platform: true,
           id: true,
@@ -125,7 +126,7 @@ export default class Database {
         orderBy: {
           ranking: 'asc',
         },
-        take: 5,
+        take: API_STATS_RESULT_COUNT,
         select: {
           platform: true,
           id: true,
