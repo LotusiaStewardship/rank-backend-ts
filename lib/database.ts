@@ -64,6 +64,15 @@ export default class Database {
         where: {
           platform_profileId_id: { platform, profileId, id: postId },
         },
+        include: {
+          profile: {
+            select: {
+              ranking: true,
+              votesPositive: true,
+              votesNegative: true,
+            },
+          },
+        },
       })
       return {
         platform: result.platform,
