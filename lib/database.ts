@@ -76,7 +76,10 @@ export default class Database {
       })
       return {
         platform: result.platform,
-        profile: result.profile,
+        profile: {
+          ...result.profile,
+          ranking: String(result.profile.ranking),
+        },
         profileId: result.profileId,
         postId: result.id,
         ranking: String(result.ranking),
