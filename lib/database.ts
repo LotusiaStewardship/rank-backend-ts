@@ -59,23 +59,66 @@ export default class Database {
     profileId: string,
     postId: string,
   ) {
-    try {
-      const result = await this.db.post.findUniqueOrThrow({
-        where: {
-          platform_profileId_id: { platform, profileId, id: postId },
-        },
-      })
-      return {
-        platform: result.platform,
-        profileId: result.profileId,
-        postId: result.id,
-        ranking: String(result.ranking),
-        votesPositive: result.votesPositive,
-        votesNegative: result.votesNegative,
-      }
-    } catch (e) {
-      throw new Error(`db.apiGetPlatformProfilePost: ${e.message}`)
+    const data = {
+      platform,
+      profile: {
+        ranking: '0',
+        votesPositive: 0,
+        votesNegative: 0,
+      },
+      profileId,
+      postId,
+      ranking: '0',
+      votesPositive: 0,
+      votesNegative: 0,
     }
+    return await this.db.$transaction(async tx => {
+      try {
+        const post = await tx.post.findUniqueOrThrow({
+          where: {
+            platform_profileId_id: { platform, profileId, id: postId },
+          },
+          include: {
+            profile: {
+              select: {
+                ranking: true,
+                votesPositive: true,
+                votesNegative: true,
+              },
+            },
+          },
+        })
+        // Add indexed post data to return data
+        data.ranking = post.ranking.toString()
+        data.votesPositive = post.votesPositive
+        data.votesNegative = post.votesNegative
+        data.profile = {
+          ranking: post.profile.ranking.toString(),
+          votesPositive: post.profile.votesPositive,
+          votesNegative: post.profile.votesNegative,
+        }
+      } catch (e) {
+        // fetch the indexed profile if the post doesn't exist
+        const profile = await tx.profile.findUniqueOrThrow({
+          where: {
+            platform_id: { platform, id: profileId },
+          },
+          select: {
+            ranking: true,
+            votesPositive: true,
+            votesNegative: true,
+          },
+        })
+        data.profile = {
+          ranking: profile.ranking.toString(),
+          votesPositive: profile.votesPositive,
+          votesNegative: profile.votesNegative,
+        }
+      } finally {
+        // always return data, even if default profile data
+        return data
+      }
+    })
   }
   /**
    *
