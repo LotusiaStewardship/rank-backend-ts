@@ -88,7 +88,6 @@ export default class Database {
             },
           },
         })
-        console.log(post)
         if (post) {
           data.profile = {
             ranking: post.profile.ranking.toString(),
