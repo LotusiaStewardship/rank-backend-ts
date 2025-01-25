@@ -72,9 +72,9 @@ export default class Database {
       votesPositive: 0,
       votesNegative: 0,
     }
-    try {
-      return await this.db.$transaction(async tx => {
-        const post = await tx.post.findUnique({
+    return await this.db.$transaction(async tx => {
+      try {
+        const post = await tx.post.findUniqueOrThrow({
           where: {
             platform_profileId_id: { platform, profileId, id: postId },
           },
@@ -88,40 +88,37 @@ export default class Database {
             },
           },
         })
-        if (post) {
-          data.profile = {
-            ranking: post.profile.ranking.toString(),
-            votesPositive: post.profile.votesPositive,
-            votesNegative: post.profile.votesNegative,
-          }
-          ;(data.ranking = post.ranking.toString()),
-            (data.votesPositive = post.votesPositive)
-          data.votesNegative = post.votesNegative
-        } else {
-          const profile = await tx.profile.findUnique({
-            where: {
-              platform_id: { platform, id: profileId },
-            },
-            select: {
-              ranking: true,
-              votesPositive: true,
-              votesNegative: true,
-            },
-          })
-          data.profile = {
-            ranking: profile.ranking.toString(),
-            votesPositive: profile.votesPositive,
-            votesNegative: profile.votesNegative,
-          }
+        // Add indexed post data to return data
+        data.ranking = post.ranking.toString()
+        data.votesPositive = post.votesPositive
+        data.votesNegative = post.votesNegative
+        data.profile = {
+          ranking: post.profile.ranking.toString(),
+          votesPositive: post.profile.votesPositive,
+          votesNegative: post.profile.votesNegative,
         }
-
+      } catch (e) {
+        // fetch the indexed profile if the post doesn't exist
+        const profile = await tx.profile.findUniqueOrThrow({
+          where: {
+            platform_id: { platform, id: profileId },
+          },
+          select: {
+            ranking: true,
+            votesPositive: true,
+            votesNegative: true,
+          },
+        })
+        data.profile = {
+          ranking: profile.ranking.toString(),
+          votesPositive: profile.votesPositive,
+          votesNegative: profile.votesNegative,
+        }
+      } finally {
+        // always return data, even if default profile data
         return data
-      })
-    } catch (e) {
-      // return a neutral profile if no indexed records
-      console.log(e)
-      return data
-    }
+      }
+    })
   }
   /**
    *
