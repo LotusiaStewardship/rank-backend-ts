@@ -59,35 +59,69 @@ export default class Database {
     profileId: string,
     postId: string,
   ) {
+    const data = {
+      platform,
+      profile: {
+        ranking: '0',
+        votesPositive: 0,
+        votesNegative: 0,
+      },
+      profileId,
+      postId,
+      ranking: '0',
+      votesPositive: 0,
+      votesNegative: 0,
+    }
     try {
-      const result = await this.db.post.findUniqueOrThrow({
-        where: {
-          platform_profileId_id: { platform, profileId, id: postId },
-        },
-        include: {
-          profile: {
+      return await this.db.$transaction(async tx => {
+        const post = await tx.post.findUnique({
+          where: {
+            platform_profileId_id: { platform, profileId, id: postId },
+          },
+          include: {
+            profile: {
+              select: {
+                ranking: true,
+                votesPositive: true,
+                votesNegative: true,
+              },
+            },
+          },
+        })
+        console.log(post)
+        if (post) {
+          data.profile = {
+            ranking: post.profile.ranking.toString(),
+            votesPositive: post.profile.votesPositive,
+            votesNegative: post.profile.votesNegative,
+          }
+          ;(data.ranking = post.ranking.toString()),
+            (data.votesPositive = post.votesPositive)
+          data.votesNegative = post.votesNegative
+        } else {
+          const profile = await tx.profile.findUnique({
+            where: {
+              platform_id: { platform, id: profileId },
+            },
             select: {
               ranking: true,
               votesPositive: true,
               votesNegative: true,
             },
-          },
-        },
+          })
+          data.profile = {
+            ranking: profile.ranking.toString(),
+            votesPositive: profile.votesPositive,
+            votesNegative: profile.votesNegative,
+          }
+        }
+
+        return data
       })
-      return {
-        platform: result.platform,
-        profile: {
-          ...result.profile,
-          ranking: String(result.profile.ranking),
-        },
-        profileId: result.profileId,
-        postId: result.id,
-        ranking: String(result.ranking),
-        votesPositive: result.votesPositive,
-        votesNegative: result.votesNegative,
-      }
     } catch (e) {
-      throw new Error(`db.apiGetPlatformProfilePost: ${e.message}`)
+      // return a neutral profile if no indexed records
+      console.log(e)
+      return data
     }
   }
   /**
