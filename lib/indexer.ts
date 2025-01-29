@@ -854,8 +854,18 @@ export default class Indexer extends EventEmitter {
           switch (i) {
             // postId or comment
             case 0:
-              // match platform postId requirements, otherwise assume comment data
-              decoded = chunk.buf[postId.reader]().toString()
+              try {
+                // match platform postId requirements, otherwise assume comment data
+                decoded = chunk.buf[postId.reader]().toString()
+              } catch (e) {
+                // we really ought not skip errors here..
+                // if a user cast a vote, we need to process their vote correctly
+                // e.g. old Twitter post IDs are 64-bit UInt, but old post IDs aren't 8-byte length
+                // ref: https://x.com/DianeP89/status/810184088212701184 is 7-byte length
+                decoded = new Function(postId.converter)(
+                  `0x${chunk.buf.toString('hex')}`,
+                )
+              }
               if (
                 chunk.len == postId.chunkLength &&
                 decoded.match(postId.regex)

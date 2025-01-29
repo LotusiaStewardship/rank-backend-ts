@@ -9,6 +9,7 @@ export type PlatformParameters = {
     chunkLength: number
     regex: RegExp
     reader: 'readBigUInt64BE' // additional Buffer reader methods if needed
+    converter: 'BigInt' // convert from hex string (e.g. `0x${value}`)
     type: 'BigInt' | 'Number' | 'String'
   }
 }
