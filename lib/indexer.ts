@@ -862,9 +862,10 @@ export default class Indexer extends EventEmitter {
                 // if a user cast a vote, we need to process their vote correctly
                 // e.g. old Twitter post IDs are 64-bit UInt, but old post IDs aren't 8-byte length
                 // ref: https://x.com/DianeP89/status/810184088212701184 is 7-byte length
-                decoded = new Function(postId.converter)(
-                  `0x${chunk.buf.toString('hex')}`,
-                )
+                //
+                //
+                // A bugfix is needed for this; for now, just break and leave `rank.postId` undefined
+                break
               }
               if (
                 chunk.len == postId.chunkLength &&
