@@ -37,22 +37,31 @@ export default class Database {
       posts?: boolean
     },
   ) {
-    try {
-      const result = await this.db.profile.findUniqueOrThrow({
-        where: {
-          platform_id: { platform, id: profileId },
-        },
-      })
-      return {
-        platform: result.platform,
-        profileId: result.id,
-        ranking: String(result.ranking),
-        votesPositive: result.votesPositive,
-        votesNegative: result.votesNegative,
-      }
-    } catch (e) {
-      throw new Error(`db.apiGetPlatformProfile: ${e.message}`)
+    const data = {
+      platform,
+      profileId,
+      ranking: '0',
+      votesPositive: 0,
+      votesNegative: 0,
     }
+    return await this.db.$transaction(async tx => {
+      try {
+        const profile = await tx.profile.findUniqueOrThrow({
+          where: {
+            platform_id: { platform, id: profileId },
+          },
+        })
+        // Add indexed post data to return data
+        data.ranking = profile.ranking.toString()
+        data.votesPositive = profile.votesPositive
+        data.votesNegative = profile.votesNegative
+      } catch (e) {
+        // nothing to do here
+      } finally {
+        // always return data, even if default profile data
+        return data
+      }
+    })
   }
   async apiGetPlatformProfilePost(
     platform: ScriptChunkPlatformUTF8,
