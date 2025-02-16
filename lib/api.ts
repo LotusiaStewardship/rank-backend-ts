@@ -152,6 +152,7 @@ export default class API extends EventEmitter {
       if (!postId.match(postIdParams.regex)) {
         return this.sendJSON(res, { error: `postId is invalid format` }, 400)
       }
+      /*
       let buffer: Buffer
       switch (postIdParams.type) {
         case 'BigInt':
@@ -167,6 +168,7 @@ export default class API extends EventEmitter {
         case 'String':
           break
       }
+      */
       req.params.postId = postId
       next()
     },
