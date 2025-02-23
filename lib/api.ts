@@ -309,7 +309,7 @@ export default class API extends EventEmitter {
    */
   private sendJSON(res: Response, data: object, statusCode?: number) {
     res
-      .contentType('application/javascript')
+      .contentType('application/json')
       .status(statusCode ?? 200)
       .json(data)
   }
