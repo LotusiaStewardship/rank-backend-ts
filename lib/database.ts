@@ -512,18 +512,6 @@ export default class Database {
               },
             }),
           )
-          // update profile rankings after post upsert
-          upserts.push(
-            this.db.profile.update({
-              where: {
-                platform_id: {
-                  platform,
-                  id: profileId,
-                },
-              },
-              data: increments,
-            }),
-          )
         }
       }
     }
