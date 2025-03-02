@@ -1,6 +1,6 @@
 {
   "exclude": [
-    "submodules",
+    "submodules/nanomsg",
     "node_modules"
   ],
   "compilerOptions": {
