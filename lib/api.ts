@@ -4,7 +4,7 @@ import Database from './database'
 import type { ScriptChunkPlatformUTF8 } from 'rank-lib'
 import { API_SERVER_PORT } from '../util/constants'
 import { PLATFORMS } from 'rank-lib'
-import { log } from '../util/functions'
+import { log } from 'rank-lib'
 import { Server } from 'http'
 import { EventEmitter } from 'events'
 
