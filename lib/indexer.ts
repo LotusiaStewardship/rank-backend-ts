@@ -9,11 +9,11 @@ import { EventEmitter } from 'events'
 import Database from './database'
 import {
   toCommentUTF8,
-  toProfileUTF8,
+  toProfileIdUTF8,
   toPlatformUTF8,
   toSentimentUTF8,
   log,
-} from '../util/functions'
+} from 'rank-lib'
 import {
   ERR,
   NNG_PUB_DEFAULT_SOCKET_PATH,
@@ -23,13 +23,15 @@ import {
   NNG_RPC_RCVMAXSIZE_CONSENSUS,
   NNG_SOCKET_MAXRECONN,
   NNG_SOCKET_RECONN,
+} from '../util/constants'
+import {
   PLATFORMS,
   RANK_BLOCK_GENESIS_V1,
-  RANK_OUTPUT_MIN_VALUE,
+  RANK_OUTPUT_MIN_VALID_SATS,
   RANK_SCRIPT_CHUNKS,
-} from '../util/constants'
+} from 'rank-lib'
 import type {
-  IndexerLogEntry,
+  LogEntry,
   RankOutput,
   RankTransaction,
   Block,
@@ -39,7 +41,7 @@ import type {
   ScriptChunkField,
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
-} from '../util/types'
+} from 'rank-lib'
 /** NNG types */
 type NNGMessageType =
   | 'mempooltxadd'
@@ -127,7 +129,7 @@ export default class Indexer extends EventEmitter {
    * @param data
    * @returns
    */
-  private toLogEntries(data: Block | RankTransaction): IndexerLogEntry[] {
+  private toLogEntries(data: Block | RankTransaction): LogEntry[] {
     return Object.entries(data).map(([k, v]) => [k, String(v)])
   }
   /**
@@ -308,7 +310,7 @@ export default class Indexer extends EventEmitter {
    */
   async initSyncMempool() {
     const t0 = performance.now()
-    const entries: IndexerLogEntry[] = [['init', 'syncMempool']]
+    const entries: LogEntry[] = [['init', 'syncMempool']]
     const mempool = await this.rpcGetMempool()
     const txsLength = mempool.txsLength()
     entries.push(['txsLength', `${txsLength}`])
@@ -559,7 +561,7 @@ export default class Indexer extends EventEmitter {
   private nngBlockConnected: NNGMessageProcessor = async (
     bb: ByteBuffer,
   ): Promise<void> => {
-    const entries: IndexerLogEntry[] = [['nng', 'blkconnected']]
+    const entries: LogEntry[] = [['nng', 'blkconnected']]
     const t0 = performance.now()
     const connectedBlock = NNG.BlockConnected.getRootAsBlockConnected(bb)
     // Get the NNG block and convert header to database `Block` entry
@@ -803,7 +805,7 @@ export default class Indexer extends EventEmitter {
         return null
       }
       // OP_RETURN output value MUST be >= defined minimum
-      if (satoshis < RANK_OUTPUT_MIN_VALUE) {
+      if (satoshis < RANK_OUTPUT_MIN_VALID_SATS) {
         return null
       }
       // exclude OP_RETURN chunk and make sure remaining chunk count is valid
@@ -901,7 +903,7 @@ export default class Indexer extends EventEmitter {
     return {
       sentiment: toSentimentUTF8(chunks.shift().buf).toLowerCase(),
       platform: toPlatformUTF8(chunks.shift().buf).toLowerCase(),
-      profileId: toProfileUTF8(chunks.shift().buf).toLowerCase(),
+      profileId: toProfileIdUTF8(chunks.shift().buf).toLowerCase(),
     }
   }
   /**
