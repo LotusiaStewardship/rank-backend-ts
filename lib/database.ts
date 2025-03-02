@@ -7,7 +7,7 @@ import type {
   Profile,
   ProfileMap,
   ScriptChunkPlatformUTF8,
-} from '../util/types'
+} from 'rank-lib'
 
 export default class Database {
   private db: PrismaClient

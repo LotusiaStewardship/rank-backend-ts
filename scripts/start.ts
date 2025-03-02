@@ -1,6 +1,6 @@
 import Indexer from '../lib/indexer'
 import API from '../lib/api'
-import { log } from '../util/functions'
+import { log } from 'rank-lib'
 import { ERR } from '../util/constants'
 import Database from '../lib/database'
 
