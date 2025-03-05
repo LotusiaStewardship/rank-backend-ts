@@ -10,7 +10,12 @@ import { EventEmitter } from 'events'
 
 type Endpoint = 'profile' | 'post' | 'stats'
 type EndpointHandler = (req: Request, res: Response) => void
-type Parameter = 'platform' | 'profileId' | 'postId' | 'statsRoute'
+type Parameter =
+  | 'platform'
+  | 'profileId'
+  | 'postId'
+  | 'scriptPayload'
+  | 'statsRoute'
 type ParameterHandler = (
   req: Request,
   res: Response,
@@ -51,6 +56,10 @@ export default class API extends EventEmitter {
     this.router.param('statsRoute', this.param.statsRoute)
     // Router endpoint configuration (DEEPEST ROUTES FIRST!)
     this.router.get('/stats/:platform/:statsRoute(.+)', this.get.stats)
+    this.router.get(
+      '/:platform/:profileId/:postId/:scriptPayload',
+      this.get.post,
+    )
     this.router.get('/:platform/:profileId/:postId', this.get.post)
     this.router.get('/:platform/:profileId', this.get.profile)
     // App/Server setup
@@ -170,6 +179,32 @@ export default class API extends EventEmitter {
       req.params.postId = postId
       next()
     },
+    /**
+     *
+     * @param req
+     * @param res
+     * @param next
+     * @param scriptPayload
+     */
+    scriptPayload: async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+      scriptPayload: string | undefined,
+    ) => {
+      const p2pkhBuf = Buffer.from(scriptPayload ?? '', 'hex')
+      req.params.scriptPayload =
+        p2pkhBuf.byteLength === 20 ? scriptPayload : undefined
+      next()
+    },
+    /**
+     *
+     * @param req
+     * @param res
+     * @param next
+     * @param statsRoute
+     * @returns
+     */
     statsRoute: async (
       req: Request,
       res: Response,
@@ -236,12 +271,13 @@ export default class API extends EventEmitter {
     post: async (req: Request, res: Response) => {
       const t0 = performance.now()
       try {
-        const { platform, profileId, postId } = req.params
+        const { platform, profileId, postId, scriptPayload } = req.params
         // ranking bigint converted to string before return
         const result = await this.db.apiGetPlatformProfilePost(
           platform as ScriptChunkPlatformUTF8,
           profileId,
           postId,
+          scriptPayload,
         )
         const t1 = (performance.now() - t0).toFixed(3)
         log([

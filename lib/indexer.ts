@@ -499,10 +499,16 @@ export default class Indexer extends EventEmitter {
       ).mempoolTx()
     const rawArray = mempooltx.tx().rawArray()
     const tx = new Transaction(Buffer.from(rawArray))
+    // silently ignore RANK txs that send change to a different address
+    const scriptPayload = this.getScriptPayload(tx)
+    if (!scriptPayload) {
+      return
+    }
     const output = this.processTransactionOutputs(tx.outputs)
     if (output) {
       const rank = {
         txid: tx.txid,
+        scriptPayload,
         timestamp: mempooltx.time(),
         sats: BigInt(tx.outputs[0].satoshis),
         ...output,
@@ -774,11 +780,22 @@ export default class Indexer extends EventEmitter {
         const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
         const tx = new Transaction(Buffer.from(rawArray))
+        // get the address that spent UTXO
+        // TODO: should collect multiple scriptPayloads into array;
+        //       this would allow multiple addresses to vote at once 👀
+        //       WARNING: this could open attack surface to game reward system,
+        //                e.g. 2 addresses, 1 vote = 1 vote, 2 addresses rewarded
+        // silently ignore RANK txs that send change to a different address
+        const scriptPayload = this.getScriptPayload(tx)
+        if (!scriptPayload) {
+          continue
+        }
         // Process tx outputs for RANK outputs; convert any to RANK txs
         const output = this.processTransactionOutputs(tx.outputs)
         if (output) {
           ranks.push({
             txid: tx.txid,
+            scriptPayload,
             height: block?.height, // undefined if mempool tx
             sats: BigInt(tx.outputs[0].satoshis),
             timestamp:
@@ -875,12 +892,14 @@ export default class Indexer extends EventEmitter {
               ) {
                 rank.postId = decoded
               } else {
-                rank.comment = toCommentUTF8(chunk.buf)
+                // TODO: replace with instanceId
+                //rank.comment = toCommentUTF8(chunk.buf)
               }
               break
             // comment
             case 1:
-              rank.comment = toCommentUTF8(chunk.buf)
+              // TODO: replace with instanceId
+              //rank.comment = toCommentUTF8(chunk.buf)
               break
           }
         }
@@ -891,6 +910,23 @@ export default class Indexer extends EventEmitter {
       throw new Error(
         `processTransactionOutputs(${typeof outputs}): ${e.message}`,
       )
+    }
+  }
+  /**
+   * Process the transaction inputs to get the 20-byte, hex-encoded `scriptPayload`
+   * @param tx
+   * @returns
+   */
+  private getScriptPayload(tx: Transaction): string | void {
+    if (
+      tx.inputs.every(
+        (input, idx, array) =>
+          array[0].script
+            .toAddress()
+            .hashBuffer.compare(input.script.toAddress().hashBuffer) === 0,
+      )
+    ) {
+      return tx.inputs[0].script.toAddress().hashBuffer.toString('hex')
     }
   }
   /**

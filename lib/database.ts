@@ -67,16 +67,18 @@ export default class Database {
     platform: ScriptChunkPlatformUTF8,
     profileId: string,
     postId: string,
+    scriptPayload?: string,
   ) {
     const data = {
       platform,
+      profileId,
       profile: {
         ranking: '0',
         votesPositive: 0,
         votesNegative: 0,
       },
-      profileId,
       postId,
+      postMeta: null,
       ranking: '0',
       votesPositive: 0,
       votesNegative: 0,
@@ -95,12 +97,52 @@ export default class Database {
                 votesNegative: true,
               },
             },
+            ranks: !scriptPayload
+              ? undefined
+              : {
+                  where: { scriptPayload },
+                  select: {
+                    txid: true,
+                    sentiment: true,
+                  },
+                  /*
+                  include: {
+                    block: {
+                      select: {
+
+                      }
+                    }
+                  }
+                  */
+                },
           },
         })
         // Add indexed post data to return data
         data.ranking = post.ranking.toString()
         data.votesPositive = post.votesPositive
         data.votesNegative = post.votesNegative
+        // set up post metadata
+        if (post.ranks.length) {
+          const postMeta = {
+            hasWalletUpvoted: false,
+            hasWalletDownvoted: false,
+            txidsUpvoted: [],
+            txidsDownvoted: [],
+          }
+          post.ranks.forEach(rank => {
+            switch (rank.sentiment) {
+              case 'positive':
+                postMeta.hasWalletUpvoted = true
+                postMeta.txidsUpvoted.push(rank.txid)
+                break
+              case 'negative':
+                postMeta.hasWalletDownvoted = true
+                postMeta.txidsDownvoted.push(rank.txid)
+                break
+            }
+          })
+          data.postMeta = postMeta
+        }
         data.profile = {
           ranking: post.profile.ranking.toString(),
           votesPositive: post.profile.votesPositive,

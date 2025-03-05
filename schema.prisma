@@ -62,6 +62,7 @@ model Post {
 model RankTransaction {
   // RankTransaction data
   txid      String  @id // 32-byte hex
+  scriptPayload String // the p2pkh script payload that spent a UTXO for this transaction
   height    Int? // null for mempool transactions
   timestamp BigInt // Block timestamp or indexer first-seen time
   // RankOutput data
@@ -79,6 +80,7 @@ model RankTransaction {
 
   @@index([profileId(type: hash), sentiment(type: hash)])
   @@index([profileId(type: hash)])
+  @@index([scriptPayload(type: hash)])
   @@index([height(sort: Desc)])
 }
 
