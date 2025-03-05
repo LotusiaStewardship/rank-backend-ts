@@ -892,12 +892,14 @@ export default class Indexer extends EventEmitter {
               ) {
                 rank.postId = decoded
               } else {
-                rank.comment = toCommentUTF8(chunk.buf)
+                // TODO: replace with instanceId
+                //rank.comment = toCommentUTF8(chunk.buf)
               }
               break
             // comment
             case 1:
-              rank.comment = toCommentUTF8(chunk.buf)
+              // TODO: replace with instanceId
+              //rank.comment = toCommentUTF8(chunk.buf)
               break
           }
         }
