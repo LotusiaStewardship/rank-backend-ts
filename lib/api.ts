@@ -8,6 +8,7 @@ import { log } from 'rank-lib'
 import { Server } from 'http'
 import { EventEmitter } from 'events'
 
+type Timespan = 'day' | 'week' | 'month' | 'quarter' | 'all'
 type Endpoint = 'profile' | 'post' | 'stats'
 type EndpointHandler = (req: Request, res: Response) => void
 type Parameter =
@@ -55,7 +56,10 @@ export default class API extends EventEmitter {
     this.router.param('postId', this.param.postId)
     this.router.param('statsRoute', this.param.statsRoute)
     // Router endpoint configuration (DEEPEST ROUTES FIRST!)
-    this.router.get('/stats/:platform/:statsRoute(.+)', this.get.stats)
+    this.router.get(
+      '/stats/:platform/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?',
+      this.get.stats,
+    )
     this.router.get(
       '/:platform/:profileId/:postId/:scriptPayload',
       this.get.post,
@@ -213,11 +217,15 @@ export default class API extends EventEmitter {
     ) => {
       statsRoute = statsRoute.toLowerCase() as StatsRoute
       // Must be a defined route
-      if (StatsRoutes[statsRoute]) {
-        req.params.statsRoute = statsRoute
-        return next()
+      if (!StatsRoutes[statsRoute]) {
+        return this.sendJSON(
+          res,
+          { error: `invalid stats path specified` },
+          400,
+        )
       }
-      return this.sendJSON(res, { error: `invalid path specified` }, 400)
+      req.params.statsRoute = statsRoute
+      next()
     },
   }
   /**
@@ -313,22 +321,24 @@ export default class API extends EventEmitter {
       try {
         const platform = req.params.platform as ScriptChunkPlatformUTF8
         const statsRoute = req.params.statsRoute as StatsRoute
+        const timespan = req.params.timespan as Timespan
         const dbMethod: keyof typeof this.db = StatsRoutes[statsRoute]
-        const result = await this.db[dbMethod](platform)
+        const result = await this.db[dbMethod](platform, timespan)
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.stats'],
-          ['platform', `${platform}`],
-          ['statsRoute', `"${statsRoute}"`],
+          ...this.toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
         return this.sendJSON(res, result, 200)
       } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.stats'],
           ...this.toLogEntries(req.params),
           ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
         ])
         return this.sendJSON(
           res,
