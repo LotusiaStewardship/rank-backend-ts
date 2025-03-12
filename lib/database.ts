@@ -228,6 +228,11 @@ export default class Database {
           ranking: true,
           votesPositive: true,
           votesNegative: true,
+          ranks: {
+            select: {
+              txid: true,
+            },
+          },
         },
       })
       return result.map(profile => {
@@ -237,6 +242,7 @@ export default class Database {
           ranking: String(profile.ranking),
           votesPositive: profile.votesPositive,
           votesNegative: profile.votesNegative,
+          votes: profile.ranks.map(rank => rank.txid),
         }
       })
     } catch (e) {
@@ -273,6 +279,11 @@ export default class Database {
           ranking: true,
           votesPositive: true,
           votesNegative: true,
+          ranks: {
+            select: {
+              txid: true,
+            },
+          },
         },
       })
       return result.map(profile => {
@@ -282,6 +293,7 @@ export default class Database {
           ranking: String(profile.ranking),
           votesPositive: profile.votesPositive,
           votesNegative: profile.votesNegative,
+          votes: profile.ranks.map(rank => rank.txid),
         }
       })
     } catch (e) {
@@ -321,6 +333,11 @@ export default class Database {
           ranking: true,
           votesPositive: true,
           votesNegative: true,
+          ranks: {
+            select: {
+              txid: true,
+            },
+          },
         },
       })
       return result.map(post => {
@@ -331,6 +348,7 @@ export default class Database {
           ranking: String(post.ranking),
           votesPositive: post.votesPositive,
           votesNegative: post.votesNegative,
+          votes: post.ranks.map(rank => rank.txid),
         }
       })
     } catch (e) {
@@ -370,6 +388,11 @@ export default class Database {
           ranking: true,
           votesPositive: true,
           votesNegative: true,
+          ranks: {
+            select: {
+              txid: true,
+            },
+          },
         },
       })
       return result.map(post => {
@@ -380,6 +403,7 @@ export default class Database {
           ranking: String(post.ranking),
           votesPositive: post.votesPositive,
           votesNegative: post.votesNegative,
+          votes: post.ranks.map(rank => rank.txid),
         }
       })
     } catch (e) {
