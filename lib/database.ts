@@ -635,10 +635,6 @@ export default class Database {
                     },
                   },
                 },
-                // MUST decrement profile counters since post counts towards profile
-                profile: {
-                  update: decrements,
-                },
                 // decrement post counters
                 ...decrements,
               },
