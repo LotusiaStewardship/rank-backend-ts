@@ -265,7 +265,7 @@ export default class Database {
    */
   async getStatsPlatformProfilesLowestRanked(
     platform: ScriptChunkPlatformUTF8,
-    timespan: Timespan = 'all',
+    timespan: Timespan = 'day',
     includeVotes: boolean,
     pageNum: number = 0,
   ) {
@@ -325,7 +325,7 @@ export default class Database {
    */
   async getStatsPlatformPostsTopRanked(
     platform: ScriptChunkPlatformUTF8,
-    timespan: Timespan = 'all',
+    timespan: Timespan = 'day',
     includeVotes: boolean,
     pageNum: number = 0,
   ) {
@@ -389,7 +389,7 @@ export default class Database {
    */
   async getStatsPlatformPostsLowestRanked(
     platform: ScriptChunkPlatformUTF8,
-    timespan: Timespan = 'all',
+    timespan: Timespan = 'day',
     includeVotes: boolean,
     pageNum: number = 0,
   ) {
