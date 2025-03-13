@@ -205,6 +205,7 @@ export default class Database {
     platform: ScriptChunkPlatformUTF8,
     timespan: Timespan = 'day',
     includeVotes: boolean,
+    pageNum: number = 0,
   ) {
     try {
       const result = await this.db.profile.findMany({
@@ -235,6 +236,11 @@ export default class Database {
                 select: {
                   txid: true,
                 },
+                orderBy: {
+                  timestamp: 'desc',
+                },
+                skip: pageNum ? 10 * pageNum : undefined,
+                take: 10,
               },
         },
       })
@@ -261,6 +267,7 @@ export default class Database {
     platform: ScriptChunkPlatformUTF8,
     timespan: Timespan = 'all',
     includeVotes: boolean,
+    pageNum: number = 0,
   ) {
     try {
       const result = await this.db.profile.findMany({
@@ -289,6 +296,11 @@ export default class Database {
                 select: {
                   txid: true,
                 },
+                orderBy: {
+                  timestamp: 'desc',
+                },
+                skip: pageNum ? 10 * pageNum : undefined,
+                take: 10,
               },
         },
       })
@@ -315,6 +327,7 @@ export default class Database {
     platform: ScriptChunkPlatformUTF8,
     timespan: Timespan = 'all',
     includeVotes: boolean,
+    pageNum: number = 0,
   ) {
     try {
       const result = await this.db.post.findMany({
@@ -346,6 +359,11 @@ export default class Database {
                 select: {
                   txid: true,
                 },
+                orderBy: {
+                  timestamp: 'desc',
+                },
+                skip: pageNum ? 10 * pageNum : undefined,
+                take: 10,
               },
         },
       })
@@ -373,6 +391,7 @@ export default class Database {
     platform: ScriptChunkPlatformUTF8,
     timespan: Timespan = 'all',
     includeVotes: boolean,
+    pageNum: number = 0,
   ) {
     try {
       const result = await this.db.post.findMany({
@@ -404,6 +423,11 @@ export default class Database {
                 select: {
                   txid: true,
                 },
+                orderBy: {
+                  timestamp: 'desc',
+                },
+                skip: pageNum ? 10 * pageNum : undefined,
+                take: 10,
               },
         },
       })

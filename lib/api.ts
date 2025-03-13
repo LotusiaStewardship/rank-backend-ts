@@ -55,9 +55,10 @@ export default class API extends EventEmitter {
     this.router.param('profileId', this.param.profileId)
     this.router.param('postId', this.param.postId)
     this.router.param('statsRoute', this.param.statsRoute)
+    this.router.param('pageNum', this.param.pageNum)
     // Router endpoint configuration (DEEPEST ROUTES FIRST!)
     this.router.get(
-      '/stats/:platform/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?',
+      '/stats/:platform/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
       this.get.stats,
     )
     this.router.get(
@@ -227,6 +228,30 @@ export default class API extends EventEmitter {
       req.params.statsRoute = statsRoute
       next()
     },
+    /**
+     *
+     * @param req
+     * @param res
+     * @param next
+     * @param pageNum
+     * @returns
+     */
+    pageNum: async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+      pageNum: string | undefined,
+    ) => {
+      if (isNaN(Number(pageNum))) {
+        return this.sendJSON(
+          res,
+          { error: `invalid votes page number specified` },
+          400,
+        )
+      }
+      req.params.pageNum = pageNum
+      next()
+    },
   }
   /**
    * GET Method Handlers
@@ -323,8 +348,14 @@ export default class API extends EventEmitter {
         const statsRoute = req.params.statsRoute as StatsRoute
         const timespan = req.params.timespan as Timespan
         const votes = Boolean(req.params.votes == 'includeVotes')
+        const pageNum = Number(req.params.pageNum)
         const dbMethod: keyof typeof this.db = StatsRoutes[statsRoute]
-        const result = await this.db[dbMethod](platform, timespan, votes)
+        const result = await this.db[dbMethod](
+          platform,
+          timespan,
+          votes,
+          pageNum,
+        )
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.stats'],
