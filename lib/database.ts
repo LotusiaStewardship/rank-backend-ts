@@ -9,6 +9,31 @@ import type {
   ScriptChunkPlatformUTF8,
 } from 'rank-lib'
 
+type Timespan = 'day' | 'week' | 'month' | 'quarter' | 'all'
+/**
+ * Get the 00:00 UTC epoch timestamp for the previous `Timespan`, in seconds
+ * @param timespan `day`, `week`, etc.
+ * @returns {number} the UTC epoch timestamp beginning the `Timespan`, in seconds
+ */
+const getTimestampUTC = (timespan: Timespan): number => {
+  const now = new Date(Date.now())
+  const today = Math.floor(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1_000,
+  )
+  switch (timespan) {
+    case 'day':
+      return today - 86_400
+    case 'week':
+      return today - 604_800
+    case 'month':
+      return today - 2_592_000
+    case 'quarter':
+      return today - 7_776_000
+    case 'all':
+      return 0
+  }
+}
+
 export default class Database {
   private db: PrismaClient
 
@@ -176,13 +201,23 @@ export default class Database {
    * @param platform
    * @returns
    */
-  async getStatsPlatformProfilesTopRanked(platform: ScriptChunkPlatformUTF8) {
+  async getStatsPlatformProfilesTopRanked(
+    platform: ScriptChunkPlatformUTF8,
+    timespan: Timespan = 'day',
+    includeVotes: boolean,
+    pageNum: number = 0,
+  ) {
     try {
       const result = await this.db.profile.findMany({
         where: {
           platform,
           ranking: {
-            gt: 0,
+            gt: 0n,
+          },
+          ranks: {
+            every: {
+              timestamp: { gte: getTimestampUTC(timespan) },
+            },
           },
         },
         orderBy: {
@@ -195,6 +230,18 @@ export default class Database {
           ranking: true,
           votesPositive: true,
           votesNegative: true,
+          ranks: !includeVotes
+            ? undefined
+            : {
+                select: {
+                  txid: true,
+                },
+                orderBy: {
+                  timestamp: 'desc',
+                },
+                skip: pageNum ? 10 * pageNum : undefined,
+                take: 10,
+              },
         },
       })
       return result.map(profile => {
@@ -204,6 +251,7 @@ export default class Database {
           ranking: String(profile.ranking),
           votesPositive: profile.votesPositive,
           votesNegative: profile.votesNegative,
+          votesTimespan: profile.ranks?.map(rank => rank.txid) ?? [],
         }
       })
     } catch (e) {
@@ -217,11 +265,20 @@ export default class Database {
    */
   async getStatsPlatformProfilesLowestRanked(
     platform: ScriptChunkPlatformUTF8,
+    timespan: Timespan = 'day',
+    includeVotes: boolean,
+    pageNum: number = 0,
   ) {
     try {
       const result = await this.db.profile.findMany({
         where: {
           platform,
+          ranking: { lt: 0n },
+          ranks: {
+            every: {
+              timestamp: { gte: getTimestampUTC(timespan) },
+            },
+          },
         },
         orderBy: {
           ranking: 'asc',
@@ -233,6 +290,18 @@ export default class Database {
           ranking: true,
           votesPositive: true,
           votesNegative: true,
+          ranks: !includeVotes
+            ? undefined
+            : {
+                select: {
+                  txid: true,
+                },
+                orderBy: {
+                  timestamp: 'desc',
+                },
+                skip: pageNum ? 10 * pageNum : undefined,
+                take: 10,
+              },
         },
       })
       return result.map(profile => {
@@ -242,6 +311,7 @@ export default class Database {
           ranking: String(profile.ranking),
           votesPositive: profile.votesPositive,
           votesNegative: profile.votesNegative,
+          votesTimespan: profile.ranks?.map(rank => rank.txid) ?? [],
         }
       })
     } catch (e) {
@@ -253,11 +323,24 @@ export default class Database {
    * @param platform
    * @returns
    */
-  async getStatsPlatformPostsTopRanked(platform: ScriptChunkPlatformUTF8) {
+  async getStatsPlatformPostsTopRanked(
+    platform: ScriptChunkPlatformUTF8,
+    timespan: Timespan = 'day',
+    includeVotes: boolean,
+    pageNum: number = 0,
+  ) {
     try {
       const result = await this.db.post.findMany({
         where: {
           platform,
+          ranking: {
+            gt: 0n,
+          },
+          ranks: {
+            every: {
+              timestamp: { gte: getTimestampUTC(timespan) },
+            },
+          },
         },
         orderBy: {
           ranking: 'desc',
@@ -270,6 +353,18 @@ export default class Database {
           ranking: true,
           votesPositive: true,
           votesNegative: true,
+          ranks: !includeVotes
+            ? undefined
+            : {
+                select: {
+                  txid: true,
+                },
+                orderBy: {
+                  timestamp: 'desc',
+                },
+                skip: pageNum ? 10 * pageNum : undefined,
+                take: 10,
+              },
         },
       })
       return result.map(post => {
@@ -280,6 +375,7 @@ export default class Database {
           ranking: String(post.ranking),
           votesPositive: post.votesPositive,
           votesNegative: post.votesNegative,
+          votesTimespan: post.ranks?.map(rank => rank.txid) ?? [],
         }
       })
     } catch (e) {
@@ -291,11 +387,24 @@ export default class Database {
    * @param platform
    * @returns
    */
-  async getStatsPlatformPostsLowestRanked(platform: ScriptChunkPlatformUTF8) {
+  async getStatsPlatformPostsLowestRanked(
+    platform: ScriptChunkPlatformUTF8,
+    timespan: Timespan = 'day',
+    includeVotes: boolean,
+    pageNum: number = 0,
+  ) {
     try {
       const result = await this.db.post.findMany({
         where: {
           platform,
+          ranking: {
+            lt: 0n,
+          },
+          ranks: {
+            every: {
+              timestamp: { gte: getTimestampUTC(timespan) },
+            },
+          },
         },
         orderBy: {
           ranking: 'asc',
@@ -308,6 +417,18 @@ export default class Database {
           ranking: true,
           votesPositive: true,
           votesNegative: true,
+          ranks: !includeVotes
+            ? undefined
+            : {
+                select: {
+                  txid: true,
+                },
+                orderBy: {
+                  timestamp: 'desc',
+                },
+                skip: pageNum ? 10 * pageNum : undefined,
+                take: 10,
+              },
         },
       })
       return result.map(post => {
@@ -318,6 +439,7 @@ export default class Database {
           ranking: String(post.ranking),
           votesPositive: post.votesPositive,
           votesNegative: post.votesNegative,
+          votesTimespan: post.ranks?.map(rank => rank.txid) ?? [],
         }
       })
     } catch (e) {
