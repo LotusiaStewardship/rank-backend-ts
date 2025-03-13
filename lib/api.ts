@@ -57,7 +57,7 @@ export default class API extends EventEmitter {
     this.router.param('statsRoute', this.param.statsRoute)
     // Router endpoint configuration (DEEPEST ROUTES FIRST!)
     this.router.get(
-      '/stats/:platform/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?',
+      '/stats/:platform/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?',
       this.get.stats,
     )
     this.router.get(
@@ -322,8 +322,9 @@ export default class API extends EventEmitter {
         const platform = req.params.platform as ScriptChunkPlatformUTF8
         const statsRoute = req.params.statsRoute as StatsRoute
         const timespan = req.params.timespan as Timespan
+        const votes = Boolean(req.params.votes == 'includeVotes')
         const dbMethod: keyof typeof this.db = StatsRoutes[statsRoute]
-        const result = await this.db[dbMethod](platform, timespan)
+        const result = await this.db[dbMethod](platform, timespan, votes)
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.stats'],
