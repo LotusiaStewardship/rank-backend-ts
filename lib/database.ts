@@ -203,7 +203,7 @@ export default class Database {
    */
   async getStatsPlatformProfilesTopRanked(
     platform: ScriptChunkPlatformUTF8,
-    timespan: Timespan = 'all',
+    timespan: Timespan = 'day',
     includeVotes: boolean,
   ) {
     try {
