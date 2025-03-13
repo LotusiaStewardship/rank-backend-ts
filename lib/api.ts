@@ -17,6 +17,7 @@ type Parameter =
   | 'postId'
   | 'scriptPayload'
   | 'statsRoute'
+  | 'pageNum'
 type ParameterHandler = (
   req: Request,
   res: Response,
