@@ -10,6 +10,12 @@ import type {
 } from 'rank-lib'
 
 type Timespan = 'day' | 'week' | 'month' | 'quarter' | 'all'
+export type ScriptPayloadActivity = {
+  scriptPayload: string
+  voteCount: number
+  /** Total number of sats burned during `Timespan` */
+  sats: bigint
+}
 /**
  * Get the 00:00 UTC epoch timestamp for the previous `Timespan`, in seconds
  * @param timespan `day`, `week`, etc.
@@ -53,6 +59,39 @@ export default class Database {
 
   async disconnect() {
     await this.db.$disconnect()
+  }
+  /**
+   * Get the summarized activity of all `scriptPayload`s over `Timespan` time
+   * @param timespan
+   * @returns {Promise<ScriptPayloadActivity[]>} Array of `ScriptPayloadActivity`
+   */
+  async ipcGetScriptPayloadActivitySummary(
+    timespan: Timespan,
+  ): Promise<ScriptPayloadActivity[]> {
+    return await this.db.$transaction(async tx => {
+      try {
+        const group = await tx.rankTransaction.groupBy({
+          by: 'scriptPayload',
+          where: {
+            timestamp: { gte: getTimestampUTC(timespan) },
+          },
+          _count: true,
+          _sum: {
+            sats: true,
+          },
+        })
+        return group.map(
+          ({ scriptPayload, _count, _sum }) =>
+            ({
+              scriptPayload,
+              voteCount: _count,
+              sats: _sum.sats,
+            }) as ScriptPayloadActivity,
+        )
+      } catch (e) {
+        throw new Error(`db.ipcGetScriptPayloadActivity: ${e.message}`)
+      }
+    })
   }
   async apiGetPlatformProfile(
     platform: ScriptChunkPlatformUTF8,
