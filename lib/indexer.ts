@@ -996,20 +996,18 @@ export default class Indexer extends EventEmitter {
     // Sort the RANK txs for upsert
     ranks.forEach(rank => {
       // Determine positive/negative stats per RANK sentiment
-      let ranking: bigint
-      let votesPositive: number
-      let votesNegative: number
+      let ranking = 0n
+      let votesPositive = 0
+      let votesNegative = 0
       // Do a switch here in case sentiment is more than binary in the future
       switch (rank.sentiment as ScriptChunkSentimentUTF8) {
         case 'positive':
-          ranking = rank.sats
-          votesPositive = 1
-          votesNegative = 0
+          ranking += rank.sats
+          votesPositive++
           break
         case 'negative':
-          ranking = -rank.sats
-          votesPositive = 0
-          votesNegative = 1
+          ranking += -rank.sats
+          votesNegative += 1
           break
       }
       const { platform, profileId, postId, ...partialRank } = rank
@@ -1026,21 +1024,23 @@ export default class Indexer extends EventEmitter {
         profile.ranking += ranking
         profile.votesPositive += votesPositive
         profile.votesNegative += votesNegative
+        profile.ranks.push(partialRank)
       } else {
-        profile = {
+        profiles.set(profileId, {
           ...target,
           id: profileId,
-        }
-        profiles.set(profileId, profile)
+          ranks: [partialRank],
+          posts: new Map(),
+        })
+        profile = profiles.get(profileId)
       }
       // If we don't have a postId, then this RANK tx belongs to the Profile
       // Add the RANK tx and return to process next RANK tx
       if (!postId) {
-        profile.ranks.push(partialRank)
         return
       }
       // Otherwise, we set up the Post and attach this RANK tx to it
-      const post = profile.posts?.get(postId)
+      const post = profile.posts.get(postId)
       if (post) {
         post.ranking += ranking
         post.votesPositive += votesPositive
@@ -1048,7 +1048,6 @@ export default class Indexer extends EventEmitter {
         post.ranks.push(partialRank)
         return
       }
-      profile.posts = new Map()
       profile.posts.set(postId, {
         ...target,
         id: postId,
