@@ -61,6 +61,28 @@ export default class Database {
     await this.db.$disconnect()
   }
   /**
+   * Get the detailed activity of the specified `scriptPayload` over `Timespan` time
+   * @param timespan
+   * @param scriptPayload
+   */
+  async ipcGetScriptPayloadActivity(timespan: Timespan, scriptPayload: string) {
+    return await this.db.$transaction(async tx => {
+      const results = await tx.rankTransaction.findMany({
+        where: {
+          timestamp: { gte: getTimestampUTC(timespan) },
+          scriptPayload,
+        },
+        orderBy: {
+          timestamp: 'desc',
+        },
+      })
+      return results.map(result => ({
+        date: new Date(Number(result.timestamp * 1_000n)).toISOString(),
+        ...result,
+      }))
+    })
+  }
+  /**
    * Get the summarized activity of all `scriptPayload`s over `Timespan` time
    * @param timespan
    * @returns {Promise<ScriptPayloadActivity[]>} Array of `ScriptPayloadActivity`
