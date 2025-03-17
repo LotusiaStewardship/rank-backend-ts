@@ -725,13 +725,13 @@ export default class Database {
                 votesPositive,
                 votesNegative,
                 ranks: {
-                  createMany: { data: ranks },
+                  connect: ranks,
                 },
               },
               // post exists
               update: {
                 ranks: {
-                  createMany: { data: ranks },
+                  connect: ranks,
                 },
                 ...increments,
               },
