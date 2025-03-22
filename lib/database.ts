@@ -7,8 +7,14 @@ import type {
   Profile,
   ProfileMap,
   ScriptChunkPlatformUTF8,
+  ScriptChunkSentimentUTF8,
 } from 'rank-lib'
 
+type RankStatistics = {
+  ranking: bigint
+  votesPositive: number
+  votesNegative: number
+}
 type Timespan = 'day' | 'week' | 'month' | 'quarter' | 'all'
 export type ScriptPayloadActivity = {
   scriptPayload: string
@@ -262,222 +268,95 @@ export default class Database {
    * @param platform
    * @returns
    */
-  async getStatsPlatformProfilesTopRanked(
+  async getStatsPlatformRanked(
     platform: ScriptChunkPlatformUTF8,
-    timespan: Timespan = 'day',
+    timespan: Timespan,
+    dataType: 'profiles' | 'posts',
+    rankingType: 'top' | 'lowest',
     includeVotes: boolean,
-    pageNum: number = 0,
+    pageNum: number,
   ) {
-    try {
-      const result = await this.db.profile.findMany({
-        where: {
-          platform,
-          ranking: {
-            gt: 0n,
-          },
-          ranks: {
-            every: {
-              timestamp: { gte: getTimestampUTC(timespan) },
-            },
-          },
-        },
-        orderBy: {
-          ranking: 'desc',
-        },
-        take: API_STATS_RESULT_COUNT,
-        select: {
-          platform: true,
-          id: true,
-          ranking: true,
-          votesPositive: true,
-          votesNegative: true,
-          ranks: !includeVotes
-            ? undefined
-            : {
-                select: {
-                  txid: true,
-                },
-                orderBy: {
-                  timestamp: 'desc',
-                },
-                skip: pageNum ? 10 * pageNum : undefined,
-                take: 10,
-              },
-        },
-      })
-      return result.map(profile => {
-        return {
-          platform: profile.platform,
-          profileId: profile.id,
-          ranking: String(profile.ranking),
-          votesPositive: profile.votesPositive,
-          votesNegative: profile.votesNegative,
-          votesTimespan: profile.ranks?.map(rank => rank.txid) ?? [],
-        }
-      })
-    } catch (e) {
-      throw new Error(`db.getStatsPlatformProfilesTopRanked: ${e.message}`)
+    // set default argument values
+    if (!timespan) {
+      timespan = 'day'
     }
-  }
-  /**
-   *
-   * @param platform
-   * @returns
-   */
-  async getStatsPlatformProfilesLowestRanked(
-    platform: ScriptChunkPlatformUTF8,
-    timespan: Timespan = 'day',
-    includeVotes: boolean,
-    pageNum: number = 0,
-  ) {
-    try {
-      const result = await this.db.profile.findMany({
-        where: {
-          platform,
-          ranking: { lt: 0n },
-          ranks: {
-            every: {
-              timestamp: { gte: getTimestampUTC(timespan) },
-            },
-          },
-        },
-        orderBy: {
-          ranking: 'asc',
-        },
-        take: API_STATS_RESULT_COUNT,
-        select: {
-          platform: true,
-          id: true,
-          ranking: true,
-          votesPositive: true,
-          votesNegative: true,
-          ranks: !includeVotes
-            ? undefined
-            : {
-                select: {
-                  txid: true,
-                },
-                orderBy: {
-                  timestamp: 'desc',
-                },
-                skip: pageNum ? 10 * pageNum : undefined,
-                take: 10,
-              },
-        },
-      })
-      return result.map(profile => {
-        return {
-          platform: profile.platform,
-          profileId: profile.id,
-          ranking: String(profile.ranking),
-          votesPositive: profile.votesPositive,
-          votesNegative: profile.votesNegative,
-          votesTimespan: profile.ranks?.map(rank => rank.txid) ?? [],
-        }
-      })
-    } catch (e) {
-      throw new Error(`db.getStatsPlatformProfilesLowestRanked: ${e.message}`)
+    if (!includeVotes) {
+      includeVotes = false
     }
-  }
-  /**
-   *
-   * @param platform
-   * @returns
-   */
-  async getStatsPlatformPostsTopRanked(
-    platform: ScriptChunkPlatformUTF8,
-    timespan: Timespan = 'day',
-    includeVotes: boolean,
-    pageNum: number = 0,
-  ) {
-    try {
-      const result = await this.db.post.findMany({
-        where: {
-          platform,
-          ranking: {
-            gt: 0n,
-          },
-          ranks: {
-            every: {
-              timestamp: { gte: getTimestampUTC(timespan) },
-            },
-          },
-        },
-        orderBy: {
-          ranking: 'desc',
-        },
-        take: 5,
-        select: {
-          platform: true,
-          profileId: true,
-          id: true,
-          ranking: true,
-          votesPositive: true,
-          votesNegative: true,
-          ranks: !includeVotes
-            ? undefined
-            : {
-                select: {
-                  txid: true,
-                },
-                orderBy: {
-                  timestamp: 'desc',
-                },
-                skip: pageNum ? 10 * pageNum : undefined,
-                take: 10,
-              },
-        },
-      })
-      return result.map(post => {
-        return {
-          platform: post.platform,
-          profileId: post.profileId,
-          postId: post.id,
-          ranking: String(post.ranking),
-          votesPositive: post.votesPositive,
-          votesNegative: post.votesNegative,
-          votesTimespan: post.ranks?.map(rank => rank.txid) ?? [],
-        }
-      })
-    } catch (e) {
-      throw new Error(`db.getStatsPlatformPostsLowestRanked: ${e.message}`)
+    if (!pageNum) {
+      pageNum = 0
     }
-  }
-  /**
-   *
-   * @param platform
-   * @returns
-   */
-  async getStatsPlatformPostsLowestRanked(
-    platform: ScriptChunkPlatformUTF8,
-    timespan: Timespan = 'day',
-    includeVotes: boolean,
-    pageNum: number = 0,
-  ) {
+    // Set up database query parameters
+    const dataTypeKey = dataType == 'profiles' ? 'profileId' : 'postId'
+    const groupBy: [typeof dataTypeKey, 'sentiment'] = [
+      dataTypeKey,
+      'sentiment',
+    ]
+    // Get the timestamp according to the specified Timespan
+    const timestamp = getTimestampUTC(timespan)
     try {
-      const result = await this.db.post.findMany({
+      const ranksByProfileIdSentiment = await this.db.rankTransaction.groupBy({
+        by: groupBy,
         where: {
           platform,
-          ranking: {
-            lt: 0n,
-          },
-          ranks: {
-            every: {
-              timestamp: { gte: getTimestampUTC(timespan) },
-            },
-          },
+          timestamp: { gte: timestamp },
         },
-        orderBy: {
-          ranking: 'asc',
+        _count: {
+          sentiment: true,
         },
-        take: 5,
-        select: {
-          platform: true,
-          profileId: true,
-          id: true,
-          ranking: true,
-          votesPositive: true,
-          votesNegative: true,
+        _sum: {
+          sats: true,
+        },
+      })
+      // process the RANK txs and calculate changes over `Timespan`
+      const dataChanges: Map<
+        string,
+        {
+          ranking: bigint
+          votesPositive: number
+          votesNegative: number
+        }
+      > = new Map()
+      ranksByProfileIdSentiment.forEach(rank => {
+        const { _count, _sum, sentiment } = rank
+        if (!dataChanges.has(rank[dataTypeKey])) {
+          dataChanges.set(rank[dataTypeKey], {
+            ranking: 0n,
+            votesPositive: 0,
+            votesNegative: 0,
+          })
+        }
+        const data = dataChanges.get(rank[dataTypeKey])
+        switch (sentiment as ScriptChunkSentimentUTF8) {
+          case 'positive': {
+            data.ranking += BigInt(_sum.sats)
+            data.votesPositive += _count.sentiment
+            break
+          }
+          case 'negative': {
+            data.ranking -= BigInt(_sum.sats)
+            data.votesNegative += _count.sentiment
+            break
+          }
+        }
+      })
+      let changesSortedFiltered: Array<[string, RankStatistics]>
+      switch (rankingType) {
+        case 'top': {
+          changesSortedFiltered = [...dataChanges.entries()]
+            .sort(([, a], [, b]) => Number(b.ranking) - Number(a.ranking))
+            .splice(0, API_STATS_RESULT_COUNT)
+          break
+        }
+        case 'lowest': {
+          changesSortedFiltered = [...dataChanges.entries()]
+            .sort(([, a], [, b]) => Number(a.ranking) - Number(b.ranking))
+            .splice(0, API_STATS_RESULT_COUNT)
+        }
+      }
+      // set up the database queries to get current data
+      const selection = {
+        include: {
           ranks: !includeVotes
             ? undefined
             : {
@@ -485,26 +364,88 @@ export default class Database {
                   txid: true,
                 },
                 orderBy: {
-                  timestamp: 'desc',
+                  timestamp: 'desc' as 'desc',
                 },
                 skip: pageNum ? 10 * pageNum : undefined,
                 take: 10,
               },
         },
-      })
-      return result.map(post => {
+      }
+      const dataProcessor = (
+        item: {
+          ranks: {
+            txid: string
+          }[]
+        } & {
+          id: string
+          platform: string
+          profileId?: string
+          ranking: bigint
+          votesPositive: number
+          votesNegative: number
+        },
+      ) => {
+        const changes = dataChanges.get(item.id)
+        const rankingCurrent = Number(item.ranking)
+        const rankingPrevious = Number(item.ranking - changes.ranking)
+        const rankingChangePercentage =
+          ((rankingCurrent - rankingPrevious) / rankingPrevious) * 100
+        const ids =
+          item.profileId && dataTypeKey == 'postId'
+            ? { profileId: item.profileId, postId: item.id }
+            : { profileId: item.id }
         return {
-          platform: post.platform,
-          profileId: post.profileId,
-          postId: post.id,
-          ranking: String(post.ranking),
-          votesPositive: post.votesPositive,
-          votesNegative: post.votesNegative,
-          votesTimespan: post.ranks?.map(rank => rank.txid) ?? [],
+          platform,
+          ...ids,
+          total: {
+            ranking: String(item.ranking),
+            votesPositive: item.votesPositive,
+            votesNegative: item.votesNegative,
+          },
+          changed: {
+            ranking: String(changes.ranking),
+            rate: rankingChangePercentage.toLocaleString(undefined, {
+              minimumFractionDigits: 1,
+              maximumFractionDigits: 1,
+            }),
+            votesPositive: changes.votesPositive,
+            votesNegative: changes.votesNegative,
+          },
+          votesTimespan: item.ranks?.map(rank => rank.txid) ?? [],
         }
-      })
+      }
+      switch (dataType) {
+        case 'profiles': {
+          const data = await this.db.$transaction(
+            changesSortedFiltered.map(([id, changes]) =>
+              this.db.profile.findFirst({
+                where: {
+                  platform,
+                  id,
+                },
+                ...selection,
+              }),
+            ),
+          )
+          return data.map(dataProcessor)
+        }
+        case 'posts': {
+          const data = await this.db.$transaction(
+            changesSortedFiltered.map(([id, changes]) =>
+              this.db.post.findFirst({
+                where: {
+                  platform,
+                  id,
+                },
+                ...selection,
+              }),
+            ),
+          )
+          return data.map(dataProcessor)
+        }
+      }
     } catch (e) {
-      throw new Error(`db.getStatsPlatformPostsLowestRanked: ${e.message}`)
+      throw new Error(`db.getStatsPlatformRanked: ${e.message}`)
     }
   }
   /**

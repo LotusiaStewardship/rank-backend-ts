@@ -26,10 +26,10 @@ type ParameterHandler = (
 ) => void
 
 enum StatsRoutes {
-  'profiles/top-ranked' = 'getStatsPlatformProfilesTopRanked',
-  'profiles/lowest-ranked' = 'getStatsPlatformProfilesLowestRanked',
-  'posts/top-ranked' = 'getStatsPlatformPostsTopRanked',
-  'posts/lowest-ranked' = 'getStatsPlatformPostsLowestRanked',
+  'profiles/top-ranked' = 'getStatsPlatformRanked',
+  'profiles/lowest-ranked' = 'getStatsPlatformRanked',
+  'posts/top-ranked' = 'getStatsPlatformRanked',
+  'posts/lowest-ranked' = 'getStatsPlatformRanked',
 }
 type StatsRoute = keyof typeof StatsRoutes
 
@@ -347,6 +347,10 @@ export default class API extends EventEmitter {
       try {
         const platform = req.params.platform as ScriptChunkPlatformUTF8
         const statsRoute = req.params.statsRoute as StatsRoute
+        const [dataType, rankingType] = statsRoute.split(/\/|\-/) as [
+          'profiles' | 'posts',
+          'top' | 'lowest',
+        ]
         const timespan = req.params.timespan as Timespan
         const votes = Boolean(req.params.votes == 'includeVotes')
         const pageNum = Number(req.params.pageNum)
@@ -354,6 +358,8 @@ export default class API extends EventEmitter {
         const result = await this.db[dbMethod](
           platform,
           timespan,
+          dataType,
+          rankingType,
           votes,
           pageNum,
         )
