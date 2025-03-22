@@ -7,6 +7,7 @@ import type {
   Profile,
   ProfileMap,
   ScriptChunkPlatformUTF8,
+  ScriptChunkSentimentUTF8,
 } from 'rank-lib'
 
 type RankStatistics = {
