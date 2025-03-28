@@ -8,7 +8,7 @@ import type {
   ProfileMap,
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
-} from 'rank-lib'
+} from '../submodules/rank-lib'
 
 type RankStatistics = {
   ranking: bigint

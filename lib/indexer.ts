@@ -13,7 +13,7 @@ import {
   toPlatformUTF8,
   toSentimentUTF8,
   log,
-} from 'rank-lib'
+} from '../submodules/rank-lib'
 import {
   ERR,
   NNG_PUB_DEFAULT_SOCKET_PATH,
