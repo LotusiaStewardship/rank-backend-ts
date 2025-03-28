@@ -1,7 +1,6 @@
 import { Express, Router, Request, Response, NextFunction } from 'express'
 import express from 'express'
 import Database from './database'
-import type { ScriptChunkPlatformUTF8 } from 'rank-lib'
 import { API_SERVER_PORT } from '../util/constants'
 import {
   PLATFORMS,
