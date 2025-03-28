@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client'
+import { PrismaClient } from '../.output/.prisma/rank-backend-ts/client'
 import { randomUUID } from 'crypto'
 import { API_STATS_RESULT_COUNT, ERR } from '../util/constants'
 import type {
