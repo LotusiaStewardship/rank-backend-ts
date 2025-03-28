@@ -1,7 +1,11 @@
 import Indexer from '../lib/indexer'
 import API from '../lib/api'
-import { log } from 'rank-lib'
-import { ERR } from '../util/constants'
+import { log } from '../submodules/rank-lib'
+import {
+  ERR,
+  NNG_PUB_DEFAULT_SOCKET_PATH,
+  NNG_RPC_DEFAULT_SOCKET_PATH,
+} from '../util/constants'
 import Database from '../lib/database'
 
 type Exception = [number | string, string]
