@@ -29,7 +29,7 @@ import {
   RANK_BLOCK_GENESIS_V1,
   RANK_OUTPUT_MIN_VALID_SATS,
   RANK_SCRIPT_CHUNKS,
-} from 'rank-lib'
+} from '../submodules/rank-lib'
 import type {
   LogEntry,
   RankOutput,
@@ -41,7 +41,7 @@ import type {
   ScriptChunkField,
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
-} from 'rank-lib'
+} from '../submodules/rank-lib'
 /** NNG types */
 type NNGMessageType =
   | 'mempooltxadd'
