@@ -1,4 +1,4 @@
-import { PrismaClient } from './prisma/client'
+import { PrismaClient } from '@prisma/client'
 import { randomUUID } from 'crypto'
 import { API_STATS_RESULT_COUNT, ERR } from '../util/constants'
 import type {
@@ -8,7 +8,7 @@ import type {
   ProfileMap,
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
-} from '../submodules/rank-lib'
+} from 'rank-lib'
 
 type RankStatistics = {
   ranking: bigint
