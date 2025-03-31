@@ -1,3 +1,5 @@
+import os from 'node:os'
+
 /**
  * API configuration
  */
