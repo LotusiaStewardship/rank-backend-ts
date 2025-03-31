@@ -26,22 +26,22 @@
   },
   "homepage": "https://github.com/LotusiaStewardship/rank-backend-ts#readme",
   "devDependencies": {
-    "prettier": "3.3.3",
+    "@types/express": "4.17.21",
+    "@types/nanomsg": "4.2.3",
+    "@types/node": "22.13.14",
+    "@types/validator": "13.12.3",
+    "prettier": "3.5.3",
     "prisma": "6.5.0",
-    "typescript-eslint": "8.10.0"
+    "typescript": "5.8.2",
+    "typescript-eslint": "8.28.0"
   },
   "dependencies": {
     "@abcpros/bitcore-lib-xpi": "8.25.37",
     "@prisma/client": "6.5.0",
-    "@types/express": "4.17.21",
-    "@types/nanomsg": "4.2.3",
-    "@types/node": "20.16.14",
-    "@types/validator": "13.12.2",
-    "express": "4.21.1",
-    "flatbuffers": "24.3.25",
+    "express": "4.21.2",
+    "flatbuffers": "25.2.10",
     "nanomsg": "file:submodules/nanomsg",
     "rank-lib": "file:submodules/rank-lib",
-    "typescript": "5.6.3",
     "validator": "13.12.0"
   }
 }
