@@ -2,9 +2,12 @@
   "name": "@lotusia/rank-backend-ts",
   "version": "0.2.0",
   "description": "Core backend services implementing the Lotus RANK protocol",
-  "main": "scripts/start.js",
+  "main": ".output/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build:dev": "rm -rf .output && npx tsc",
+    "build:prod": "npm run 'build:dev' && npm ci --omit=dev",
+    "start": "node .output/index.js"
   },
   "repository": {
     "type": "git",
