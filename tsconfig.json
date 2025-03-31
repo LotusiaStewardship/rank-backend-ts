@@ -24,5 +24,10 @@
     "lib": [
       "ES2022", "ES5", "ES6"
     ],
+    "plugins": [
+      {
+        "transform": "typescript-transform-paths"
+      }
+    ]
   }
 }

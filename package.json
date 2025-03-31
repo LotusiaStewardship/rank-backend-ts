@@ -5,8 +5,8 @@
   "main": ".output/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build:dev": "rm -rf .output && tsc",
-    "build:prod": "run 'build:dev' && npm ci --omit=dev",
+    "build:dev": "rm -rf .output && tspc",
+    "build:prod": "npm run 'build:dev' && npm ci --omit=dev",
     "start": "dotenv -e ./.env -- node .output/index.js"
   },
   "repository": {
@@ -35,8 +35,10 @@
     "@types/validator": "13.12.3",
     "prettier": "3.5.3",
     "prisma": "6.5.0",
+    "ts-patch": "3.3.0",
     "typescript": "5.8.2",
-    "typescript-eslint": "8.28.0"
+    "typescript-eslint": "8.28.0",
+    "typescript-transform-paths": "3.5.5"
   },
   "dependencies": {
     "@abcpros/bitcore-lib-xpi": "8.25.37",
