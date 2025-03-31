@@ -89,12 +89,8 @@ export default class Indexer extends EventEmitter {
   constructor(db: Database, pubUri?: string, rpcUri?: string) {
     super()
     // Validate NNG parameters
-    this.pubUri = pubUri
-      ? `ipc://${resolve(pubUri)}`
-      : `ipc://${resolve(NNG_PUB_DEFAULT_SOCKET_PATH)}`
-    this.rpcUri = rpcUri
-      ? `ipc://${resolve(rpcUri)}`
-      : `ipc://${resolve(NNG_RPC_DEFAULT_SOCKET_PATH)}`
+    this.pubUri = `ipc://${pubUri}`
+    this.rpcUri = `ipc://${rpcUri}`
     // Module setup
     this.db = db
     // Pub/Sub socket setup
