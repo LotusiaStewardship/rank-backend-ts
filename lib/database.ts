@@ -99,7 +99,7 @@ export default class Database {
     return await this.db.$transaction(async tx => {
       try {
         const group = await tx.rankTransaction.groupBy({
-          by: 'scriptPayload',
+          by: ['scriptPayload'],
           where: {
             timestamp: { gte: getTimestampUTC(timespan) },
           },
@@ -121,13 +121,15 @@ export default class Database {
       }
     })
   }
+  /**
+   *
+   * @param platform
+   * @param profileId
+   * @returns
+   */
   async apiGetPlatformProfile(
     platform: ScriptChunkPlatformUTF8,
     profileId: string,
-    include?: {
-      ranks?: boolean
-      posts?: boolean
-    },
   ) {
     const data = {
       platform,
@@ -149,12 +151,19 @@ export default class Database {
         data.votesNegative = profile.votesNegative
       } catch (e) {
         // nothing to do here
-      } finally {
-        // always return data, even if default profile data
-        return data
       }
+      // always return data, even if default profile data
+      return data
     })
   }
+  /**
+   *
+   * @param platform
+   * @param profileId
+   * @param postId
+   * @param scriptPayload
+   * @returns
+   */
   async apiGetPlatformProfilePost(
     platform: ScriptChunkPlatformUTF8,
     profileId: string,
@@ -197,15 +206,6 @@ export default class Database {
                     txid: true,
                     sentiment: true,
                   },
-                  /*
-                  include: {
-                    block: {
-                      select: {
-
-                      }
-                    }
-                  }
-                  */
                 },
           },
         })
@@ -257,10 +257,9 @@ export default class Database {
           votesPositive: profile.votesPositive,
           votesNegative: profile.votesNegative,
         }
-      } finally {
-        // always return data, even if default profile data
-        return data
       }
+      // always return data, even if default profile data
+      return data
     })
   }
   /**
@@ -364,7 +363,7 @@ export default class Database {
                   txid: true,
                 },
                 orderBy: {
-                  timestamp: 'desc' as 'desc',
+                  timestamp: 'desc' as const,
                 },
                 skip: pageNum ? 10 * pageNum : undefined,
                 take: 10,
