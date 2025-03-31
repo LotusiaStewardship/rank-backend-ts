@@ -5,9 +5,9 @@
   "main": ".output/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build:dev": "rm -rf .output && npx tsc",
-    "build:prod": "npm run 'build:dev' && npm ci --omit=dev",
-    "start": "node .output/index.js"
+    "build:dev": "rm -rf .output && tsc",
+    "build:prod": "run 'build:dev' && npm ci --omit=dev",
+    "start": "dotenv -e ./.env -- node .output/index.js"
   },
   "repository": {
     "type": "git",

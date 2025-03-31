@@ -52,6 +52,7 @@ export default class Database {
   constructor() {
     this.db = new PrismaClient({
       errorFormat: 'minimal',
+      datasourceUrl: process.env.DATABASE_URL,
     })
   }
 
