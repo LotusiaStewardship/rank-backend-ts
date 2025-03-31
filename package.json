@@ -38,6 +38,7 @@
   "dependencies": {
     "@abcpros/bitcore-lib-xpi": "8.25.37",
     "@prisma/client": "6.5.0",
+    "dotenv-cli": "8.0.0",
     "express": "4.21.2",
     "flatbuffers": "25.2.10",
     "nanomsg": "file:submodules/nanomsg",
