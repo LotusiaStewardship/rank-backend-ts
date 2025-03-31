@@ -6,10 +6,17 @@
   "compilerOptions": {
     "rootDir": "./",
     "outDir": "./.output",
+    "baseUrl": "./",
+    "paths": {
+      "rank-lib/*": [
+        "./submodules/rank-lib/*"
+      ]
+    },
     "declaration": false,
     "removeComments": true,
     "esModuleInterop": true,
     "allowJs": true,
+    "resolveJsonModule": true,
     "strict": false,
     "module": "Node16",
     "moduleResolution": "node16",
