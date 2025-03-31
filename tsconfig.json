@@ -1,15 +1,15 @@
 {
   "exclude": [
-    "submodules/nanomsg",
+    "submodules",
     "node_modules"
   ],
   "compilerOptions": {
-    "rootDir": "./",
+    "rootDir": ".",
     "outDir": "./.output",
-    "baseUrl": "./",
+    "baseUrl": ".",
     "paths": {
-      "rank-lib/*": [
-        "./submodules/rank-lib/*"
+      "rank-lib": [
+        "./submodules/rank-lib"
       ]
     },
     "declaration": false,
