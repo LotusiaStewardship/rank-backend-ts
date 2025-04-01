@@ -4,7 +4,10 @@
     "node_modules"
   ],
   "compilerOptions": {
-    "rootDir": ".",
+    "rootDirs": [
+      ".",
+      ".output"
+    ],
     "outDir": "./.output",
     "paths": {
       "rank-lib": [
@@ -25,7 +28,7 @@
     ],
     "plugins": [
       {
-        "transform": "typescript-transform-paths"
+        "transform": "typescript-transform-paths", "useRootDirs": true
       }
     ]
   }
