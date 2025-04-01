@@ -1,12 +1,12 @@
-import Indexer from '../lib/indexer'
-import API from '../lib/api'
+import Indexer from './lib/indexer'
+import API from './lib/api'
 import { log } from 'rank-lib'
 import {
   ERR,
   NNG_PUB_DEFAULT_SOCKET_PATH,
   NNG_RPC_DEFAULT_SOCKET_PATH,
-} from '../util/constants'
-import Database from '../lib/database'
+} from './util/constants'
+import Database from './lib/database'
 
 type Exception = [number | string, string]
 /**
@@ -16,8 +16,8 @@ type Exception = [number | string, string]
 const db = new Database()
 const indexer = new Indexer(
   db,
-  String(process.argv[2]), // /path/to/pub.pipe
-  String(process.argv[3]), // /path/to/rpc.pipe
+  String(process.argv[2] || NNG_PUB_DEFAULT_SOCKET_PATH), // /path/to/pub.pipe
+  String(process.argv[3] || NNG_RPC_DEFAULT_SOCKET_PATH), // /path/to/rpc.pipe
 )
 const api = new API(db)
 // Startup/Shutdown functions

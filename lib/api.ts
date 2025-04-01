@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-duplicate-enum-values */
 import { Express, Router, Request, Response, NextFunction } from 'express'
 import express from 'express'
 import Database from './database'
@@ -9,14 +10,14 @@ import { EventEmitter } from 'events'
 type Timespan = 'day' | 'week' | 'month' | 'quarter' | 'all'
 type Endpoint = 'profile' | 'post' | 'stats'
 type EndpointHandler = (req: Request, res: Response) => void
-type Parameter =
+type EndpointParameter =
   | 'platform'
   | 'profileId'
   | 'postId'
   | 'scriptPayload'
   | 'statsRoute'
   | 'pageNum'
-type ParameterHandler = (
+type EndpointParameterHandler = (
   req: Request,
   res: Response,
   next: NextFunction,
@@ -97,7 +98,7 @@ export default class API extends EventEmitter {
    * Parameter Handlers
    */
   private param: {
-    [param in Parameter]: ParameterHandler
+    [param in EndpointParameter]: EndpointParameterHandler
   } = {
     /**
      *
@@ -167,7 +168,7 @@ export default class API extends EventEmitter {
         return this.sendJSON(res, { error: `postId is invalid format` }, 400)
       }
       switch (postIdParams.type) {
-        case 'BigInt':
+        case 'BigInt': {
           const buffer = Buffer.from(BigInt(postId).toString(16), 'hex')
           if (buffer.length != postIdParams.chunkLength) {
             return this.sendJSON(
@@ -177,8 +178,10 @@ export default class API extends EventEmitter {
             )
           }
           break
-        case 'String':
+        }
+        case 'String': {
           break
+        }
       }
       req.params.postId = postId
       next()
@@ -281,11 +284,13 @@ export default class API extends EventEmitter {
         return this.sendJSON(res, result, 200)
       } catch (e) {
         // Assume not found but log error to console
+        const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.profile'],
           ...this.toLogEntries(req.params),
           ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
         ])
         return this.sendJSON(
           res,
@@ -314,19 +319,19 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.post'],
-          ['platform', `${platform}`],
-          ['profileId', `${profileId}`],
-          ['postId', `${postId}`],
+          ...this.toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
         return this.sendJSON(res, result, 200)
       } catch (e) {
         // Assume not found but log error to console
+        const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.post'],
           ...this.toLogEntries(req.params),
           ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
         ])
         return this.sendJSON(
           res,
@@ -345,7 +350,7 @@ export default class API extends EventEmitter {
       try {
         const platform = req.params.platform as ScriptChunkPlatformUTF8
         const statsRoute = req.params.statsRoute as StatsRoute
-        const [dataType, rankingType] = statsRoute.split(/\/|\-/) as [
+        const [dataType, rankingType] = statsRoute.split(/\/|-/) as [
           'profiles' | 'posts',
           'top' | 'lowest',
         ]

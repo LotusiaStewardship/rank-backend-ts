@@ -1,3 +1,5 @@
+import os from 'node:os'
+
 /**
  * API configuration
  */
@@ -6,8 +8,8 @@ export const API_STATS_RESULT_COUNT = 5
 /**
  * NNG configuration
  */
-export const NNG_PUB_DEFAULT_SOCKET_PATH = '~/.lotus/pub.pipe'
-export const NNG_RPC_DEFAULT_SOCKET_PATH = '~/.lotus/rpc.pipe'
+export const NNG_PUB_DEFAULT_SOCKET_PATH = `${os.homedir()}/.lotus/pub.pipe`
+export const NNG_RPC_DEFAULT_SOCKET_PATH = `${os.homedir()}/.lotus/rpc.pipe`
 export const NNG_RPC_RCVMAXSIZE_CONSENSUS = 2_097_152 // 2 MiB (2^20 * 2)
 export const NNG_RPC_BLOCKRANGE_SIZE = 20
 export const NNG_SOCKET_RECONN = 300 // time (ms) between reconnect attempts

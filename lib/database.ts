@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client'
+import { PrismaClient } from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
 import { API_STATS_RESULT_COUNT, ERR } from '../util/constants'
 import type {
@@ -6,15 +6,15 @@ import type {
   RankTransaction,
   Profile,
   ProfileMap,
+  RankTarget,
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
 } from 'rank-lib'
 
-type RankStatistics = {
-  ranking: bigint
-  votesPositive: number
-  votesNegative: number
-}
+type RankStatistics = Pick<
+  RankTarget,
+  'ranking' | 'votesPositive' | 'votesNegative'
+>
 type Timespan = 'day' | 'week' | 'month' | 'quarter' | 'all'
 export type ScriptPayloadActivity = {
   scriptPayload: string
@@ -52,6 +52,7 @@ export default class Database {
   constructor() {
     this.db = new PrismaClient({
       errorFormat: 'minimal',
+      datasourceUrl: process.env.DATABASE_URL,
     })
   }
 
@@ -99,7 +100,7 @@ export default class Database {
     return await this.db.$transaction(async tx => {
       try {
         const group = await tx.rankTransaction.groupBy({
-          by: 'scriptPayload',
+          by: ['scriptPayload'],
           where: {
             timestamp: { gte: getTimestampUTC(timespan) },
           },
@@ -121,13 +122,15 @@ export default class Database {
       }
     })
   }
+  /**
+   *
+   * @param platform
+   * @param profileId
+   * @returns
+   */
   async apiGetPlatformProfile(
     platform: ScriptChunkPlatformUTF8,
     profileId: string,
-    include?: {
-      ranks?: boolean
-      posts?: boolean
-    },
   ) {
     const data = {
       platform,
@@ -149,12 +152,19 @@ export default class Database {
         data.votesNegative = profile.votesNegative
       } catch (e) {
         // nothing to do here
-      } finally {
-        // always return data, even if default profile data
-        return data
       }
+      // always return data, even if default profile data
+      return data
     })
   }
+  /**
+   *
+   * @param platform
+   * @param profileId
+   * @param postId
+   * @param scriptPayload
+   * @returns
+   */
   async apiGetPlatformProfilePost(
     platform: ScriptChunkPlatformUTF8,
     profileId: string,
@@ -197,15 +207,6 @@ export default class Database {
                     txid: true,
                     sentiment: true,
                   },
-                  /*
-                  include: {
-                    block: {
-                      select: {
-
-                      }
-                    }
-                  }
-                  */
                 },
           },
         })
@@ -257,10 +258,9 @@ export default class Database {
           votesPositive: profile.votesPositive,
           votesNegative: profile.votesNegative,
         }
-      } finally {
-        // always return data, even if default profile data
-        return data
       }
+      // always return data, even if default profile data
+      return data
     })
   }
   /**
@@ -364,7 +364,7 @@ export default class Database {
                   txid: true,
                 },
                 orderBy: {
-                  timestamp: 'desc' as 'desc',
+                  timestamp: 'desc' as const,
                 },
                 skip: pageNum ? 10 * pageNum : undefined,
                 take: 10,

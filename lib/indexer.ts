@@ -89,12 +89,8 @@ export default class Indexer extends EventEmitter {
   constructor(db: Database, pubUri?: string, rpcUri?: string) {
     super()
     // Validate NNG parameters
-    this.pubUri = pubUri
-      ? `ipc://${resolve(pubUri)}`
-      : `ipc://${resolve(NNG_PUB_DEFAULT_SOCKET_PATH)}`
-    this.rpcUri = rpcUri
-      ? `ipc://${resolve(rpcUri)}`
-      : `ipc://${resolve(NNG_RPC_DEFAULT_SOCKET_PATH)}`
+    this.pubUri = `ipc://${pubUri}`
+    this.rpcUri = `ipc://${rpcUri}`
     // Module setup
     this.db = db
     // Pub/Sub socket setup
@@ -827,59 +823,64 @@ export default class Indexer extends EventEmitter {
       }
       // exclude OP_RETURN chunk and make sure remaining chunk count is valid
       // chunks array is COPIED via .slice() so is SAFE to shift/splice/etc.
-      const chunks = script.chunks.slice(1)
-      const required = Object.values(this.chunks.required)
-      if (chunks.length < required.length) {
+      const scriptChunks = script.chunks.slice(1)
+      const requiredChunks = Object.values(this.chunks.required)
+      if (scriptChunks.length < requiredChunks.length) {
         return null
       }
       // verify script chunks contain valid hard-coded chunk parameters
       // this also inherently validates script chunk order
-      for (let i = 0; i < required.length; i++) {
-        const chunk = required[i]
-        if (!chunk.map) {
+      for (let i = 0; i < requiredChunks.length; i++) {
+        const requiredChunk = requiredChunks[i]
+        if (!requiredChunk.map) {
           continue
         }
         // sentiment does not get parsed by bitcore into buf; convert opcodenum to buf
-        if (!chunks[i].buf) {
-          // put opcodenum in an array before Buffer.from
-          chunks[i].buf = Buffer.from([chunks[i].opcodenum])
-          chunks[i].len = chunks[i].buf.length
+        if (!scriptChunks[i].buf) {
+          // put opcodenum in Uint8Array before Buffer.from
+          scriptChunks[i].buf = Buffer.from([scriptChunks[i].opcodenum])
+          scriptChunks[i].len = scriptChunks[i].buf.length
         }
-        if (!chunk.map.has(chunks[i].buf.readUintBE(0, chunks[i].len))) {
+        if (
+          !requiredChunk.map.has(
+            scriptChunks[i].buf.readUintBE(0, scriptChunks[i].len),
+          )
+        ) {
           return null
         }
       }
       // gather parameters for platform
       const platformChunk = this.chunks.required.platform
       const platform = platformChunk.map.get(
-        chunks[2].buf.readUIntBE(0, platformChunk.len),
+        scriptChunks[2].buf.readUIntBE(0, platformChunk.len),
       ) as ScriptChunkPlatformUTF8
       const { profileId } = PLATFORMS[platform]
       // script chunk after platform MUST be profile and be padded to required length
-      if (chunks[3].len < profileId.len) {
+      if (scriptChunks[3].len < profileId.len) {
         return null
       }
-      // splice original chunk array to remove all required chunks
+      // splice original chunk array to take all required chunks
       // then remove lokad chunk to process remaining required chunks into RankOutput
+      // processScriptChunks will modify the referenced chunk array
       const rank = this.processScriptChunks(
-        chunks.splice(0, required.length).slice(1),
+        scriptChunks.splice(0, requiredChunks.length).slice(1),
       )
-      // Process optional chunks
-      if (chunks.length > 0) {
-        const { postId } = PLATFORMS[platform]
-        for (let i = 0; i < chunks.length; i++) {
+      // Process remaining, optional chunks
+      if (scriptChunks.length > 0) {
+        for (let i = 0; i < scriptChunks.length; i++) {
           let decoded: string
-          const chunk = chunks[i]
+          const scriptChunk = scriptChunks[i]
           switch (i) {
             // postId or comment
-            case 0:
+            case 0: {
+              const { postId: postIdSpec } = PLATFORMS[platform]
               try {
                 // match platform postId requirements, otherwise assume comment data
-                decoded = chunk.buf[postId.reader]().toString()
+                decoded = scriptChunk.buf[postIdSpec.reader]().toString()
               } catch (e) {
                 // we really ought not skip errors here..
                 // if a user cast a vote, we need to process their vote correctly
-                // e.g. old Twitter post IDs are 64-bit UInt, but old post IDs aren't 8-byte length
+                // e.g. new Twitter post IDs are 64-bit UInt, but old post IDs aren't 8-byte length
                 // ref: https://x.com/DianeP89/status/810184088212701184 is 7-byte length
                 //
                 //
@@ -887,8 +888,8 @@ export default class Indexer extends EventEmitter {
                 break
               }
               if (
-                chunk.len == postId.chunkLength &&
-                decoded.match(postId.regex)
+                scriptChunk.len == postIdSpec.chunkLength &&
+                decoded.match(postIdSpec.regex)
               ) {
                 rank.postId = decoded
               } else {
@@ -896,6 +897,7 @@ export default class Indexer extends EventEmitter {
                 //rank.comment = toCommentUTF8(chunk.buf)
               }
               break
+            }
             // comment
             case 1:
               // TODO: replace with instanceId

@@ -5,8 +5,8 @@
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
 
 generator client {
-  provider = "prisma-client-js"
-  output = "./node_modules/.prisma/client"
+  provider        = "prisma-client-js"
+  output          = "./prisma/prisma-client-js"
 }
 
 datasource db {
@@ -24,7 +24,7 @@ model Account {
 
 // Online profiles related to human identity
 model Profile {
-  id            String // 16-byte hexadecimal representation of profile handle
+  id            String // Platform-unique ID (e.g. per API)
   accountId     String
   platform      String // e.g. Twitter/X.com
   ranking       BigInt // overall ranking, in satoshis
@@ -56,32 +56,36 @@ model Post {
 
   // Each post will require these three entries
   @@id([platform, profileId, id])
+  @@index([id(type: hash)])
+  // these indexes are best used with a `LIMIT BY`
+  // ref: https://www.postgresql.org/docs/current/indexes-ordering.html#INDEXES-ORDERING
   @@index([platform(type: hash), ranking(type: btree, sort: Desc)], name: "post_idx_ranked_highest")
   @@index([platform(type: hash), ranking(type: btree, sort: Asc)], name: "post_idx_ranked_lowest")
 }
 
 model RankTransaction {
   // RankTransaction data
-  txid      String  @id // 32-byte hex
+  txid          String  @id // 32-byte hex
   scriptPayload String // the p2pkh script payload that spent a UTXO for this transaction
-  height    Int? // null for mempool transactions
-  timestamp BigInt // Block timestamp or indexer first-seen time
+  height        Int? // null for mempool transactions
+  timestamp     BigInt // Block timestamp or indexer first-seen time
   // RankOutput data
-  platform  String // references platform field on Profile model
-  profileId String // references id field on Profile model
-  postId    String? // optional reference to platform post ID (e.g. x.com/:profileId/status/:postId)
-  sentiment String // 1-byte sentiment, 0x00 = negative, 0x01 = positive, and potentially more
-  sats      BigInt // amount of sats burned
+  platform      String // references platform field on Profile model
+  profileId     String // references id field on Profile model
+  postId        String? // optional reference to platform post ID (e.g. x.com/:profileId/status/:postId)
+  sentiment     String // 1-byte sentiment, 0x00 = negative, 0x01 = positive, and potentially more
+  sats          BigInt // amount of sats burned
   // each RANK tx is associated with a Profile, else it is invalid
-  profile   Profile @relation(fields: [platform, profileId], references: [platform, id])
+  profile       Profile @relation(fields: [platform, profileId], references: [platform, id])
   // each RANK tx MAY be associated with a Post
-  post      Post?   @relation(fields: [platform, profileId, postId], references: [platform, profileId, id])
+  post          Post?   @relation(fields: [platform, profileId, postId], references: [platform, profileId, id])
   // each RANK tx from the mempool does not yet have a Block
-  block     Block?  @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
+  block         Block?  @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
 
-  @@index([profileId(type: hash), sentiment(type: hash)])
-  @@index([profileId(type: hash)])
-  @@index([scriptPayload(type: hash)])
+  // Poll RANK txs for raw SQL queries
+  @@index([platform(type: hash), profileId(type: hash), sentiment(type: hash)])
+  @@index([platform(type: hash), profileId(type: hash), postId(type: hash), sentiment(type: hash)])
+  // Poll RANK txs by height (primarily for block rewinds)
   @@index([height(sort: Desc)])
 }
 
