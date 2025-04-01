@@ -1,7 +1,7 @@
 # Keep environment variables out of version control
 .env
 # keep these out!
-**/node_modules/
+node_modules/
 prisma/
 .output
 # misc stuff
@@ -9,4 +9,4 @@ prisma/
 migrations/
 test*
 # generated .js files
-*.js
+**/*.js
