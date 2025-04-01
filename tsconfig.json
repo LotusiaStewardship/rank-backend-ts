@@ -6,7 +6,6 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "./.output",
-    "baseUrl": ".",
     "paths": {
       "rank-lib": [
         "./submodules/rank-lib"
