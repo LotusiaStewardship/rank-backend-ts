@@ -6,15 +6,15 @@ import type {
   RankTransaction,
   Profile,
   ProfileMap,
+  RankTarget,
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
 } from 'rank-lib'
 
-type RankStatistics = {
-  ranking: bigint
-  votesPositive: number
-  votesNegative: number
-}
+type RankStatistics = Pick<
+  RankTarget,
+  'ranking' | 'votesPositive' | 'votesNegative'
+>
 type Timespan = 'day' | 'week' | 'month' | 'quarter' | 'all'
 export type ScriptPayloadActivity = {
   scriptPayload: string
