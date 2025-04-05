@@ -49,10 +49,10 @@ const getTimestampUTC = (timespan: Timespan): number => {
 export default class Database {
   private db: PrismaClient
 
-  constructor() {
+  constructor(datasourceUrl: string) {
     this.db = new PrismaClient({
       errorFormat: 'minimal',
-      datasourceUrl: process.env.DATABASE_URL,
+      datasourceUrl,
     })
   }
 
