@@ -13,7 +13,7 @@ type Exception = [number | string, string]
  * SETUP
  */
 // Modules
-const db = new Database()
+const db = new Database(process.env.DATABASE_URL)
 const indexer = new Indexer(
   db,
   String(process.argv[2] || NNG_PUB_DEFAULT_SOCKET_PATH), // /path/to/pub.pipe
