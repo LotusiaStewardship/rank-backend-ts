@@ -74,11 +74,28 @@ export default class Database {
    * @param timespan
    * @param scriptPayload
    */
-  async ipcGetScriptPayloadActivity(timespan: Timespan, scriptPayload: string) {
+  async ipcGetScriptPayloadActivity({
+    scriptPayload,
+    startTime,
+    endTime,
+  }: {
+    scriptPayload: string
+    startTime?: Timespan
+    endTime?: Timespan
+  }) {
+    if (!startTime) {
+      startTime = 'day'
+    }
+    if (!endTime) {
+      endTime = 'today'
+    }
     return await this.db.$transaction(async tx => {
       const results = await tx.rankTransaction.findMany({
         where: {
-          timestamp: { gte: getTimestampUTC(timespan) },
+          timestamp: {
+            gte: getTimestampUTC(startTime),
+            lte: getTimestampUTC(endTime),
+          },
           scriptPayload,
         },
         orderBy: {
@@ -96,15 +113,28 @@ export default class Database {
    * @param timespan
    * @returns {Promise<ScriptPayloadActivity[]>} Array of `ScriptPayloadActivity`
    */
-  async ipcGetScriptPayloadActivitySummary(
-    timespan: Timespan,
-  ): Promise<ScriptPayloadActivity[]> {
+  async ipcGetScriptPayloadActivitySummary({
+    startTime,
+    endTime,
+  }: {
+    startTime?: Timespan
+    endTime?: Timespan
+  }): Promise<ScriptPayloadActivity[]> {
+    if (!startTime) {
+      startTime = 'day'
+    }
+    if (!endTime) {
+      endTime = 'today'
+    }
     return await this.db.$transaction(async tx => {
       try {
         const group = await tx.rankTransaction.groupBy({
           by: ['scriptPayload'],
           where: {
-            timestamp: { gte: getTimestampUTC(timespan) },
+            timestamp: {
+              gte: getTimestampUTC(startTime),
+              lte: getTimestampUTC(endTime),
+            },
           },
           _count: true,
           _sum: {
