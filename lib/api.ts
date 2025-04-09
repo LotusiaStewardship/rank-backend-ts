@@ -354,18 +354,18 @@ export default class API extends EventEmitter {
           'profiles' | 'posts',
           'top' | 'lowest',
         ]
-        const timespan = req.params.timespan as Timespan
-        const votes = Boolean(req.params.votes == 'includeVotes')
+        const startTime = req.params.timespan as Timespan
+        const includeVotes = Boolean(req.params.votes == 'includeVotes')
         const pageNum = Number(req.params.pageNum)
         const dbMethod: keyof typeof this.db = StatsRoutes[statsRoute]
-        const result = await this.db[dbMethod](
+        const result = await this.db[dbMethod]({
           platform,
-          timespan,
-          dataType,
+          startTime: startTime,
+          dataType: dataType == 'profiles' ? 'profileId' : 'postId',
           rankingType,
-          votes,
+          includeVotes,
           pageNum,
-        )
+        })
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.stats'],

@@ -300,17 +300,29 @@ export default class Database {
    * @param platform
    * @returns
    */
-  async getStatsPlatformRanked(
-    platform: ScriptChunkPlatformUTF8,
-    timespan: Timespan,
-    dataType: 'profiles' | 'posts',
-    rankingType: 'top' | 'lowest',
-    includeVotes: boolean,
-    pageNum: number,
-  ) {
+  async getStatsPlatformRanked({
+    platform,
+    dataType,
+    rankingType,
+    startTime,
+    endTime,
+    includeVotes,
+    pageNum,
+  }: {
+    platform: ScriptChunkPlatformUTF8
+    dataType: 'profileId' | 'postId'
+    rankingType: 'top' | 'lowest'
+    startTime?: Timespan
+    endTime?: Timespan
+    includeVotes?: boolean
+    pageNum?: number
+  }) {
     // set default argument values
-    if (!timespan) {
-      timespan = 'day'
+    if (!startTime) {
+      startTime = 'day'
+    }
+    if (!endTime) {
+      endTime = 'today'
     }
     if (!includeVotes) {
       includeVotes = false
@@ -319,19 +331,18 @@ export default class Database {
       pageNum = 0
     }
     // Set up database query parameters
-    const dataTypeKey = dataType == 'profiles' ? 'profileId' : 'postId'
-    const groupBy: [typeof dataTypeKey, 'sentiment'] = [
-      dataTypeKey,
-      'sentiment',
-    ]
+    const groupBy: [typeof dataType, 'sentiment'] = [dataType, 'sentiment']
     // Get the timestamp according to the specified Timespan
-    const timestamp = getTimestampUTC(timespan)
     try {
       const ranksByProfileIdSentiment = await this.db.rankTransaction.groupBy({
         by: groupBy,
         where: {
           platform,
-          timestamp: { gte: timestamp },
+          timestamp: {
+            gte: getTimestampUTC(startTime),
+            lte: getTimestampUTC(endTime),
+          },
+          AND: [{ profileId: { not: 'null' } }, { postId: { not: 'null' } }],
         },
         _count: {
           sentiment: true,
@@ -351,14 +362,14 @@ export default class Database {
       > = new Map()
       ranksByProfileIdSentiment.forEach(rank => {
         const { _count, _sum, sentiment } = rank
-        if (!dataChanges.has(rank[dataTypeKey])) {
-          dataChanges.set(rank[dataTypeKey], {
+        if (!dataChanges.has(rank[dataType])) {
+          dataChanges.set(rank[dataType], {
             ranking: 0n,
             votesPositive: 0,
             votesNegative: 0,
           })
         }
-        const data = dataChanges.get(rank[dataTypeKey])
+        const data = dataChanges.get(rank[dataType])
         switch (sentiment as ScriptChunkSentimentUTF8) {
           case 'positive': {
             data.ranking += BigInt(_sum.sats)
@@ -372,6 +383,8 @@ export default class Database {
           }
         }
       })
+      // sort the calculated rankings according to highest or lowest
+      // splice API_STATS_RESULT_COUNT from the front of the array
       let changesSortedFiltered: Array<[string, RankStatistics]>
       switch (rankingType) {
         case 'top': {
@@ -386,8 +399,19 @@ export default class Database {
             .splice(0, API_STATS_RESULT_COUNT)
         }
       }
-      // set up the database queries to get current data
-      const selection = {
+      return (
+        // Fetch current profile/post ranking data to calculate changes
+        // in the API/UI (i.e. +69 upvotes today, 6.9K Lotus increase)
+        (
+          await this.db.$transaction(
+            changesSortedFiltered.map(([id, changes]) =>
+              // @ts-expect-error we don't care if the call signatures match
+              // because we know that the same input data powers both queries
+              this.db[dataType == 'profileId' ? 'profile' : 'post'].findFirst({
+                where: {
+                  platform,
+                  id,
+                },
         include: {
           ranks: !includeVotes
             ? undefined
@@ -402,8 +426,13 @@ export default class Database {
                 take: 10,
               },
         },
-      }
-      const dataProcessor = (
+              }),
+            ),
+          )
+        )
+          // structure the return data appropriately
+          .map(
+            (
         item: {
           ranks: {
             txid: string
@@ -423,7 +452,7 @@ export default class Database {
         const rankingChangePercentage =
           ((rankingCurrent - rankingPrevious) / rankingPrevious) * 100
         const ids =
-          item.profileId && dataTypeKey == 'postId'
+                item.profileId && dataType == 'postId'
             ? { profileId: item.profileId, postId: item.id }
             : { profileId: item.id }
         return {
@@ -445,37 +474,9 @@ export default class Database {
           },
           votesTimespan: item.ranks?.map(rank => rank.txid) ?? [],
         }
-      }
-      switch (dataType) {
-        case 'profiles': {
-          const data = await this.db.$transaction(
-            changesSortedFiltered.map(([id, changes]) =>
-              this.db.profile.findFirst({
-                where: {
-                  platform,
-                  id,
-                },
-                ...selection,
-              }),
-            ),
+            },
           )
-          return data.map(dataProcessor)
-        }
-        case 'posts': {
-          const data = await this.db.$transaction(
-            changesSortedFiltered.map(([id, changes]) =>
-              this.db.post.findFirst({
-                where: {
-                  platform,
-                  id,
-                },
-                ...selection,
-              }),
-            ),
           )
-          return data.map(dataProcessor)
-        }
-      }
     } catch (e) {
       throw new Error(`db.getStatsPlatformRanked: ${e.message}`)
     }
