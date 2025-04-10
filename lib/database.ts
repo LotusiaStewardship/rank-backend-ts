@@ -412,20 +412,20 @@ export default class Database {
                   platform,
                   id,
                 },
-        include: {
-          ranks: !includeVotes
-            ? undefined
-            : {
-                select: {
-                  txid: true,
+                include: {
+                  ranks: !includeVotes
+                    ? undefined
+                    : {
+                        select: {
+                          txid: true,
+                        },
+                        orderBy: {
+                          timestamp: 'desc' as const,
+                        },
+                        skip: pageNum ? 10 * pageNum : undefined,
+                        take: 10,
+                      },
                 },
-                orderBy: {
-                  timestamp: 'desc' as const,
-                },
-                skip: pageNum ? 10 * pageNum : undefined,
-                take: 10,
-              },
-        },
               }),
             ),
           )
@@ -433,50 +433,50 @@ export default class Database {
           // structure the return data appropriately
           .map(
             (
-        item: {
-          ranks: {
-            txid: string
-          }[]
-        } & {
-          id: string
-          platform: string
-          profileId?: string
-          ranking: bigint
-          votesPositive: number
-          votesNegative: number
-        },
-      ) => {
-        const changes = dataChanges.get(item.id)
-        const rankingCurrent = Number(item.ranking)
-        const rankingPrevious = Number(item.ranking - changes.ranking)
-        const rankingChangePercentage =
-          ((rankingCurrent - rankingPrevious) / rankingPrevious) * 100
-        const ids =
+              item: {
+                ranks: {
+                  txid: string
+                }[]
+              } & {
+                id: string
+                platform: string
+                profileId?: string
+                ranking: bigint
+                votesPositive: number
+                votesNegative: number
+              },
+            ) => {
+              const changes = dataChanges.get(item.id)
+              const rankingCurrent = Number(item.ranking)
+              const rankingPrevious = Number(item.ranking - changes.ranking)
+              const rankingChangePercentage =
+                ((rankingCurrent - rankingPrevious) / rankingPrevious) * 100
+              const ids =
                 item.profileId && dataType == 'postId'
-            ? { profileId: item.profileId, postId: item.id }
-            : { profileId: item.id }
-        return {
-          platform,
-          ...ids,
-          total: {
-            ranking: String(item.ranking),
-            votesPositive: item.votesPositive,
-            votesNegative: item.votesNegative,
-          },
-          changed: {
-            ranking: String(changes.ranking),
-            rate: rankingChangePercentage.toLocaleString(undefined, {
-              minimumFractionDigits: 1,
-              maximumFractionDigits: 1,
-            }),
-            votesPositive: changes.votesPositive,
-            votesNegative: changes.votesNegative,
-          },
-          votesTimespan: item.ranks?.map(rank => rank.txid) ?? [],
-        }
+                  ? { profileId: item.profileId, postId: item.id }
+                  : { profileId: item.id }
+              return {
+                platform,
+                ...ids,
+                total: {
+                  ranking: String(item.ranking),
+                  votesPositive: item.votesPositive,
+                  votesNegative: item.votesNegative,
+                },
+                changed: {
+                  ranking: String(changes.ranking),
+                  rate: rankingChangePercentage.toLocaleString(undefined, {
+                    minimumFractionDigits: 1,
+                    maximumFractionDigits: 1,
+                  }),
+                  votesPositive: changes.votesPositive,
+                  votesNegative: changes.votesNegative,
+                },
+                votesTimespan: item.ranks?.map(rank => rank.txid) ?? [],
+              }
             },
           )
-          )
+      )
     } catch (e) {
       throw new Error(`db.getStatsPlatformRanked: ${e.message}`)
     }
