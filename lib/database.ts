@@ -15,7 +15,14 @@ type RankStatistics = Pick<
   RankTarget,
   'ranking' | 'votesPositive' | 'votesNegative'
 >
-type Timespan = 'today' | 'day' | 'week' | 'month' | 'quarter' | 'all'
+export type Timespan =
+  | 'now'
+  | 'today'
+  | 'day'
+  | 'week'
+  | 'month'
+  | 'quarter'
+  | 'all'
 export type ScriptPayloadActivity = {
   scriptPayload: string
   voteCount: number
@@ -33,6 +40,17 @@ const getTimestampUTC = (timespan: Timespan): number => {
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1_000,
   )
   switch (timespan) {
+    case 'now':
+      return Math.floor(
+        Date.UTC(
+          now.getUTCFullYear(),
+          now.getUTCMonth(),
+          now.getUTCDate(),
+          now.getUTCHours(),
+          now.getUTCMinutes(),
+          now.getUTCSeconds(),
+        ) / 1_000,
+      )
     case 'today':
       return today
     case 'day':
@@ -301,7 +319,6 @@ export default class Database {
    * @returns
    */
   async getStatsPlatformRanked({
-    platform,
     dataType,
     rankingType,
     startTime,
@@ -309,7 +326,6 @@ export default class Database {
     includeVotes,
     pageNum,
   }: {
-    platform: ScriptChunkPlatformUTF8
     dataType: 'profileId' | 'postId'
     rankingType: 'top' | 'lowest'
     startTime?: Timespan
@@ -337,7 +353,6 @@ export default class Database {
       const ranksByProfileIdSentiment = await this.db.rankTransaction.groupBy({
         by: groupBy,
         where: {
-          platform,
           timestamp: {
             gte: getTimestampUTC(startTime),
             lte: getTimestampUTC(endTime),
@@ -409,7 +424,6 @@ export default class Database {
               // because we know that the same input data powers both queries
               this.db[dataType == 'profileId' ? 'profile' : 'post'].findFirst({
                 where: {
-                  platform,
                   id,
                 },
                 include: {
@@ -452,11 +466,11 @@ export default class Database {
               const rankingChangePercentage =
                 ((rankingCurrent - rankingPrevious) / rankingPrevious) * 100
               const ids =
-                item.profileId && dataType == 'postId'
+                dataType == 'postId'
                   ? { profileId: item.profileId, postId: item.id }
                   : { profileId: item.id }
               return {
-                platform,
+                platform: item.platform,
                 ...ids,
                 total: {
                   ranking: String(item.ranking),
