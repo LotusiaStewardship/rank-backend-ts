@@ -359,7 +359,6 @@ export default class API extends EventEmitter {
         const pageNum = Number(req.params.pageNum)
         const dbMethod: keyof typeof this.db = StatsRoutes[statsRoute]
         const result = await this.db[dbMethod]({
-          platform,
           startTime: startTime,
           dataType: dataType == 'profiles' ? 'profileId' : 'postId',
           rankingType,
