@@ -15,7 +15,14 @@ type RankStatistics = Pick<
   RankTarget,
   'ranking' | 'votesPositive' | 'votesNegative'
 >
-type Timespan = 'today' | 'day' | 'week' | 'month' | 'quarter' | 'all'
+export type Timespan =
+  | 'now'
+  | 'today'
+  | 'day'
+  | 'week'
+  | 'month'
+  | 'quarter'
+  | 'all'
 export type ScriptPayloadActivity = {
   scriptPayload: string
   voteCount: number
@@ -33,6 +40,17 @@ const getTimestampUTC = (timespan: Timespan): number => {
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1_000,
   )
   switch (timespan) {
+    case 'now':
+      return Math.floor(
+        Date.UTC(
+          now.getUTCFullYear(),
+          now.getUTCMonth(),
+          now.getUTCDate(),
+          now.getUTCHours(),
+          now.getUTCMinutes(),
+          now.getUTCSeconds(),
+        ) / 1_000,
+      )
     case 'today':
       return today
     case 'day':
