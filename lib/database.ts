@@ -1,3 +1,4 @@
+/* eslint-disable no-unsafe-finally */
 import { PrismaClient } from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
 import { API_STATS_RESULT_COUNT, ERR } from '../util/constants'
@@ -202,9 +203,10 @@ export default class Database {
         data.votesNegative = profile.votesNegative
       } catch (e) {
         // nothing to do here
+      } finally {
+        // always return data, even if default profile data
+        return data
       }
-      // always return data, even if default profile data
-      return data
     })
   }
   /**
@@ -308,9 +310,10 @@ export default class Database {
           votesPositive: profile.votesPositive,
           votesNegative: profile.votesNegative,
         }
+      } finally {
+        // always return data, even if default profile data
+        return data
       }
-      // always return data, even if default profile data
-      return data
     })
   }
   /**
