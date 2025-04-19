@@ -1,14 +1,55 @@
 /* eslint-disable @typescript-eslint/no-duplicate-enum-values */
-import { Express, Router, Request, Response, NextFunction } from 'express'
-import express from 'express'
-import Database from './database'
-import { API_SERVER_PORT } from '../util/constants'
+import { Server } from 'node:http'
+import { EventEmitter } from 'node:events'
+import express, {
+  Express,
+  Router,
+  Request,
+  Response,
+  NextFunction,
+  json,
+} from 'express'
+import {
+  Connection,
+  Client as TemporalClient,
+  type SearchAttributes,
+  type SignalDefinition,
+} from '@temporalio/client'
+import { Worker as TemporalWorker, NativeConnection } from '@temporalio/worker'
+import { Address, Message, Networks } from 'bitcore-lib-xpi'
 import { PLATFORMS, log, type ScriptChunkPlatformUTF8 } from 'rank-lib'
-import { Server } from 'http'
-import { EventEmitter } from 'events'
+import Database from './database'
+import config from '../config'
+import { API_SERVER_PORT, ERR, HTTP } from '../util/constants'
 
+export type RankTopProfile = {
+  total: {
+    ranking: string
+    votesPositive: number
+    votesNegative: number
+  }
+  changed: {
+    ranking: string
+    rate: string
+    votesPositive: number
+    votesNegative: number
+  }
+  votesTimespan: string[]
+  profileId: string
+  platform: 'twitter'
+}
+export type RankTopPost = RankTopProfile & {
+  postId?: string
+}
+/** */
+export type ScriptPayloadActivity = {
+  scriptPayload: string
+  voteCount: number
+  /** Total number of sats burned during `Timespan` */
+  sats: string
+}
 type Timespan = 'day' | 'week' | 'month' | 'quarter' | 'all'
-type Endpoint = 'profile' | 'post' | 'stats'
+type Endpoint = 'profile' | 'post' | 'stats' | 'instance'
 type EndpointHandler = (req: Request, res: Response) => void
 type EndpointParameter =
   | 'platform'
@@ -17,11 +58,12 @@ type EndpointParameter =
   | 'scriptPayload'
   | 'statsRoute'
   | 'pageNum'
+  | 'instanceId'
 type EndpointParameterHandler = (
   req: Request,
   res: Response,
   next: NextFunction,
-  param: ScriptChunkPlatformUTF8 | string,
+  param: string | undefined,
 ) => void
 
 enum StatsRoutes {
@@ -37,6 +79,8 @@ export default class API extends EventEmitter {
   private app: Express
   private router: Router
   private server: Server
+  private temporalClient!: TemporalClient
+  private temporalWorker!: TemporalWorker
   /**
    *
    * @param db
@@ -56,7 +100,9 @@ export default class API extends EventEmitter {
     this.router.param('postId', this.param.postId)
     this.router.param('statsRoute', this.param.statsRoute)
     this.router.param('pageNum', this.param.pageNum)
-    // Router endpoint configuration (DEEPEST ROUTES FIRST!)
+    this.router.param('scriptPayload', this.param.scriptPayload)
+    this.router.param('instanceId', this.param.instanceId)
+    // Router GET endpoint configuration (DEEPEST ROUTES FIRST!)
     this.router.get(
       '/stats/:platform/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
       this.get.stats,
@@ -67,14 +113,17 @@ export default class API extends EventEmitter {
     )
     this.router.get('/:platform/:profileId/:postId', this.get.post)
     this.router.get('/:platform/:profileId', this.get.profile)
+    // Router POST endpoint configuration (DEEPEST ROUTES FIRST!)
+    this.router.post('/instance/register', this.post.instance)
     // App/Server setup
     this.app = express()
+    this.app.use(json())
     this.app.use('/api/v1', this.router)
     // App settings
     this.app.set('platformParams', PLATFORMS)
   }
   /**
-   * Initialze database connection and HTTP server
+   * Initialze database HTTP server and Temporal client/worker
    */
   async init() {
     this.server = this.app.listen(API_SERVER_PORT)
@@ -84,15 +133,94 @@ export default class API extends EventEmitter {
       ['httpServer', 'listening'],
       ['httpServerPort', `${API_SERVER_PORT}`],
     ])
+    // set up Temporal client and worker if complete configuration exists
+    if (
+      !Object.values(config.temporal).some(v => v === undefined || v === '')
+    ) {
+      try {
+        // Temporal client
+        this.temporalClient = new TemporalClient({
+          connection: await Connection.connect({
+            address: config.temporal.host,
+          }),
+          namespace: config.temporal.namespace,
+        })
+        // Temporal worker
+        const activities = {
+          ...this.temporalActivities,
+          ...this.temporalLocalActivities,
+        }
+        this.temporalWorker = await TemporalWorker.create({
+          connection: await NativeConnection.connect({
+            address: config.temporal.host,
+          }),
+          namespace: config.temporal.namespace,
+          taskQueue: config.temporal.taskQueue,
+          activities,
+          workflowsPath: require.resolve('./temporal/workflows'),
+          /*
+          workflowBundle: {
+            codePath: require.resolve('./temporal/workflows'),
+          },
+          */
+        })
+      } catch (e) {
+        throw [ERR.UNHANDLED_EXCEPTION, e.message]
+      }
+    }
   }
   /**
-   *
-   * @param exitCode
-   * @param exitError
+   * POST parameter validator functions
+   */
+  private validate = {
+    /**
+     *
+     * @param instanceId
+     * @returns
+     */
+    instanceId: (instanceId: string | undefined) => {
+      if (instanceId === undefined) {
+        return {
+          error: 'instanceId must be specified',
+          statusCode: HTTP.BAD_REQUEST,
+        }
+      }
+      if (!instanceId.match(/^[a-f0-9]{64}$/)) {
+        return {
+          error: 'instanceId is invalid format',
+          statusCode: HTTP.BAD_REQUEST,
+        }
+      }
+      return { instanceId }
+    },
+    /**
+     *
+     * @param scriptPayload
+     * @returns
+     */
+    scriptPayload: (scriptPayload: string | undefined) => {
+      if (scriptPayload === undefined) {
+        return {
+          error: 'scriptPayload must be specified',
+          statusCode: HTTP.BAD_REQUEST,
+        }
+      }
+      return Buffer.from(scriptPayload, 'hex').byteLength === 20
+        ? { scriptPayload }
+        : {
+            error: 'scriptPayload is invalid',
+            statusCode: HTTP.BAD_REQUEST,
+          }
+    },
+  }
+  /**
+   * Shutdown the API server and Temporal interfaces
    */
   async close() {
     this.server?.closeAllConnections()
     this.server?.close()
+    await this.temporalClient?.connection?.close()
+    this.temporalWorker?.shutdown()
   }
   /**
    * Parameter Handlers
@@ -117,7 +245,11 @@ export default class API extends EventEmitter {
       platform = platform.toLowerCase() as ScriptChunkPlatformUTF8
       const platformParams = PLATFORMS[platform]
       if (!platformParams) {
-        return this.sendJSON(res, { error: `invalid platform specified` }, 400)
+        return this.sendJSON(
+          res,
+          { error: `invalid platform specified` },
+          HTTP.BAD_REQUEST,
+        )
       }
       req.params.platform = platform
       next()
@@ -141,7 +273,11 @@ export default class API extends EventEmitter {
       const platformParams = this.app.get('platformParams') as typeof PLATFORMS
       const { profileId: profileIdParams } = platformParams[platform]
       if (profileId.length > profileIdParams.len) {
-        return this.sendJSON(res, { error: `profileId is invalid length` }, 400)
+        return this.sendJSON(
+          res,
+          { error: `profileId is invalid length` },
+          HTTP.BAD_REQUEST,
+        )
       }
       req.params.profileId = profileId
       next()
@@ -165,7 +301,11 @@ export default class API extends EventEmitter {
       const platformParams = this.app.get('platformParams') as typeof PLATFORMS
       const { postId: postIdParams } = platformParams[platform]
       if (!postId.match(postIdParams.regex)) {
-        return this.sendJSON(res, { error: `postId is invalid format` }, 400)
+        return this.sendJSON(
+          res,
+          { error: `postId is invalid format` },
+          HTTP.BAD_REQUEST,
+        )
       }
       switch (postIdParams.type) {
         case 'BigInt': {
@@ -174,7 +314,7 @@ export default class API extends EventEmitter {
             return this.sendJSON(
               res,
               { error: `postId is invalid length` },
-              400,
+              HTTP.BAD_REQUEST,
             )
           }
           break
@@ -199,9 +339,8 @@ export default class API extends EventEmitter {
       next: NextFunction,
       scriptPayload: string | undefined,
     ) => {
-      const p2pkhBuf = Buffer.from(scriptPayload ?? '', 'hex')
-      req.params.scriptPayload =
-        p2pkhBuf.byteLength === 20 ? scriptPayload : undefined
+      const result = this.validate.scriptPayload(scriptPayload)
+      req.params.scriptPayload = result?.scriptPayload
       next()
     },
     /**
@@ -224,7 +363,7 @@ export default class API extends EventEmitter {
         return this.sendJSON(
           res,
           { error: `invalid stats path specified` },
-          400,
+          HTTP.BAD_REQUEST,
         )
       }
       req.params.statsRoute = statsRoute
@@ -248,17 +387,37 @@ export default class API extends EventEmitter {
         return this.sendJSON(
           res,
           { error: `invalid votes page number specified` },
-          400,
+          HTTP.BAD_REQUEST,
         )
       }
       req.params.pageNum = pageNum
+      next()
+    },
+    /**
+     *
+     * @param req
+     * @param res
+     * @param next
+     * @param instanceId
+     */
+    instanceId: async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+      instanceId: string | undefined,
+    ) => {
+      const result = this.validate.instanceId(instanceId)
+      if (result.error) {
+        return this.sendJSON(res, { ...result }, result.statusCode)
+      }
+      req.params.instanceId = instanceId
       next()
     },
   }
   /**
    * GET Method Handlers
    */
-  private get: { [name in Endpoint]: EndpointHandler } = {
+  private get: { [name in Endpoint]?: EndpointHandler } = {
     /**
      *
      * @param req
@@ -281,7 +440,7 @@ export default class API extends EventEmitter {
           ['profileId', `${profileId}`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, 200)
+        return this.sendJSON(res, result, HTTP.OK)
       } catch (e) {
         // Assume not found but log error to console
         const t1 = (performance.now() - t0).toFixed(3)
@@ -295,7 +454,7 @@ export default class API extends EventEmitter {
         return this.sendJSON(
           res,
           { error: 'profile not found', params: req.params },
-          404,
+          HTTP.NOT_FOUND,
         )
       }
     },
@@ -322,7 +481,7 @@ export default class API extends EventEmitter {
           ...this.toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, 200)
+        return this.sendJSON(res, result, HTTP.OK)
       } catch (e) {
         // Assume not found but log error to console
         const t1 = (performance.now() - t0).toFixed(3)
@@ -336,7 +495,7 @@ export default class API extends EventEmitter {
         return this.sendJSON(
           res,
           { error: 'post not found', params: req.params },
-          404,
+          HTTP.NOT_FOUND,
         )
       }
     },
@@ -371,7 +530,7 @@ export default class API extends EventEmitter {
           ...this.toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, 200)
+        return this.sendJSON(res, result, HTTP.OK)
       } catch (e) {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
@@ -384,11 +543,253 @@ export default class API extends EventEmitter {
         return this.sendJSON(
           res,
           { error: 'stats not found', params: req.params },
-          404,
+          HTTP.NOT_FOUND,
         )
       }
     },
   }
+  /**
+   * POST Method Handlers
+   */
+  private post: { [name in Endpoint]?: EndpointHandler } = {
+    /**
+     *
+     * @param req
+     * @param res
+     */
+    instance: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        const body = req.body as {
+          instanceId: string
+          scriptPayload: string
+          signature: string
+          createdAt: string
+        }
+        // validate the request body (i.e. POST data)
+        let validated: {
+          scriptPayload?: string
+          instanceId?: string
+          error?: string
+          statusCode?: number
+        }
+        validated = this.validate.instanceId(body.instanceId)
+        if (!validated.instanceId) {
+          throw new Error(validated.error)
+        }
+        validated = this.validate.scriptPayload(body.scriptPayload)
+        if (!validated.scriptPayload) {
+          throw new Error('scriptPayload must be specified')
+        }
+        if (!Date.parse(body.createdAt)) {
+          throw new Error(`createdAt date format is invalid`)
+        }
+        // verify message signature
+        if (
+          !new Message(body.instanceId).verify(
+            Address.fromPublicKeyHash(
+              Buffer.from(body.scriptPayload, 'hex'),
+              Networks.livenet,
+            ),
+            body.signature,
+          )
+        ) {
+          throw new Error('message signature is invalid')
+        }
+        // register this instance in the database
+        const registrationResult = await this.db.registerExtension({
+          id: body.instanceId,
+          scriptPayload: body.scriptPayload,
+          createdAt: new Date(body.createdAt),
+        })
+        if (registrationResult.error) {
+          throw new Error(registrationResult.error)
+        }
+        // TODO: trigger Temporal workflow to fund the new instance
+        await this.temporalClient.workflow.signalWithStart(
+          config.temporal.command.workflowType,
+          {
+            signal: config.temporal.command.signal,
+            taskQueue: config.temporal.taskQueue,
+            workflowId: config.temporal.command.workflowId,
+            signalArgs: [{ data: body }],
+          },
+        )
+        // return registration result to clients
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'post.instance'],
+          ...this.toLogEntries(req.params),
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(res, req.body, HTTP.OK)
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'post.instance'],
+          ...this.toLogEntries(req.body),
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(
+          res,
+          { error: e.message, params: req.body },
+          HTTP.BAD_REQUEST,
+        )
+      }
+    },
+  }
+  /**
+   * Temporal Activity definitions (must be arrow functions)
+   */
+  temporalActivities = {
+    /**
+     *
+     * @param param0
+     * @returns
+     */
+    startWorkflow: async ({
+      taskQueue,
+      workflowType,
+      workflowId,
+      searchAttributes,
+      args,
+    }: {
+      taskQueue: string
+      workflowType: string
+      workflowId: string
+      searchAttributes?: SearchAttributes
+      args?: unknown[]
+    }) => {
+      return await this.temporalClient.workflow.start(workflowType, {
+        taskQueue,
+        workflowId,
+        searchAttributes,
+        args,
+      })
+    },
+    /**
+     *
+     * @param param0
+     * @returns
+     */
+    signalWithStart: async ({
+      taskQueue,
+      workflowType,
+      workflowId,
+      args,
+      signal,
+      signalArgs,
+    }: {
+      taskQueue: string
+      workflowType: string
+      workflowId: string
+      args?: unknown[]
+      signal: string | SignalDefinition
+      signalArgs?: unknown[]
+    }) => {
+      return await this.temporalClient.workflow.signalWithStart(workflowType, {
+        taskQueue,
+        workflowId,
+        args,
+        signal,
+        signalArgs,
+      })
+    },
+    /**
+     *
+     * @param startTime
+     * @param scriptPayload
+     * @returns
+     */
+    getRankActivityByScriptPayload: async (
+      startTime: Timespan | undefined,
+      scriptPayload: string,
+    ) => {
+      const address = Address.fromPublicKeyHash(
+        Buffer.from(scriptPayload, 'hex'),
+        Networks.mainnet,
+      )
+      const activity = await this.db.ipcGetScriptPayloadActivity({
+        startTime,
+        scriptPayload,
+      })
+      return {
+        address: address.toXAddress(),
+        activity: activity.map(item => ({
+          ...item,
+          timestamp: item.timestamp.toString(),
+          sats: item.sats.toString(),
+        })),
+      }
+    },
+    /**
+     *
+     * @param startTime
+     * @param endTime
+     * @returns
+     */
+    getWalletRankActivity: async (startTime: Timespan, endTime?: Timespan) => {
+      return (
+        await this.db.ipcGetScriptPayloadActivitySummary({
+          startTime,
+          endTime,
+        })
+      ).map(
+        ({ scriptPayload, voteCount, sats }) =>
+          ({
+            scriptPayload,
+            voteCount,
+            // convert sats BigInt to string for Temporal payload messaging
+            sats: sats.toString(),
+          }) as ScriptPayloadActivity,
+      )
+    },
+    /**
+     *
+     * @param platform
+     * @returns
+     */
+    getAllTimeTopRankedProfiles: async (
+      platform: ScriptChunkPlatformUTF8,
+    ): Promise<RankTopProfile[]> => {
+      return await this.db.getStatsPlatformRanked({
+        dataType: 'profileId',
+        rankingType: 'top',
+        startTime: 'all',
+      })
+    },
+    /**
+     *
+     * @param startTime
+     * @returns
+     */
+    getTopRankedProfiles: async (
+      startTime: Timespan,
+    ): Promise<RankTopProfile[]> => {
+      return await this.db.getStatsPlatformRanked({
+        dataType: 'profileId',
+        rankingType: 'top',
+        startTime,
+      })
+    },
+    /**
+     *
+     * @param startTime
+     * @returns
+     */
+    getTopRankedPosts: async (startTime: Timespan): Promise<RankTopPost[]> => {
+      return await this.db.getStatsPlatformRanked({
+        dataType: 'postId',
+        rankingType: 'top',
+        startTime,
+      })
+    },
+    //getRankedProfile: this.db.apiGetPlatformProfile,
+    //getRankedPost: this.db.apiGetPlatformProfilePost,
+  }
+  temporalLocalActivities = {}
   /**
    *
    * @param res
@@ -398,7 +799,7 @@ export default class API extends EventEmitter {
   private sendJSON(res: Response, data: object, statusCode?: number) {
     res
       .contentType('application/json')
-      .status(statusCode ?? 200)
+      .status(statusCode ?? HTTP.OK)
       .json(data)
   }
   /**

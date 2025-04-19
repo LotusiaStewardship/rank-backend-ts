@@ -65,8 +65,9 @@ model Post {
 
 model RankTransaction {
   // RankTransaction data
-  txid          String  @id // 32-byte hex
+  txid          String             @id // 32-byte hex
   scriptPayload String // the p2pkh script payload that spent a UTXO for this transaction
+  instanceId    String? // the ID of the extension instance that casted the vote
   height        Int? // null for mempool transactions
   timestamp     BigInt // Block timestamp or indexer first-seen time
   // RankOutput data
@@ -76,11 +77,12 @@ model RankTransaction {
   sentiment     String // 1-byte sentiment, 0x00 = negative, 0x01 = positive, and potentially more
   sats          BigInt // amount of sats burned
   // each RANK tx is associated with a Profile, else it is invalid
-  profile       Profile @relation(fields: [platform, profileId], references: [platform, id])
+  profile       Profile            @relation(fields: [platform, profileId], references: [platform, id])
   // each RANK tx MAY be associated with a Post
-  post          Post?   @relation(fields: [platform, profileId, postId], references: [platform, profileId, id])
+  post          Post?              @relation(fields: [platform, profileId, postId], references: [platform, profileId, id])
   // each RANK tx from the mempool does not yet have a Block
-  block         Block?  @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
+  block         Block?             @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
+  instance      ExtensionInstance? @relation(fields: [instanceId, scriptPayload], references: [id, scriptPayload])
 
   // Poll RANK txs for raw SQL queries
   @@index([platform(type: hash), profileId(type: hash), sentiment(type: hash)])
@@ -100,4 +102,15 @@ model Block {
   @@index([hash(type: hash)])
   @@index([height(sort: Desc)])
   @@index([height, ranksLength(sort: Desc)])
+}
+
+model ExtensionInstance {
+  id            String
+  scriptPayload String
+  createdAt     DateTime
+  votesPositive Int               @default(0)
+  votesNegative Int               @default(0)
+  ranks         RankTransaction[]
+
+  @@id([id, scriptPayload])
 }

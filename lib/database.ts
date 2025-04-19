@@ -175,6 +175,23 @@ export default class Database {
   }
   /**
    *
+   * @param data
+   * @returns
+   */
+  async registerExtension(data: {
+    id: string
+    scriptPayload: string
+    createdAt: Date
+  }) {
+    try {
+      await this.db.extensionInstance.create({ data })
+      return { error: null }
+    } catch (e) {
+      return { error: JSON.stringify(e.message) }
+    }
+  }
+  /**
+   *
    * @param platform
    * @param profileId
    * @returns

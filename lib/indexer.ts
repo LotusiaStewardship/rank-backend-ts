@@ -1,4 +1,4 @@
-import { Chunk, Transaction } from '@abcpros/bitcore-lib-xpi'
+import { Chunk, Transaction } from 'bitcore-lib-xpi'
 import { Builder, ByteBuffer } from 'flatbuffers'
 import { isIP } from 'validator'
 import * as NNG from './nng-interface'

@@ -5,3 +5,6 @@
 	path = submodules/rank-lib
 	url = https://github.com/LotusiaStewardship/rank-lib.git
 	branch = master
+[submodule "submodules/bitcore-lib-xpi"]
+	path = submodules/bitcore-lib-xpi
+	url = https://github.com/LotusiaStewardship/bitcore-lib-xpi.git
