@@ -18,7 +18,7 @@ import {
 import { Worker as TemporalWorker, NativeConnection } from '@temporalio/worker'
 import { Address, Message, Networks } from 'bitcore-lib-xpi'
 import { PLATFORMS, log, type ScriptChunkPlatformUTF8 } from 'rank-lib'
-import Database from './database'
+import Database, { type Timespan } from './database'
 import config from '../config'
 import { API_SERVER_PORT, ERR, HTTP } from '../util/constants'
 
@@ -48,7 +48,6 @@ export type ScriptPayloadActivity = {
   /** Total number of sats burned during `Timespan` */
   sats: string
 }
-type Timespan = 'day' | 'week' | 'month' | 'quarter' | 'all'
 type Endpoint = 'profile' | 'post' | 'stats' | 'instance'
 type EndpointHandler = (req: Request, res: Response) => void
 type EndpointParameter =
@@ -157,13 +156,11 @@ export default class API extends EventEmitter {
           namespace: config.temporal.namespace,
           taskQueue: config.temporal.taskQueue,
           activities,
-          workflowsPath: require.resolve('./temporal/workflows'),
-          /*
           workflowBundle: {
             codePath: require.resolve('./temporal/workflows'),
           },
-          */
         })
+        this.temporalWorker.run()
       } catch (e) {
         throw [ERR.UNHANDLED_EXCEPTION, e.message]
       }

@@ -105,8 +105,8 @@ model Block {
 }
 
 model ExtensionInstance {
-  id            String
-  scriptPayload String
+  id            String            @unique
+  scriptPayload String            @unique
   createdAt     DateTime
   votesPositive Int               @default(0)
   votesNegative Int               @default(0)
