@@ -16,6 +16,22 @@ export const NNG_SOCKET_RECONN = 300 // time (ms) between reconnect attempts
 export const NNG_SOCKET_MAXRECONN = 3_000 // max time (ms) before giving up reconnect
 export const NNG_REQUEST_TIMEOUT_LENGTH = 2_000 // max time (ms) before aborting a Socket.send()
 /**
+ * HTTP status codes
+ */
+export enum HTTP {
+  /** Success */
+  OK = 200,
+  ACCEPTED = 202,
+  /** Redirection */
+  MOVED_PERMANENTLY = 301,
+  /** Client errors */
+  BAD_REQUEST = 400,
+  UNAUTHORIZED = 401,
+  PAYMENT_REQUIRED = 402,
+  FORBIDDEN = 403,
+  NOT_FOUND = 404,
+}
+/**
  * Error codes
  */
 export enum ERR {
