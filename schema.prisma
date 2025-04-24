@@ -108,9 +108,12 @@ model ExtensionInstance {
   id            String            @unique
   scriptPayload String            @unique
   createdAt     DateTime
+  lastSeen      DateTime
+  optin         Boolean           @default(false)
   votesPositive Int               @default(0)
   votesNegative Int               @default(0)
   ranks         RankTransaction[]
 
   @@id([id, scriptPayload])
+  @@index([id(type: hash), scriptPayload(type: hash), optin(type: hash)])
 }

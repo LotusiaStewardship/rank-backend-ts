@@ -21,6 +21,7 @@ import { PLATFORMS, log, type ScriptChunkPlatformUTF8 } from 'rank-lib'
 import Database, { type Timespan } from './database'
 import config from '../config'
 import { API_SERVER_PORT, ERR, HTTP } from '../util/constants'
+import { isValidInstanceId } from '../util/functions'
 
 export type RankTopProfile = {
   total: {
@@ -559,9 +560,12 @@ export default class API extends EventEmitter {
       try {
         const body = req.body as {
           instanceId: string
+          createdAt: string
+          runtimeId: string
+          startTime: string
+          nonce: number
           scriptPayload: string
           signature: string
-          createdAt: string
         }
         // validate the request body (i.e. POST data)
         let validated: {
@@ -581,6 +585,10 @@ export default class API extends EventEmitter {
         if (!Date.parse(body.createdAt)) {
           throw new Error(`createdAt date format is invalid`)
         }
+        // validate instanceId matches input and meets/exceeds difficulty
+        if (!(await isValidInstanceId(body))) {
+          throw new Error(`instanceId does not match input data`)
+        }
         // verify message signature
         if (
           !new Message(body.instanceId).verify(
@@ -598,6 +606,7 @@ export default class API extends EventEmitter {
           id: body.instanceId,
           scriptPayload: body.scriptPayload,
           createdAt: new Date(body.createdAt),
+          lastSeen: new Date(),
         })
         if (registrationResult.error) {
           throw new Error(registrationResult.error)

@@ -1,5 +1,8 @@
 import os from 'node:os'
-
+/**
+ * Extension configuration
+ */
+export const EXT_INSTANCE_ID_DIFFICULTY = 4
 /**
  * API configuration
  */

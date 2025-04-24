@@ -182,6 +182,7 @@ export default class Database {
     id: string
     scriptPayload: string
     createdAt: Date
+    lastSeen: Date
   }) {
     try {
       await this.db.extensionInstance.create({ data })
