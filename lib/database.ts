@@ -359,7 +359,15 @@ export default class Database {
       startTime = 'day'
     }
     if (!endTime) {
-      endTime = 'today'
+      switch (startTime) {
+        case 'today':
+          endTime = 'now'
+          break
+
+        default:
+          endTime = 'today'
+          break
+      }
     }
     if (!includeVotes) {
       includeVotes = false
