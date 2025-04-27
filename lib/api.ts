@@ -114,7 +114,8 @@ export default class API extends EventEmitter {
     this.router.get('/:platform/:profileId/:postId', this.get.post)
     this.router.get('/:platform/:profileId', this.get.profile)
     // Router POST endpoint configuration (DEEPEST ROUTES FIRST!)
-    this.router.post('/instance/register', this.post.instance)
+    // TODO: implement referral codes rather than mining instanceId
+    //this.router.post('/instance/register', this.post.instance)
     // App/Server setup
     this.app = express()
     this.app.use(json())
