@@ -23,6 +23,22 @@ import config from '../config'
 import { API_SERVER_PORT, ERR, HTTP } from '../util/constants'
 import { isValidInstanceId } from '../util/functions'
 
+/**
+ * Represents a profile's ranking information including total and change metrics
+ * @typedef {Object} RankTopProfile
+ * @property {Object} total - Overall ranking statistics
+ * @property {string} total.ranking - The total ranking score
+ * @property {number} total.votesPositive - Total number of positive votes received
+ * @property {number} total.votesNegative - Total number of negative votes received
+ * @property {Object} changed - Metrics showing ranking changes
+ * @property {string} changed.ranking - The change in ranking score
+ * @property {string} changed.rate - The rate of change
+ * @property {number} changed.votesPositive - Number of new positive votes
+ * @property {number} changed.votesNegative - Number of new negative votes
+ * @property {string[]} votesTimespan - Array of timestamps for vote history
+ * @property {string} profileId - Unique identifier for the profile
+ * @property {'twitter'} platform - The social media platform (currently only Twitter)
+ */
 export type RankTopProfile = {
   total: {
     ranking: string
@@ -39,6 +55,12 @@ export type RankTopProfile = {
   profileId: string
   platform: 'twitter'
 }
+/**
+ * Represents a post's ranking information, extending RankTopProfile with an optional postId
+ * @typedef {Object} RankTopPost
+ * @extends {RankTopProfile}
+ * @property {string} [postId] - Optional unique identifier for the post
+ */
 export type RankTopPost = RankTopProfile & {
   postId?: string
 }
@@ -74,6 +96,10 @@ enum StatsRoutes {
 }
 type StatsRoute = keyof typeof StatsRoutes
 
+/**
+ * API class for handling HTTP requests and responses
+ * @extends {EventEmitter}
+ */
 export default class API extends EventEmitter {
   private db: Database
   private app: Express
@@ -104,7 +130,7 @@ export default class API extends EventEmitter {
     this.router.param('instanceId', this.param.instanceId)
     // Router GET endpoint configuration (DEEPEST ROUTES FIRST!)
     this.router.get(
-      '/stats/:platform/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
+      '/stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
       this.get.stats,
     )
     this.router.get(
@@ -151,18 +177,26 @@ export default class API extends EventEmitter {
           ...this.temporalActivities,
           ...this.temporalLocalActivities,
         }
-        this.temporalWorker = await TemporalWorker.create({
-          connection: await NativeConnection.connect({
-            address: config.temporal.host,
-          }),
-          namespace: config.temporal.namespace,
-          taskQueue: config.temporal.taskQueue,
-          activities,
-          workflowBundle: {
-            codePath: require.resolve('./temporal/workflows'),
-          },
-        })
-        this.temporalWorker.run()
+        try {
+          this.temporalWorker = await TemporalWorker.create({
+            connection: await NativeConnection.connect({
+              address: config.temporal.host,
+            }),
+            namespace: config.temporal.namespace,
+            taskQueue: config.temporal.taskQueue,
+            activities,
+            workflowBundle: {
+              codePath: require.resolve('./temporal/workflows'),
+            },
+          })
+          this.temporalWorker.run()
+        } catch (e) {
+          log([
+            ['init', 'temporal'],
+            ['status', 'warn'],
+            ['message', `"${String(e)}"`],
+          ])
+        }
       } catch (e) {
         throw [ERR.UNHANDLED_EXCEPTION, e.message]
       }

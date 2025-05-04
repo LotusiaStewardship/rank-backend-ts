@@ -7,6 +7,8 @@ import type {
   RankTransaction,
   Profile,
   ProfileMap,
+  Post,
+  PostMap,
   RankTarget,
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
@@ -70,6 +72,10 @@ const getTimestampUTC = (timespan: Timespan): number => {
 export default class Database {
   private db: PrismaClient
 
+  /**
+   * Creates a new Database instance with the specified datasource URL
+   * @param datasourceUrl The URL for the Prisma database connection
+   */
   constructor(datasourceUrl: string) {
     this.db = new PrismaClient({
       errorFormat: 'minimal',
@@ -77,6 +83,10 @@ export default class Database {
     })
   }
 
+  /**
+   * Establishes a connection to the database
+   * @throws {Array} Throws an array containing error code and message if connection fails
+   */
   async connect() {
     try {
       await this.db.$connect()
@@ -85,13 +95,18 @@ export default class Database {
     }
   }
 
+  /**
+   * Closes the connection to the database
+   */
   async disconnect() {
     await this.db.$disconnect()
   }
   /**
-   * Get the detailed activity of the specified `scriptPayload` over `Timespan` time
-   * @param timespan
-   * @param scriptPayload
+   * Retrieves detailed activity data for a specific script payload within a given time range
+   * @param scriptPayload - The script payload to query activity for
+   * @param startTime - Optional start time for the query period
+   * @param endTime - Optional end time for the query period
+   * @returns Promise resolving to an array of rank transactions with timestamps
    */
   async ipcGetScriptPayloadActivity({
     scriptPayload,
@@ -128,9 +143,10 @@ export default class Database {
     })
   }
   /**
-   * Get the summarized activity of all `scriptPayload`s over `Timespan` time
-   * @param timespan
-   * @returns {Promise<ScriptPayloadActivity[]>} Array of `ScriptPayloadActivity`
+   * Retrieves a summary of activity for all script payloads within a given time range
+   * @param startTime - Optional start time for the query period
+   * @param endTime - Optional end time for the query period
+   * @returns Promise resolving to an array of ScriptPayloadActivity objects
    */
   async ipcGetScriptPayloadActivitySummary({
     startTime,
@@ -174,9 +190,9 @@ export default class Database {
     })
   }
   /**
-   *
-   * @param data
-   * @returns
+   * Registers a new extension instance in the database
+   * @param data Object containing extension data including id, scriptPayload, createdAt, and lastSeen
+   * @returns Object with error field (null if successful, error message if failed)
    */
   async registerExtension(data: {
     id: string
@@ -192,10 +208,10 @@ export default class Database {
     }
   }
   /**
-   *
-   * @param platform
-   * @param profileId
-   * @returns
+   * Retrieves profile information for a specific platform and profile ID
+   * @param platform The platform identifier (ScriptChunkPlatformUTF8)
+   * @param profileId The unique identifier of the profile
+   * @returns Profile data including ranking and vote statistics
    */
   async apiGetPlatformProfile(
     platform: ScriptChunkPlatformUTF8,
@@ -228,12 +244,12 @@ export default class Database {
     })
   }
   /**
-   *
-   * @param platform
-   * @param profileId
-   * @param postId
-   * @param scriptPayload
-   * @returns
+   * Retrieves post information for a specific platform, profile, and post ID
+   * @param platform The platform identifier (ScriptChunkPlatformUTF8)
+   * @param profileId The unique identifier of the profile
+   * @param postId The unique identifier of the post
+   * @param scriptPayload Optional script payload to filter ranks
+   * @returns Post data including profile info, ranking, and vote statistics
    */
   async apiGetPlatformProfilePost(
     platform: ScriptChunkPlatformUTF8,
@@ -335,9 +351,14 @@ export default class Database {
     })
   }
   /**
-   *
-   * @param platform
-   * @returns
+   * Retrieves ranked statistics for a specific platform
+   * @param dataType - The type of data to rank ('profileId' or 'postId')
+   * @param rankingType - The ranking order ('top' or 'lowest')
+   * @param startTime - Optional start time for the query period
+   * @param endTime - Optional end time for the query period
+   * @param includeVotes - Optional flag to include vote details
+   * @param pageNum - Optional page number for pagination
+   * @returns Promise resolving to an array of ranked statistics
    */
   async getStatsPlatformRanked({
     dataType,
@@ -525,32 +546,36 @@ export default class Database {
     }
   }
   /**
-   *
-   * @param profiles
-   * @returns
+   * Reverts profile data to a previous state by removing ranks and decrementing statistics
+   * @param profiles Map of profiles to rewind
+   * @throws {Error} If the rewind operation fails
    */
   async rewindProfiles(profiles: ProfileMap) {
     try {
-      await this.db.$transaction(this.toProfileRewindStatements(profiles))
+      const statements = await this.toProfileRewindStatements(profiles)
+      await this.db.$transaction(statements)
     } catch (e) {
       throw new Error(`rewindProfiles: ${e.message}`)
     }
   }
   /**
-   *
-   * @param profiles
+   * Creates or updates profiles with their associated ranks and statistics
+   * @param profiles Map of profiles to upsert
+   * @throws {Error} If the upsert operation fails
    */
   async upsertProfiles(profiles: ProfileMap) {
     try {
-      await this.db.$transaction(this.toProfileUpsertStatements(profiles))
+      const statements = await this.toProfileUpsertStatements(profiles)
+      await this.db.$transaction(statements)
     } catch (e) {
       throw new Error(`upsertProfiles: ${e.message}`)
     }
   }
   /**
-   *
-   * @param height
-   * @returns
+   * Retrieves all rank transactions for a specific block height
+   * @param height The block height to query
+   * @returns Array of RankTransaction objects
+   * @throws {Error} If the query fails
    */
   async getRankTransactionsByHeight(
     height: number,
@@ -564,9 +589,10 @@ export default class Database {
     }
   }
   /**
-   *
-   * @param height
-   * @returns
+   * Retrieves a block by its height
+   * @param height The block height to query
+   * @returns The block data or null if not found
+   * @throws {Error} If the query fails
    */
   async getBlockByHeight(height: number) {
     try {
@@ -578,8 +604,9 @@ export default class Database {
     }
   }
   /**
-   *
-   * @param height
+   * Deletes a block with the specified height from the database
+   * @param height The block height to delete
+   * @throws {Error} If the deletion fails
    */
   async deleteBlockByHeight(height: number) {
     try {
@@ -591,10 +618,11 @@ export default class Database {
     }
   }
   /**
-   *
-   * @param block
-   * @param txids
-   * @param profiles
+   * Saves a new block with its associated rank transactions and profiles
+   * @param block The block data to save
+   * @param rankTxids Array of rank transaction IDs to connect to the block
+   * @param profiles Map of profiles to upsert with the block
+   * @throws {Error} If the save operation fails
    */
   async saveBlock(
     block: Block,
@@ -614,7 +642,7 @@ export default class Database {
         }),
         // Upsert any profiles if necessary
         // RANK txs upserted here will be connected to above block
-        ...this.toProfileUpsertStatements(profiles),
+        ...(await this.toProfileUpsertStatements(profiles)),
       ])
     } catch (e) {
       throw new Error(
@@ -623,9 +651,10 @@ export default class Database {
     }
   }
   /**
-   *
-   * @param blocks
-   * @param profiles
+   * Saves multiple blocks and their associated profiles in a single transaction
+   * @param blocks Array of blocks to save
+   * @param profiles Map of profiles to upsert with the blocks
+   * @throws {Error} If the save operation fails
    */
   async saveBlockRange(blocks: Block[], profiles: ProfileMap) {
     try {
@@ -634,7 +663,7 @@ export default class Database {
         this.db.block.createMany({ data: blocks }),
         // Upsert all profiles
         // These RANK txs are automatically connected to their block by height
-        ...this.toProfileUpsertStatements(profiles),
+        ...(await this.toProfileUpsertStatements(profiles)),
       ])
     } catch (e) {
       throw new Error(
@@ -656,15 +685,15 @@ export default class Database {
     }
   }
   /**
-   *
-   * @param profiles
-   * @returns
+   * Generates database statements for upserting profiles and their associated posts
+   * @param profiles - Map of profiles to generate upsert statements for
+   * @returns Array of database upsert statements
    */
-  toProfileUpsertStatements(profiles: ProfileMap) {
+  async toProfileUpsertStatements(profiles: ProfileMap) {
     const upserts: ReturnType<
       typeof this.db.post.upsert | typeof this.db.profile.upsert
     >[] = []
-    for (const [id, profile] of profiles) {
+    for await (const [id, profile] of this.iterateProfiles(profiles)) {
       const { platform, ranks, ranking, votesPositive, votesNegative } = profile
       // push profile upsert first
       upserts.push(
@@ -703,7 +732,7 @@ export default class Database {
       )
       // push any post upsert(s) after Profile exists
       if (profile.posts) {
-        for (const [id, post] of profile.posts) {
+        for await (const [id, post] of this.iteratePosts(profile.posts)) {
           const {
             platform,
             profileId,
@@ -760,15 +789,15 @@ export default class Database {
     return upserts
   }
   /**
-   *
-   * @param profiles
-   * @returns
+   * Generates database statements for rewinding profiles and their associated posts
+   * @param profiles - Map of profiles to generate rewind statements for
+   * @returns Array of database update statements for rewinding
    */
-  toProfileRewindStatements(profiles: ProfileMap) {
+  async toProfileRewindStatements(profiles: ProfileMap) {
     const rewinds: ReturnType<
       typeof this.db.post.update | typeof this.db.profile.update
     >[] = []
-    for (const [id, profile] of profiles) {
+    for await (const [id, profile] of this.iterateProfiles(profiles)) {
       const { platform, ranks, ranking, votesPositive, votesNegative } = profile
       // push profile rewind first
       rewinds.push(
@@ -844,5 +873,40 @@ export default class Database {
       }
     }
     return rewinds
+  }
+  /**
+   * Converts a ProfileMap into an AsyncIterable for asynchronous iteration
+   * @param profiles - The ProfileMap to iterate over
+   * @returns An AsyncIterable that yields [string, Profile] tuples
+   * @example
+   * ```typescript
+   * for await (const [id, profile] of db.iterateProfiles(profiles)) {
+   *   // Process each profile asynchronously
+   * }
+   * ```
+   */
+  async *iterateProfiles(
+    profiles: ProfileMap,
+  ): AsyncIterable<[string, Profile]> {
+    for (const [id, profile] of profiles) {
+      yield [id, profile]
+    }
+  }
+
+  /**
+   * Converts a PostMap into an AsyncIterable for asynchronous iteration
+   * @param posts - The PostMap to iterate over
+   * @returns An AsyncIterable that yields [string, Post] tuples
+   * @example
+   * ```typescript
+   * for await (const [id, post] of db.iteratePosts(posts)) {
+   *   // Process each post asynchronously
+   * }
+   * ```
+   */
+  async *iteratePosts(posts: PostMap): AsyncIterable<[string, Post]> {
+    for (const [id, post] of posts) {
+      yield [id, post]
+    }
   }
 }
