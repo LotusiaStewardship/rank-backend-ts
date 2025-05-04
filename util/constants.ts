@@ -13,11 +13,12 @@ export const API_STATS_RESULT_COUNT = 5
  */
 export const NNG_PUB_DEFAULT_SOCKET_PATH = `${os.homedir()}/.lotus/pub.pipe`
 export const NNG_RPC_DEFAULT_SOCKET_PATH = `${os.homedir()}/.lotus/rpc.pipe`
-export const NNG_RPC_RCVMAXSIZE_CONSENSUS = 2_097_152 // 2 MiB (2^20 * 2)
+export const NNG_RPC_RCVMAXSIZE_POLICY = 33_554_432 // 32 MiB (2^20 * 32)
 export const NNG_RPC_BLOCKRANGE_SIZE = 20
 export const NNG_SOCKET_RECONN = 300 // time (ms) between reconnect attempts
 export const NNG_SOCKET_MAXRECONN = 3_000 // max time (ms) before giving up reconnect
 export const NNG_REQUEST_TIMEOUT_LENGTH = 2_000 // max time (ms) before aborting a Socket.send()
+export const NNG_MESSAGE_BATCH_SIZE = 10 // number of messages to process in each batch
 /**
  * HTTP status codes
  */

@@ -20,9 +20,10 @@ import {
   NNG_RPC_DEFAULT_SOCKET_PATH,
   NNG_REQUEST_TIMEOUT_LENGTH,
   NNG_RPC_BLOCKRANGE_SIZE,
-  NNG_RPC_RCVMAXSIZE_CONSENSUS,
+  NNG_RPC_RCVMAXSIZE_POLICY,
   NNG_SOCKET_MAXRECONN,
   NNG_SOCKET_RECONN,
+  NNG_MESSAGE_BATCH_SIZE,
 } from '../util/constants'
 import {
   PLATFORMS,
@@ -65,13 +66,21 @@ type MempoolCache = Map<string, RankTransaction>
  * accordingly.
  */
 export default class Indexer extends EventEmitter {
+  /** Database instance for storing indexed data */
   private db: Database
+  /** NNG pub/sub socket for receiving messages from lotusd */
   private pub: Socket
+  /** NNG request/reply socket for RPC calls to lotusd */
   private rpc: Socket
+  /** URI for the pub/sub socket connection */
   private pubUri: string
+  /** URI for the RPC socket connection */
   private rpcUri: string
+  /** Cache of unconfirmed RANK transactions */
   private mempool: MempoolCache
+  /** Queue for processing NNG messages */
   private queue: NNGQueue
+  /** Required and optional script chunk definitions */
   private chunks: {
     required: {
       [chunk in Exclude<ScriptChunkField, 'post' | 'comment'>]: ScriptChunk
@@ -80,11 +89,13 @@ export default class Indexer extends EventEmitter {
       [chunk in Extract<ScriptChunkField, 'post' | 'comment'>]: ScriptChunk
     }
   }
+  /** Last processed block checkpoint */
   private checkpoint: Block
   /**
-   *
-   * @param pubUri
-   * @param rpcUri
+   * Creates a new Indexer instance that connects to lotusd via NNG sockets
+   * @param db Database instance for storing indexed data
+   * @param pubUri Optional path to the NNG pub/sub socket (defaults to ~/.lotus/pub.pipe)
+   * @param rpcUri Optional path to the NNG RPC socket (defaults to ~/.lotus/rpc.pipe)
    */
   constructor(db: Database, pubUri?: string, rpcUri?: string) {
     super()
@@ -96,12 +107,12 @@ export default class Indexer extends EventEmitter {
     // Pub/Sub socket setup
     this.pub = socket('sub', { chan: [] })
     this.pub.on('data', this.nngReceiveMessage)
-    this.pub.rcvmaxsize(NNG_RPC_RCVMAXSIZE_CONSENSUS)
+    this.pub.rcvmaxsize(NNG_RPC_RCVMAXSIZE_POLICY)
     this.pub.reconn(NNG_SOCKET_RECONN)
     this.pub.maxreconn(NNG_SOCKET_MAXRECONN)
     // RPC socket setup
     this.rpc = socket('req')
-    this.rpc.rcvmaxsize(NNG_RPC_RCVMAXSIZE_CONSENSUS * NNG_RPC_BLOCKRANGE_SIZE)
+    this.rpc.rcvmaxsize(NNG_RPC_RCVMAXSIZE_POLICY * NNG_RPC_BLOCKRANGE_SIZE)
     this.rpc.reconn(NNG_SOCKET_RECONN)
     this.rpc.maxreconn(NNG_SOCKET_MAXRECONN)
     // Runtime state setup
@@ -121,19 +132,34 @@ export default class Indexer extends EventEmitter {
     }
   }
   /**
-   *
-   * @param data
-   * @returns
+   * Converts a Block or RankTransaction object into an array of LogEntry tuples
+   * @param data - The Block or RankTransaction object to convert
+   * @returns Array of [key, value] tuples representing the object's properties as strings
    */
   private toLogEntries(data: Block | RankTransaction): LogEntry[] {
     return Object.entries(data).map(([k, v]) => [k, String(v)])
   }
   /**
-   * Perform all required operations to initialize the indexer and sync with lotusd
+   * Perform all required operations to initialize the indexer and sync with lotusd.
+   * This includes:
+   * - Establishing NNG socket connections to lotusd for RPC and pub/sub
+   * - Cleaning up any unconfirmed transactions from the database
+   * - Rewinding profile states for any unconfirmed transactions
+   * - Reconciling the current block checkpoint with lotusd
+   * - Initializing mempool tracking
+   *
+   * Throws errors if:
+   * - NNG connections fail to establish
+   * - Profile rewind operations fail
+   * - Checkpoint reconciliation fails
    */
   async init() {
     /**
-     *    Initialize Modules
+     * Initialize Modules
+     * - NNG RPC socket for communicating with lotusd
+     * - NNG Pub/Sub socket for receiving block/tx notifications
+     * - Database cleanup of unconfirmed transactions
+     * - Block checkpoint reconciliation with lotusd
      */
     // TODO: Need to actually detect NNG connectivity...
     try {
@@ -178,10 +204,12 @@ export default class Indexer extends EventEmitter {
      *    Reconcile Checkpoint
      */
     try {
-      // Get current checkpoint height/hash for init, otherwise start at genesis
-      const checkpoint =
-        (await this.db.getCheckpoint()) ?? (RANK_BLOCK_GENESIS_V1 as Block)
-      this.checkpoint = await this.initReconcileBlockState(checkpoint)
+      // Get current checkpoint from DB
+      const dbCheckpoint = await this.db.getCheckpoint()
+      // Initialize from either DB checkpoint or genesis block
+      const initialCheckpoint = dbCheckpoint ?? (RANK_BLOCK_GENESIS_V1 as Block)
+      // Reconcile with blockchain state
+      this.checkpoint = await this.initReconcileBlockState(initialCheckpoint)
     } catch (e) {
       throw [ERR.IDX_BLOCKS_REWIND, e.message]
     }
@@ -216,9 +244,14 @@ export default class Indexer extends EventEmitter {
     ])
   }
   /**
-   * Make sure our checkpoint block matches lotusd at `height`, and rewind all database state as necessary
+   * Reconciles the local checkpoint block with the lotusd blockchain state and rewinds database if needed.
+   * Ensures database state matches the blockchain by comparing block hashes at each height and rewinding
+   * if a mismatch is found.
+   * @param {Block} checkpoint - The current checkpoint block to reconcile, either from DB or genesis
+   * @returns {Promise<Block>} The reconciled checkpoint block that matches lotusd state
+   * @throws {[ERR.IDX_BLOCKS_REWIND, string]} If error occurs during reconciliation
    */
-  async initReconcileBlockState(checkpoint: Block) {
+  async initReconcileBlockState(checkpoint: Block): Promise<Block> {
     // Get the best block compared to our checkpoint
     // The best block will be the checkpoint that matches lotusd, at whichever height this is true
     const best = await this.getBestBlock(checkpoint)
@@ -252,9 +285,16 @@ export default class Indexer extends EventEmitter {
     return best
   }
   /**
-   * Synchronize database state with lotusd, starting from `this.checkpoint`
+   * Synchronizes database state with lotusd blockchain by processing blocks in batches, starting from the current checkpoint.
+   * Fetches and processes blocks in ranges until caught up with the chain tip.
+   * @returns {Promise<void>} Resolves when sync is complete
+   * @throws {[ERR.IDX_BLOCKS_SYNC, string]} If error occurs during block sync
+   * @property {number} totalBlocks - Total number of blocks processed during sync
+   * @property {number} totalRanks - Total number of rank updates processed during sync
+   * @property {Block} checkpoint - The latest processed block checkpoint
+   * @property {number} NNG_RPC_BLOCKRANGE_SIZE - Number of blocks to fetch in each batch
    */
-  async initSyncBlocks() {
+  async initSyncBlocks(): Promise<void> {
     let totalBlocks = 0,
       totalRanks = 0
     const t0 = performance.now()
@@ -302,9 +342,13 @@ export default class Indexer extends EventEmitter {
     ])
   }
   /**
-   * Synchronize database state with current lotusd mempool
+   * Synchronizes database state with the current lotusd mempool by fetching and processing unconfirmed transactions
+   * @returns {Promise<RankTransaction[]>} Array of RANK transactions currently in mempool
+   * @property {number} txsLength - Number of transactions in mempool
+   * @property {number} ranksLength - Number of RANK transactions processed
+   * @property {number} elapsed - Time taken to sync mempool in milliseconds
    */
-  async initSyncMempool() {
+  async initSyncMempool(): Promise<RankTransaction[]> {
     const t0 = performance.now()
     const entries: LogEntry[] = [['init', 'syncMempool']]
     const mempool = await this.rpcGetMempool()
@@ -329,9 +373,8 @@ export default class Indexer extends EventEmitter {
     return ranks
   }
   /**
-   * Disconnect all endpoints and exit program
-   * @param exitCode Process signal as `string` or `(enum) ERR` value if fatal error
-   * @param exitError Debug string if fatal error
+   * Cleanly shuts down all network connections and closes the indexer
+   * @returns {Promise<void>} Resolves when all connections are closed
    */
   async close(): Promise<void> {
     this.pub?.shutdown(this.pubUri)
@@ -428,28 +471,36 @@ export default class Indexer extends EventEmitter {
     }
   }
   /**
-   * Recursively process queued `NNGMessageProcessor` methods and their associated `ByteBuffer` data
-   * @returns {Promise<void>}
+   * Process queued NNG message handlers in batches with a small delay between batches.
+   * Processes up to NNG_MESSAGE_BATCH_SIZE messages at a time to avoid blocking the event loop.
+   * @returns {Promise<void>} Resolves when current batch is complete
    */
   private nngProcessMessage = async (): Promise<void> => {
     // Queue is now busy processing queued NNG handlers
     // Prevents clobbering; maintains healthy database state
     this.queue.busy = true
     try {
-      // Oldest queued handler/message is processed first
-      const [NNGMessageProcessor, ByteBuffer] = this.queue.pending.shift()
-      await NNGMessageProcessor(ByteBuffer)
+      // Process messages in batches with a small delay
+      const messagesToProcess = this.queue.pending.splice(
+        0,
+        NNG_MESSAGE_BATCH_SIZE,
+      )
+
+      for (const [NNGMessageProcessor, ByteBuffer] of messagesToProcess) {
+        await NNGMessageProcessor(ByteBuffer)
+      }
     } catch (e) {
-      // Should never get here; shut down if we do
       this.emit('exception', ERR.NNG_PROCESS_MESSAGE, e.message)
+      this.queue.busy = false
       return
     }
-    // Recursively process queue if necessary
+
+    // Schedule next batch with a small delay to allow event loop to breathe
     if (this.queue.pending.length > 0) {
-      return this.nngProcessMessage()
+      setTimeout(() => this.nngProcessMessage(), 10)
+    } else {
+      this.queue.busy = false
     }
-    // Queue is finished processing all pending handlers
-    this.queue.busy = false
   }
   /**
    * Called when our NNG sub `Socket` receives data published by lotusd
