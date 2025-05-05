@@ -13,6 +13,7 @@ import {
   toPlatformUTF8,
   toSentimentUTF8,
   log,
+  RANK_SCRIPT_REQUIRED_LENGTH,
 } from 'rank-lib'
 import {
   ERR,
@@ -29,7 +30,8 @@ import {
   PLATFORMS,
   RANK_BLOCK_GENESIS_V1,
   RANK_OUTPUT_MIN_VALID_SATS,
-  RANK_SCRIPT_CHUNKS,
+  RANK_SCRIPT_CHUNKS_REQUIRED,
+  RANK_SCRIPT_CHUNKS_OPTIONAL,
 } from 'rank-lib'
 import type {
   LogEntry,
@@ -80,15 +82,16 @@ export default class Indexer extends EventEmitter {
   private mempool: MempoolCache
   /** Queue for processing NNG messages */
   private queue: NNGQueue
-  /** Required and optional script chunk definitions */
-  private chunks: {
-    required: {
-      [chunk in Exclude<ScriptChunkField, 'post' | 'comment'>]: ScriptChunk
-    }
-    optional: {
-      [chunk in Extract<ScriptChunkField, 'post' | 'comment'>]: ScriptChunk
-    }
-  }
+  /** Required script chunk definitions */
+  private chunksRequired = Object.entries(RANK_SCRIPT_CHUNKS_REQUIRED) as [
+    keyof typeof RANK_SCRIPT_CHUNKS_REQUIRED,
+    ScriptChunk,
+  ][]
+  /** Optional script chunk definitions */
+  private chunksOptional = Object.entries(RANK_SCRIPT_CHUNKS_OPTIONAL) as [
+    keyof typeof RANK_SCRIPT_CHUNKS_OPTIONAL,
+    ScriptChunk,
+  ][]
   /** Last processed block checkpoint */
   private checkpoint: Block
   /**
@@ -118,18 +121,6 @@ export default class Indexer extends EventEmitter {
     // Runtime state setup
     this.mempool = new Map()
     this.queue = { busy: false, pending: [] }
-    this.chunks = {
-      required: {
-        lokad: RANK_SCRIPT_CHUNKS.lokad,
-        sentiment: RANK_SCRIPT_CHUNKS.sentiment,
-        platform: RANK_SCRIPT_CHUNKS.platform,
-        profile: RANK_SCRIPT_CHUNKS.profile, // As long as it is 16 bytes it is good
-      },
-      optional: {
-        post: RANK_SCRIPT_CHUNKS.post, // post ID
-        comment: RANK_SCRIPT_CHUNKS.comment, // optional on-chain comment to accompany vote (223 bytes - 59 bytes)
-      },
-    }
   }
   /**
    * Converts a Block or RankTransaction object into an array of LogEntry tuples
@@ -551,7 +542,7 @@ export default class Indexer extends EventEmitter {
     if (!scriptPayload) {
       return
     }
-    const output = this.processTransactionOutputs(tx.outputs)
+    const output = this.toRankOutput(tx.outputs[0])
     if (output) {
       const rank = {
         txid: tx.txid,
@@ -837,8 +828,8 @@ export default class Indexer extends EventEmitter {
         if (!scriptPayload) {
           continue
         }
-        // Process tx outputs for RANK outputs; convert any to RANK txs
-        const output = this.processTransactionOutputs(tx.outputs)
+        // RANK output is always at index 0
+        const output = this.toRankOutput(tx.outputs[0])
         if (output) {
           ranks.push({
             txid: tx.txid,
@@ -857,142 +848,111 @@ export default class Indexer extends EventEmitter {
     return ranks
   }
   /**
-   * Parse the Bitcore-compatible tx outputs for RANK outputs and return them
-   * @param outputs Transaction `output` array in Bitcore format
-   * @returns {RankOutput} Processed RANK output, or null if none found
+   * Process the output script to get the rankOutput
+   * @param output `Transaction.Output` object
+   * @returns `RankOutput` object or `null` if output script is invalid
    */
-  private processTransactionOutputs(outputs: Transaction.Output[]): RankOutput {
-    try {
-      const { script, satoshis } = outputs[0]
-      // first output script MUST be OP_RETURN else ignore
-      if (!script.isDataOut()) {
-        return null
-      }
-      // OP_RETURN output value MUST be >= defined minimum
-      if (satoshis < RANK_OUTPUT_MIN_VALID_SATS) {
-        return null
-      }
-      // exclude OP_RETURN chunk and make sure remaining chunk count is valid
-      // chunks array is COPIED via .slice() so is SAFE to shift/splice/etc.
-      const scriptChunks = script.chunks.slice(1)
-      const requiredChunks = Object.values(this.chunks.required)
-      if (scriptChunks.length < requiredChunks.length) {
-        return null
-      }
-      // verify script chunks contain valid hard-coded chunk parameters
-      // this also inherently validates script chunk order
-      for (let i = 0; i < requiredChunks.length; i++) {
-        const requiredChunk = requiredChunks[i]
-        if (!requiredChunk.map) {
-          continue
-        }
-        // sentiment does not get parsed by bitcore into buf; convert opcodenum to buf
-        if (!scriptChunks[i].buf) {
-          // put opcodenum in Uint8Array before Buffer.from
-          scriptChunks[i].buf = Buffer.from([scriptChunks[i].opcodenum])
-          scriptChunks[i].len = scriptChunks[i].buf.length
-        }
-        if (
-          !requiredChunk.map.has(
-            scriptChunks[i].buf.readUintBE(0, scriptChunks[i].len),
-          )
-        ) {
-          return null
-        }
-      }
-      // gather parameters for platform
-      const platformChunk = this.chunks.required.platform
-      const platform = platformChunk.map.get(
-        scriptChunks[2].buf.readUIntBE(0, platformChunk.len),
-      ) as ScriptChunkPlatformUTF8
-      const { profileId } = PLATFORMS[platform]
-      // script chunk after platform MUST be profile and be padded to required length
-      if (scriptChunks[3].len < profileId.len) {
-        return null
-      }
-      // splice original chunk array to take all required chunks
-      // then remove lokad chunk to process remaining required chunks into RankOutput
-      // processScriptChunks will modify the referenced chunk array
-      const rank = this.processScriptChunks(
-        scriptChunks.splice(0, requiredChunks.length).slice(1),
-      )
-      // Process remaining, optional chunks
-      if (scriptChunks.length > 0) {
-        for (let i = 0; i < scriptChunks.length; i++) {
-          let decoded: string
-          const scriptChunk = scriptChunks[i]
-          switch (i) {
-            // postId or comment
-            case 0: {
-              const { postId: postIdSpec } = PLATFORMS[platform]
-              try {
-                // match platform postId requirements, otherwise assume comment data
-                decoded = scriptChunk.buf[postIdSpec.reader]().toString()
-              } catch (e) {
-                // we really ought not skip errors here..
-                // if a user cast a vote, we need to process their vote correctly
-                // e.g. new Twitter post IDs are 64-bit UInt, but old post IDs aren't 8-byte length
-                // ref: https://x.com/DianeP89/status/810184088212701184 is 7-byte length
-                //
-                //
-                // A bugfix is needed for this; for now, just break and leave `rank.postId` undefined
-                break
-              }
-              if (
-                scriptChunk.len == postIdSpec.chunkLength &&
-                decoded.match(postIdSpec.regex)
-              ) {
-                rank.postId = decoded
-              } else {
-                // TODO: replace with instanceId
-                //rank.comment = toCommentUTF8(chunk.buf)
-              }
-              break
-            }
-            // comment
-            case 1:
-              // TODO: replace with instanceId
-              //rank.comment = toCommentUTF8(chunk.buf)
-              break
-          }
-        }
-      }
-      // Return processed output(s)
-      return rank
-    } catch (e) {
-      throw new Error(
-        `processTransactionOutputs(${typeof outputs}): ${e.message}`,
-      )
+  private toRankOutput(output: Transaction.Output): RankOutput {
+    const { script, satoshis } = output
+    // first output script MUST be OP_RETURN
+    if (!script.isDataOut()) {
+      return null
     }
+    // OP_RETURN output value MUST be >= defined minimum
+    if (satoshis < RANK_OUTPUT_MIN_VALID_SATS) {
+      return null
+    }
+    // Buffer of output script
+    const scriptBuf = script.toBuffer()
+    // platform name
+    const rankOutput: RankOutput = {
+      sentiment: null,
+      platform: null,
+      profileId: null,
+    }
+    // parse required chunks into rankOutput
+    // return null if any required chunk is missing
+    for (const [requiredChunkField, requiredChunk] of this.chunksRequired) {
+      const scriptChunkBuf = scriptBuf.subarray(
+        requiredChunk.offset,
+        requiredChunk.offset + requiredChunk.len,
+      )
+      const scriptChunkHex = scriptChunkBuf.toString('hex')
+      const scriptChunkUIntBE = parseInt(scriptChunkHex, 16)
+      switch (requiredChunkField) {
+        // default processing for chunks that have a map
+        default: {
+          if (requiredChunk.map) {
+            if (!requiredChunk.map.has(scriptChunkUIntBE)) {
+              return null
+            }
+          }
+          // do not break here; fallthrough to chunk-specific processing
+        }
+        case 'sentiment': {
+          rankOutput.sentiment = toSentimentUTF8(scriptChunkBuf)
+          break
+        }
+        case 'platform': {
+          rankOutput.platform = toPlatformUTF8(scriptChunkBuf)
+          break
+        }
+        case 'profileId': {
+          const profileIdSpec = PLATFORMS[rankOutput.platform].profileId
+          const profileIdBuf = scriptBuf.subarray(
+            requiredChunk.offset,
+            requiredChunk.offset + profileIdSpec.len,
+          )
+          // profileId chunk must be padded to required length
+          if (profileIdBuf.length < profileIdSpec.len) {
+            return null
+          }
+          // convert profileId to UTF-8 and remove padding null bytes
+          rankOutput.profileId = toProfileIdUTF8(profileIdBuf)
+          break
+        }
+      }
+    }
+    const scriptBufOptional = scriptBuf.subarray(RANK_SCRIPT_REQUIRED_LENGTH)
+    // if there are any remaining chunks, process them into rankOutput
+    if (scriptBufOptional.length > 0) {
+      for (const [optionalChunkField] of this.chunksOptional) {
+        switch (optionalChunkField) {
+          case 'postId': {
+            const postIdSpec =
+              PLATFORMS[rankOutput.platform as ScriptChunkPlatformUTF8].postId
+            try {
+              rankOutput.postId =
+                scriptBufOptional[postIdSpec.reader]().toString()
+            } catch (e) {
+              // leave postId undefined if reader fails
+              // TODO: need to add fallbacks for platforms with variable postId format
+            }
+            break
+          }
+          // TODO: add cases for additional optional chunks
+        }
+      }
+    }
+    // return the processed rankOutput
+    return rankOutput
   }
   /**
-   * Process the transaction inputs to get the 20-byte, hex-encoded `scriptPayload`
-   * @param tx
-   * @returns
+   * Process `Transaction.Input` objects to get the `scriptPayload`
+   * Only return the `scriptPayload` if all inputs are from the same address
+   * @param tx `Transaction` object
+   * @returns `scriptPayload` as a hex string or `void` if inputs are invalid
    */
   private getScriptPayload(tx: Transaction): string | void {
     if (
       tx.inputs.every(
-        (input, idx, array) =>
+        (input, _idx, array) =>
           array[0].script
             .toAddress()
             .hashBuffer.compare(input.script.toAddress().hashBuffer) === 0,
       )
     ) {
       return tx.inputs[0].script.toAddress().hashBuffer.toString('hex')
-    }
-  }
-  /**
-   * Convert required RANK output chunks to `RankOutput` object
-   * @param chunks Bitcore script chunk array
-   * @returns {RankOutput}
-   * @see {@linkcode RankOutput}
-   */
-  private processScriptChunks(chunks: Chunk[]): RankOutput {
-    return {
-      sentiment: toSentimentUTF8(chunks.shift().buf).toLowerCase(),
-      platform: toPlatformUTF8(chunks.shift().buf).toLowerCase(),
-      profileId: toProfileIdUTF8(chunks.shift().buf).toLowerCase(),
     }
   }
   /**
