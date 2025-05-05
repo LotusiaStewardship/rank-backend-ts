@@ -339,7 +339,7 @@ export default class API extends EventEmitter {
       switch (postIdParams.type) {
         case 'BigInt': {
           const buffer = Buffer.from(BigInt(postId).toString(16), 'hex')
-          if (buffer.length != postIdParams.chunkLength) {
+          if (buffer.length != postIdParams.len) {
             return this.sendJSON(
               res,
               { error: `postId is invalid length` },
