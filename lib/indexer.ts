@@ -913,7 +913,10 @@ export default class Indexer extends EventEmitter {
         }
       }
     }
-    const scriptBufOptional = scriptBuf.subarray(RANK_SCRIPT_REQUIRED_LENGTH)
+    const scriptBufOptional = scriptBuf.subarray(
+      RANK_SCRIPT_REQUIRED_LENGTH +
+        PLATFORMS[rankOutput.platform as ScriptChunkPlatformUTF8].profileId.len,
+    )
     // if there are any remaining chunks, process them into rankOutput
     if (scriptBufOptional.length > 0) {
       for (const [optionalChunkField] of this.chunksOptional) {
@@ -921,9 +924,10 @@ export default class Indexer extends EventEmitter {
           case 'postId': {
             const postIdSpec =
               PLATFORMS[rankOutput.platform as ScriptChunkPlatformUTF8].postId
+            // skip the first byte for the push op
+            const postIdBuf = scriptBufOptional.subarray(1, postIdSpec.len + 1)
             try {
-              rankOutput.postId =
-                scriptBufOptional[postIdSpec.reader]().toString()
+              rankOutput.postId = postIdBuf[postIdSpec.reader]().toString()
             } catch (e) {
               // leave postId undefined if reader fails
               // TODO: need to add fallbacks for platforms with variable postId format
