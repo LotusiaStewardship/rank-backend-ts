@@ -537,13 +537,13 @@ export default class Indexer extends EventEmitter {
       ).mempoolTx()
     const rawArray = mempooltx.tx().rawArray()
     const tx = new Transaction(Buffer.from(rawArray))
-    // silently ignore RANK txs that send change to a different address
-    const scriptPayload = this.getScriptPayload(tx)
-    if (!scriptPayload) {
-      return
-    }
     const output = this.toRankOutput(tx.outputs[0])
     if (output) {
+      // silently ignore RANK txs that send change to a different address
+      const scriptPayload = this.getScriptPayload(tx)
+      if (!scriptPayload) {
+        return
+      }
       const rank = {
         txid: tx.txid,
         scriptPayload,
@@ -818,19 +818,19 @@ export default class Indexer extends EventEmitter {
         const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
         const tx = new Transaction(Buffer.from(rawArray))
-        // get the address that spent UTXO
-        // TODO: should collect multiple scriptPayloads into array;
-        //       this would allow multiple addresses to vote at once 👀
-        //       WARNING: this could open attack surface to game reward system,
-        //                e.g. 2 addresses, 1 vote = 1 vote, 2 addresses rewarded
-        // silently ignore RANK txs that send change to a different address
-        const scriptPayload = this.getScriptPayload(tx)
-        if (!scriptPayload) {
-          continue
-        }
         // RANK output is always at index 0
         const output = this.toRankOutput(tx.outputs[0])
         if (output) {
+          // get the address that spent UTXO
+          // TODO: should collect multiple scriptPayloads into array;
+          //       this would allow multiple addresses to vote at once 👀
+          //       WARNING: this could open attack surface to game reward system,
+          //                e.g. 2 addresses, 1 vote = 1 vote, 2 addresses rewarded
+          // silently ignore RANK txs that send change to a different address
+          const scriptPayload = this.getScriptPayload(tx)
+          if (!scriptPayload) {
+            continue
+          }
           ranks.push({
             txid: tx.txid,
             scriptPayload,
@@ -941,9 +941,9 @@ export default class Indexer extends EventEmitter {
    * Process `Transaction.Input` objects to get the `scriptPayload`
    * Only return the `scriptPayload` if all inputs are from the same address
    * @param tx `Transaction` object
-   * @returns `scriptPayload` as a hex string or `void` if inputs are invalid
+   * @returns `scriptPayload` as a hex string or `null` if inputs are invalid
    */
-  private getScriptPayload(tx: Transaction): string | void {
+  private getScriptPayload(tx: Transaction): string | null {
     if (
       tx.inputs.every(
         (input, _idx, array) =>
@@ -954,6 +954,7 @@ export default class Indexer extends EventEmitter {
     ) {
       return tx.inputs[0].script.toAddress().hashBuffer.toString('hex')
     }
+    return null
   }
   /**
    * Parse raw `NNG.Hash` flatbuffer for the 32-byte block hash or txid
