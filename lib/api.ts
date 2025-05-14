@@ -17,7 +17,7 @@ import {
 } from '@temporalio/client'
 import { Worker as TemporalWorker, NativeConnection } from '@temporalio/worker'
 import { Address, Message, Networks } from 'bitcore-lib-xpi'
-import { PLATFORMS, log, type ScriptChunkPlatformUTF8 } from 'rank-lib'
+import RuntimeState from './state'
 import Database, { type Timespan } from './database'
 import config from '../config'
 import { API_SERVER_PORT, ERR, HTTP } from '../util/constants'
@@ -105,14 +105,19 @@ export default class API extends EventEmitter {
   private app: Express
   private router: Router
   private server: Server
+  private state: RuntimeState
   private temporalClient!: TemporalClient
   private temporalWorker!: TemporalWorker
   /**
-   *
-   * @param db
+   * Initializes Express router with endpoints for profiles, posts, stats, and wallet operations
+   * Sets up parameter handlers and configures routes for both GET and POST requests
+   * @param state Runtime state for managing indexer state
+   * @param db Database instance for handling data operations
+   * @extends {EventEmitter} Inherits event handling capabilities
    */
-  constructor(db: Database) {
+  constructor(state: RuntimeState, db: Database) {
     super()
+    this.state = state
     this.db = db
     //this.app = express()
     this.router = Router({

@@ -1,5 +1,6 @@
 import Indexer from './lib/indexer'
 import API from './lib/api'
+import RuntimeState from './lib/state'
 import { log } from 'rank-lib'
 import {
   ERR,
@@ -14,12 +15,14 @@ type Exception = [number | string, string]
  */
 // Modules
 const db = new Database(process.env.DATABASE_URL)
+const state = new RuntimeState()
 const indexer = new Indexer(
+  state,
   db,
   String(process.argv[2] || NNG_PUB_DEFAULT_SOCKET_PATH), // /path/to/pub.pipe
   String(process.argv[3] || NNG_RPC_DEFAULT_SOCKET_PATH), // /path/to/rpc.pipe
 )
-const api = new API(db)
+const api = new API(state, db)
 // Startup/Shutdown functions
 const init = async () => {
   try {

@@ -115,5 +115,6 @@ model ExtensionInstance {
   ranks         RankTransaction[]
 
   @@id([id, scriptPayload])
+  @@index([scriptPayload(type: hash)])
   @@index([id(type: hash), scriptPayload(type: hash), optin(type: hash)])
 }

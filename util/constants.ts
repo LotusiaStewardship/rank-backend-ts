@@ -8,6 +8,7 @@ export const EXT_INSTANCE_ID_DIFFICULTY = 4
  */
 export const API_SERVER_PORT = 10655
 export const API_STATS_RESULT_COUNT = 5
+export const API_AUTH_CACHE_ENTRY_TTL = 420 // blocks over 1 day time span
 /**
  * NNG configuration
  */
