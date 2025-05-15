@@ -6,6 +6,7 @@ import { Socket, socket } from 'nanomsg'
 import { resolve } from 'node:path/posix'
 import { Worker } from 'node:worker_threads'
 import { EventEmitter } from 'events'
+import RuntimeState from './state'
 import Database from './database'
 import {
   toCommentUTF8,
@@ -92,21 +93,27 @@ export default class Indexer extends EventEmitter {
     keyof typeof RANK_SCRIPT_CHUNKS_OPTIONAL,
     ScriptChunk,
   ][]
-  /** Last processed block checkpoint */
-  private checkpoint: Block
+  /** Runtime state used across modules */
+  private state: RuntimeState
   /**
    * Creates a new Indexer instance that connects to lotusd via NNG sockets
    * @param db Database instance for storing indexed data
    * @param pubUri Optional path to the NNG pub/sub socket (defaults to ~/.lotus/pub.pipe)
    * @param rpcUri Optional path to the NNG RPC socket (defaults to ~/.lotus/rpc.pipe)
    */
-  constructor(db: Database, pubUri?: string, rpcUri?: string) {
+  constructor(
+    state: RuntimeState,
+    db: Database,
+    pubUri?: string,
+    rpcUri?: string,
+  ) {
     super()
     // Validate NNG parameters
     this.pubUri = `ipc://${pubUri}`
     this.rpcUri = `ipc://${rpcUri}`
     // Module setup
     this.db = db
+    this.state = state
     // Pub/Sub socket setup
     this.pub = socket('sub', { chan: [] })
     this.pub.on('data', this.nngReceiveMessage)
@@ -194,21 +201,23 @@ export default class Indexer extends EventEmitter {
     /**
      *    Reconcile Checkpoint
      */
+    let checkpoint: Block
     try {
       // Get current checkpoint from DB
       const dbCheckpoint = await this.db.getCheckpoint()
-      // Initialize from either DB checkpoint or genesis block
-      const initialCheckpoint = dbCheckpoint ?? (RANK_BLOCK_GENESIS_V1 as Block)
-      // Reconcile with blockchain state
-      this.checkpoint = await this.initReconcileBlockState(initialCheckpoint)
+      // reconcile our checkpoint with the blockchain state
+      // if we don't have a checkpoint, use the RANK genesis block
+      checkpoint = await this.initReconcileBlockState(
+        dbCheckpoint ?? (RANK_BLOCK_GENESIS_V1 as Block),
+      )
     } catch (e) {
       throw [ERR.IDX_BLOCKS_REWIND, e.message]
     }
     // Log our current checkpoint (i.e. best block)
-    log([['init', 'best'], ...this.toLogEntries(this.checkpoint)])
+    log([['init', 'best'], ...this.toLogEntries(checkpoint)])
     // Sync blocks
     try {
-      await this.initSyncBlocks()
+      this.state.checkpoint = await this.initSyncBlocks(checkpoint)
     } catch (e) {
       throw [ERR.IDX_BLOCKS_SYNC, e.message]
     }
@@ -285,12 +294,12 @@ export default class Indexer extends EventEmitter {
    * @property {Block} checkpoint - The latest processed block checkpoint
    * @property {number} NNG_RPC_BLOCKRANGE_SIZE - Number of blocks to fetch in each batch
    */
-  async initSyncBlocks(): Promise<void> {
+  async initSyncBlocks(checkpoint: Block): Promise<Block> {
     let totalBlocks = 0,
       totalRanks = 0
     const t0 = performance.now()
     while (true) {
-      const startHeight = this.checkpoint.height + 1
+      const startHeight = checkpoint.height + 1
       const t0 = performance.now()
       const blockrange = await this.rpcGetBlockRange(
         startHeight,
@@ -303,7 +312,7 @@ export default class Indexer extends EventEmitter {
       }
       // Save the blockrange we have
       let ranksLength: number
-      ;[this.checkpoint, ranksLength] = await this.saveBlockRange(
+      ;[checkpoint, ranksLength] = await this.saveBlockRange(
         blockrange,
         blocksLength,
       )
@@ -314,7 +323,7 @@ export default class Indexer extends EventEmitter {
         ['init', 'syncBlocks'],
         ['status', 'running'],
         ['startHeight', `${startHeight}`],
-        ['endHeight', `${this.checkpoint.height}`],
+        ['endHeight', `${checkpoint.height}`],
         [`ranksLength`, `${ranksLength}`],
         ['elapsed', `${t1}ms`],
       ])
@@ -331,6 +340,8 @@ export default class Indexer extends EventEmitter {
       ['totalRanks', `${totalRanks}`],
       ['elapsed', `${t1}s`],
     ])
+    // return the latest checkpoint block
+    return checkpoint
   }
   /**
    * Synchronizes database state with the current lotusd mempool by fetching and processing unconfirmed transactions
@@ -643,8 +654,8 @@ export default class Indexer extends EventEmitter {
     entries.push(['action', 'saveBlock'], ['elapsed', `${t1}ms`])
     // TODO: we may need to add some additional state checks here, but maybe not
 
-    // Update checkpoint to this block
-    this.checkpoint = { ...best }
+    // Update state with this checkpoint block
+    this.state.checkpoint = { ...best }
     // Log the result
     log(entries)
   }
@@ -664,7 +675,7 @@ export default class Indexer extends EventEmitter {
     const txsLength = await this.rewindBlock(block.height)
     const t1 = (performance.now() - t0).toFixed(3)
     // Get the latest checkpoint block from the database
-    this.checkpoint = await this.db.getCheckpoint()
+    this.state.checkpoint = await this.db.getCheckpoint()
     // Log the result
     log([
       ['nng', 'blkdisconctd'],
