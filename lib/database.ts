@@ -26,11 +26,11 @@ export type Timespan =
   | 'month'
   | 'quarter'
   | 'all'
-export type ScriptPayloadActivity = {
+export type ScriptPayloadActivitySummary = {
   scriptPayload: string
   voteCount: number
   /** Total number of sats burned during `Timespan` */
-  sats: bigint
+  sats: string
 }
 /**
  * Get the 00:00 UTC epoch timestamp for the previous `Timespan`, in seconds
@@ -149,45 +149,48 @@ export default class Database {
    * @returns Promise resolving to an array of ScriptPayloadActivity objects
    */
   async ipcGetScriptPayloadActivitySummary({
+    scriptPayload,
     startTime,
     endTime,
   }: {
+    scriptPayload?: string
     startTime?: Timespan
     endTime?: Timespan
-  }): Promise<ScriptPayloadActivity[]> {
+  }): Promise<ScriptPayloadActivitySummary[]> {
     if (!startTime) {
       startTime = 'day'
     }
     if (!endTime) {
       endTime = 'today'
     }
-    return await this.db.$transaction(async tx => {
-      try {
-        const group = await tx.rankTransaction.groupBy({
-          by: ['scriptPayload'],
-          where: {
-            timestamp: {
-              gte: getTimestampUTC(startTime),
-              lte: getTimestampUTC(endTime),
-            },
+    try {
+      const group = await this.db.rankTransaction.groupBy({
+        by: ['scriptPayload'],
+        where: {
+          timestamp: {
+            gte: getTimestampUTC(startTime),
+            lte: getTimestampUTC(endTime),
           },
-          _count: true,
-          _sum: {
-            sats: true,
-          },
-        })
-        return group.map(
-          ({ scriptPayload, _count, _sum }) =>
-            ({
-              scriptPayload,
-              voteCount: _count,
-              sats: _sum.sats,
-            }) as ScriptPayloadActivity,
-        )
-      } catch (e) {
-        throw new Error(`db.ipcGetScriptPayloadActivity: ${e.message}`)
-      }
-    })
+          // filter by script payload if provided
+          // if undefined, return all script payloads
+          scriptPayload,
+        },
+        _count: true,
+        _sum: {
+          sats: true,
+        },
+      })
+      return group.map(
+        ({ scriptPayload, _count, _sum }) =>
+          ({
+            scriptPayload,
+            voteCount: _count,
+            sats: _sum.sats.toString(),
+          }) as ScriptPayloadActivitySummary,
+      )
+    } catch (e) {
+      throw new Error(`db.ipcGetScriptPayloadActivity: ${e.message}`)
+    }
   }
   /**
    * Registers a new extension instance in the database

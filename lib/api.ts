@@ -913,16 +913,24 @@ export default class API extends EventEmitter {
      * @param scriptPayload
      * @returns
      */
-    getRankActivityByScriptPayload: async (
-      startTime: Timespan | undefined,
+    getWalletRankActivity: async (
       scriptPayload: string,
+      startTime?: Timespan,
+      endTime?: Timespan,
     ) => {
+      if (!startTime) {
+        startTime = 'today'
+      }
+      if (!endTime) {
+        endTime = 'now'
+      }
       const address = Address.fromPublicKeyHash(
         Buffer.from(scriptPayload, 'hex'),
         Networks.mainnet,
       )
       const activity = await this.db.ipcGetScriptPayloadActivity({
         startTime,
+        endTime,
         scriptPayload,
       })
       return {
@@ -940,30 +948,21 @@ export default class API extends EventEmitter {
      * @param endTime
      * @returns
      */
-    getWalletRankActivity: async (startTime: Timespan, endTime?: Timespan) => {
-      return (
-        await this.db.ipcGetScriptPayloadActivitySummary({
-          startTime,
-          endTime,
-        })
-      ).map(
-        ({ scriptPayload, voteCount, sats }) =>
-          ({
-            scriptPayload,
-            voteCount,
-            // convert sats BigInt to string for Temporal payload messaging
-            sats: sats.toString(),
-          }) as ScriptPayloadActivity,
-      )
+    getDailyRankActivitySummary: async (
+      startTime: Timespan,
+      endTime?: Timespan,
+    ) => {
+      return await this.db.ipcGetScriptPayloadActivitySummary({
+        startTime,
+        endTime,
+      })
     },
     /**
      *
      * @param platform
      * @returns
      */
-    getAllTimeTopRankedProfiles: async (
-      platform: ScriptChunkPlatformUTF8,
-    ): Promise<RankTopProfile[]> => {
+    getAllTimeTopRankedProfiles: async (): Promise<RankTopProfile[]> => {
       return await this.db.getStatsPlatformRanked({
         dataType: 'profileId',
         rankingType: 'top',
