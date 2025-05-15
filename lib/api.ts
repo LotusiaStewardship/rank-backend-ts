@@ -17,6 +17,7 @@ import {
 } from '@temporalio/client'
 import { Worker as TemporalWorker, NativeConnection } from '@temporalio/worker'
 import { Address, Message, Networks } from 'bitcore-lib-xpi'
+import { PLATFORMS, log, type ScriptChunkPlatformUTF8 } from 'rank-lib'
 import RuntimeState from './state'
 import Database, { type Timespan } from './database'
 import config from '../config'
