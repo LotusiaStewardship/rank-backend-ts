@@ -1022,8 +1022,7 @@ export default class Indexer extends EventEmitter {
    */
   private toProfileMap(ranks: RankTransaction[]): ProfileMap {
     const profiles: ProfileMap = new Map()
-    // Sort the RANK txs for upsert
-    ranks.forEach(rank => {
+    for (const rank of ranks) {
       // Determine positive/negative stats per RANK sentiment
       let ranking = 0n
       let votesPositive = 0
@@ -1035,55 +1034,55 @@ export default class Indexer extends EventEmitter {
           votesPositive++
           break
         case 'negative':
-          ranking += -rank.sats
-          votesNegative += 1
+          ranking -= rank.sats
+          votesNegative++
           break
       }
+      // pull out the fields we need to create a new profile/post
       const { platform, profileId, postId, ...partialRank } = rank
-      const target: RankTarget = {
-        id: null,
-        platform,
-        ranks: [],
-        ranking,
-        votesPositive,
-        votesNegative,
-      }
       let profile = profiles.get(profileId)
+      // If this profile exists in the map, add the RANK tx and update stats
       if (profile) {
         profile.ranking += ranking
         profile.votesPositive += votesPositive
         profile.votesNegative += votesNegative
         profile.ranks.push(partialRank)
-      } else {
-        profiles.set(profileId, {
-          ...target,
+      }
+      // Otherwise, we set up a new profile
+      else {
+        profile = {
           id: profileId,
+          platform,
           ranks: [partialRank],
+          ranking,
+          votesPositive,
+          votesNegative,
           posts: new Map(),
-        })
-        profile = profiles.get(profileId)
+        }
       }
-      // If we don't have a postId, then this RANK tx belongs to the Profile
-      // Add the RANK tx and return to process next RANK tx
-      if (!postId) {
-        return
+      // If we have a postId, update post stats if it exists, or add new post to the map
+      if (postId) {
+        const post = profile.posts.get(postId)
+        if (post) {
+          post.ranking += ranking
+          post.votesPositive += votesPositive
+          post.votesNegative += votesNegative
+          post.ranks.push(partialRank)
+        } else {
+          profile.posts.set(postId, {
+            platform,
+            id: postId,
+            profileId,
+            ranks: [partialRank],
+            ranking,
+            votesPositive,
+            votesNegative,
+          })
+        }
       }
-      // Otherwise, we set up the Post and attach this RANK tx to it
-      const post = profile.posts.get(postId)
-      if (post) {
-        post.ranking += ranking
-        post.votesPositive += votesPositive
-        post.votesNegative += votesNegative
-        post.ranks.push(partialRank)
-        return
-      }
-      profile.posts.set(postId, {
-        ...target,
-        id: postId,
-        profileId,
-        ranks: [partialRank],
-      })
-    })
+      // update the profile in the map and continue
+      profiles.set(profileId, profile)
+    }
     return profiles
   }
 }
