@@ -686,14 +686,22 @@ export default class API extends EventEmitter {
         ],
         ...this.toLogEntries(req.params),
       ] as LogEntry[]
-      // parse the request parameters and `Authorization` header
-      const scriptPayload = req.params.scriptPayload
-      const header = req.headers['authorization'] as string
-      const [authDataStr, signature] = Util.base64.decode(header).split(':::')
-      const authData = JSON.parse(authDataStr) as AuthorizationData
+      // validate the scriptPayload GET parameter
+      const { scriptPayload, error } = this.validate.scriptPayload(
+        req.params.scriptPayload,
+      )
+      if (error) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        entries.push(['elapsed', `${t1}ms`])
+        log(entries)
+        return this.sendJSON(res, { error }, HTTP.BAD_REQUEST)
+      }
+      // parse and validate the `Authorization` header
+      const [authData, authDataStr, signature] =
+        this.processAuthorizationHeader(req.headers['authorization'])
       // check if the instanceId is already authorized
       // If not authorized, handle the authentication challenge
-      if (!this.isRequestAuthorized(authData.instanceId, authDataStr)) {
+      if (!this.isRequestAuthorized(authData?.instanceId, authDataStr)) {
         if (
           !this.handleAuthChallenge({
             authData,
@@ -1000,6 +1008,27 @@ export default class API extends EventEmitter {
   }
   temporalLocalActivities = {}
   /**
+   * Processes an authorization header string to extract authorization data, data string and signature
+   * @param {string} header - The authorization header string to process, expected in base64 format
+   * @returns {[AuthorizationData | null, string | null, string | null]} Tuple containing:
+   *   - AuthorizationData object or null if invalid
+   *   - Raw authorization data string or null if invalid
+   *   - Signature string or null if invalid
+   */
+  private processAuthorizationHeader(
+    header: string | undefined,
+  ): [AuthorizationData, string, string] {
+    if (header === undefined) {
+      return [null, null, null]
+    }
+    const [authDataStr, signature] = Util.base64.decode(header).split(':::')
+    if (!authDataStr || !signature) {
+      return [null, null, null]
+    }
+    const authData = JSON.parse(authDataStr ?? '{}') as AuthorizationData
+    return [authData, authDataStr, signature]
+  }
+  /**
    * Validates the authorization using blockchain data and signature.
    * The validation combines the blockhash and blockheight as a message and verifies
    * that the signature was created using the private key of the `scriptPayload`.
@@ -1078,7 +1107,7 @@ export default class API extends EventEmitter {
     signature: string
     scriptPayload: string
   }) {
-    if (!authData.blockhash || !authData.blockheight || !signature) {
+    if (!authData?.blockhash || !authData?.blockheight || !signature) {
       return false
     }
     // validate provided blockhash and blockheight against checkpoint
@@ -1089,7 +1118,7 @@ export default class API extends EventEmitter {
       return false
     }
     // Make sure the scriptPayload authData matches the GET parameter
-    if (authData.scriptPayload !== scriptPayload) {
+    if (authData?.scriptPayload !== scriptPayload) {
       return false
     }
     // validate the signature using the scriptPayload in the request path
