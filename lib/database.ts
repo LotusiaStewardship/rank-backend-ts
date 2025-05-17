@@ -584,9 +584,10 @@ export default class Database {
     height: number,
   ): Promise<RankTransaction[]> {
     try {
-      return await this.db.rankTransaction.findMany({
+      const result = await this.db.rankTransaction.findMany({
         where: { height },
       })
+      return result as RankTransaction[]
     } catch (e) {
       throw new Error(`getRankTransactionsByHeight: ${e.message}`)
     }
