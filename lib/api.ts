@@ -956,7 +956,7 @@ export default class API extends EventEmitter {
      * @param endTime
      * @returns
      */
-    getDailyRankActivitySummary: async (
+    getWalletRankActivitySummary: async (
       startTime: Timespan,
       endTime?: Timespan,
     ) => {
