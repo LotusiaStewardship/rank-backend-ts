@@ -80,13 +80,6 @@ export type RankTopProfile = {
 export type RankTopPost = RankTopProfile & {
   postId?: string
 }
-/** */
-export type ScriptPayloadActivitySummary = {
-  scriptPayload: string
-  voteCount: number
-  /** Total number of sats burned during `Timespan` */
-  sats: string
-}
 /**
  * Represents an entry in the authentication cache for an extension instance
  * @property {string} authDataStr - Stringified `AuthorizationData` object
