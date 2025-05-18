@@ -28,9 +28,11 @@ export type Timespan =
   | 'all'
 export type ScriptPayloadActivitySummary = {
   scriptPayload: string
-  voteCount: number
+  totalVotes: number
   /** Total number of sats burned during `Timespan` */
-  sats: string
+  totalSats: string
+  lastSeen: string
+  firstSeen: string
 }
 /**
  * Get the 00:00 UTC epoch timestamp for the previous `Timespan`, in seconds
@@ -175,17 +177,25 @@ export default class Database {
           // if undefined, return all script payloads
           scriptPayload,
         },
+        _max: {
+          timestamp: true,
+        },
+        _min: {
+          timestamp: true,
+        },
         _count: true,
         _sum: {
           sats: true,
         },
       })
       return group.map(
-        ({ scriptPayload, _count, _sum }) =>
+        ({ scriptPayload, _count, _sum, _max, _min }) =>
           ({
             scriptPayload,
-            voteCount: _count,
-            sats: _sum.sats.toString(),
+            totalVotes: _count,
+            totalSats: _sum.sats.toString(),
+            lastSeen: new Date(Number(_max.timestamp * 1_000n)).toISOString(),
+            firstSeen: new Date(Number(_min.timestamp * 1_000n)).toISOString(),
           }) as ScriptPayloadActivitySummary,
       )
     } catch (e) {
