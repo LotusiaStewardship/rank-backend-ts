@@ -35,11 +35,11 @@ export type ScriptPayloadActivitySummary = {
   firstSeen: string
 }
 /**
- * Get the 00:00 UTC epoch timestamp for the previous `Timespan`, in seconds
+ * Get the 00:00 UTC unix timestamp for the previous `Timespan`, in seconds
  * @param timespan `day`, `week`, etc.
- * @returns {number} the UTC epoch timestamp beginning the `Timespan`, in seconds
+ * @returns {number} the UTC unix timestamp beginning the `Timespan`, in seconds
  */
-const getTimestampUTC = (timespan: Timespan): number => {
+export const getTimestampUTC = (timespan: Timespan): number => {
   const now = new Date(Date.now())
   const today = Math.floor(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1_000,

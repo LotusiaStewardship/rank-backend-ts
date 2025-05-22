@@ -14,6 +14,7 @@ import {
   Client as TemporalClient,
   type SearchAttributes,
   type SignalDefinition,
+  type WorkflowExecutionInfo,
 } from '@temporalio/client'
 import { Worker as TemporalWorker, NativeConnection } from '@temporalio/worker'
 import { Address, Message, Networks } from 'bitcore-lib-xpi'
@@ -856,9 +857,58 @@ export default class API extends EventEmitter {
    */
   temporalActivities = {
     /**
-     *
-     * @param param0
-     * @returns
+     * List all workflows matching the query and return the workflow execution info
+     * @param query - The SQL-like query to list workflows
+     * @returns The list of workflow executions
+     */
+    listWorkflows: async ({ query }: { query: string }) => {
+      const workflowList = this.temporalClient.workflow.list({ query })
+      const workflows: WorkflowExecutionInfo[] = []
+      for await (const workflowInfo of workflowList) {
+        workflows.push(workflowInfo)
+      }
+      return workflows
+    },
+    /**
+     * Get the result of a workflow execution
+     * @param workflowId - The ID of the workflow for which to get the result
+     * @returns The result of the workflow execution
+     */
+    resultWorkflow: async ({
+      workflowId,
+      runId,
+    }: {
+      workflowId: string
+      runId?: string
+    }) => {
+      return await this.temporalClient.workflow.result(workflowId, runId, {
+        followRuns: false,
+      })
+    },
+    /**
+     * Execute a Temporal workflow, waiting for completion
+     * @param param0 - Workflow type, workflowId, and args
+     * @returns Workflow result
+     */
+    executeWorkflow: async ({
+      workflowType,
+      workflowId,
+      args,
+    }: {
+      workflowType: string
+      workflowId: string
+      args?: unknown[]
+    }) => {
+      return await this.temporalClient.workflow.execute(workflowType, {
+        taskQueue: config.temporal.taskQueue,
+        workflowId,
+        args,
+      })
+    },
+    /**
+     * Start a Temporal workflow, returning a handle to the workflow
+     * @param param0 - Workflow type, taskQueue, workflowId, searchAttributes, and args
+     * @returns Workflow handle
      */
     startWorkflow: async ({
       taskQueue,
