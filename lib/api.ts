@@ -94,7 +94,7 @@ type AuthCacheEntry = {
 }
 /** Runtime cache of authenticated instances, where string is the instanceId*/
 type AuthCache = Map<string, AuthCacheEntry>
-type Endpoint = 'profile' | 'post' | 'stats' | 'instance' | 'wallet'
+type Endpoint = 'profile' | 'post' | 'stats' | 'instance' | 'wallet' | 'charts'
 type EndpointHandler = (req: Request, res: Response) => void
 type EndpointParameter =
   | 'platform'
@@ -104,6 +104,11 @@ type EndpointParameter =
   | 'statsRoute'
   | 'pageNum'
   | 'instanceId'
+  | 'chartType'
+  | 'dataType'
+
+type Chart = 'wallet'
+type ChartData = 'activity'
 type EndpointParameterHandler = (
   req: Request,
   res: Response,
@@ -167,6 +172,7 @@ export default class API extends EventEmitter {
       '/wallet/:scriptPayload/:startTime?/:endTime?',
       this.get.wallet,
     )
+    this.router.get('/charts/:chartType/:dataType/:timespan?', this.get.charts)
     this.router.get(
       '/stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
       this.get.stats,
@@ -447,6 +453,58 @@ export default class API extends EventEmitter {
      * @param req
      * @param res
      * @param next
+     * @param chartType
+     */
+    chartType: async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+      chartType: Chart,
+    ) => {
+      switch (chartType) {
+        case 'wallet':
+          break
+        default:
+          return this.sendJSON(
+            res,
+            { error: `invalid chart type specified` },
+            HTTP.BAD_REQUEST,
+          )
+      }
+      req.params.chartType = chartType
+      next()
+    },
+    /**
+     *
+     * @param req
+     * @param res
+     * @param next
+     * @param dataType
+     */
+    dataType: async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+      dataType: ChartData,
+    ) => {
+      switch (dataType) {
+        case 'activity':
+          break
+        default:
+          return this.sendJSON(
+            res,
+            { error: `invalid chart data type specified` },
+            HTTP.BAD_REQUEST,
+          )
+      }
+      req.params.dataType = dataType
+      next()
+    },
+    /**
+     *
+     * @param req
+     * @param res
+     * @param next
      * @param scriptPayload
      */
     scriptPayload: async (
@@ -613,6 +671,38 @@ export default class API extends EventEmitter {
           { error: 'post not found', params: req.params },
           HTTP.NOT_FOUND,
         )
+      }
+    },
+    charts: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      const chartType = req.params.chartType as Chart
+      const dataType = req.params.dataType as ChartData
+      const startTime = (req.params.timespan ?? 'day') as Timespan
+
+      switch (chartType) {
+        case 'wallet': {
+          let result: object
+          if (dataType == 'activity') {
+            result = await this.temporalActivities.executeWorkflow({
+              workflowType: config.temporal.api.chartsWalletActivity,
+              workflowId: config.temporal.api.chartsWalletActivity,
+              args: [{ timespan: startTime }],
+            })
+            const t1 = (performance.now() - t0).toFixed(3)
+            log([
+              ['api', 'get.charts'],
+              ...this.toLogEntries(req.params),
+              ['elapsed', `${t1}ms`],
+            ])
+          }
+          return this.sendJSON(res, result, HTTP.OK)
+        }
+        default:
+          return this.sendJSON(
+            res,
+            { error: `invalid chart type specified` },
+            HTTP.BAD_REQUEST,
+          )
       }
     },
     /**

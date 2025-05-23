@@ -11,6 +11,9 @@ type ParsedConfig = {
       workflowId: string
       signal: string
     }
+    api: {
+      chartsWalletActivity: string
+    }
   }
 }
 
@@ -35,6 +38,10 @@ class Config {
           workflowType: this.env.parsed?.TEMPORAL_COMMAND_WORKFLOW_TYPE,
           workflowId: this.env.parsed?.TEMPORAL_COMMAND_WORKFLOW_ID,
           signal: this.env.parsed?.TEMPORAL_COMMAND_WORKFLOW_SIGNAL,
+        },
+        api: {
+          chartsWalletActivity:
+            this.env.parsed?.TEMPORAL_API_CHARTS_WALLET_ACTIVITY,
         },
       },
     }
