@@ -221,6 +221,89 @@ export default class Database {
     }
   }
   /**
+      data.totalVotes = data.totalUpvotes + data.totalDownvotes
+   * Retrieves wallet activity summary for the specified timespan
+   * @param timespan - The timespan to retrieve data for
+   * @returns Object containing total votes of both types, total unique wallets
+   * voted, and total sats burned
+   */
+  async apiChartWalletSummary(startTime: Timespan, endTime?: Timespan) {
+    if (
+      !startTime ||
+      (startTime !== 'day' &&
+        startTime !== 'week' &&
+        startTime !== 'month' &&
+        startTime !== 'quarter')
+    ) {
+      startTime = 'day'
+    }
+    if (!endTime) {
+      endTime = 'today'
+    }
+    const data = {
+      totalVotes: 0,
+      totalUpvotes: 0,
+      totalDownvotes: 0,
+      totalUniqueWallets: 0,
+      totalSatsBurned: 0,
+    }
+    return await this.db.$transaction(async tx => {
+      const upvotes = await tx.rankTransaction.groupBy({
+        by: ['scriptPayload'],
+        where: {
+          sentiment: 'positive',
+          timestamp: {
+            gte: getTimestampUTC(startTime),
+            lte: getTimestampUTC(endTime),
+          },
+          AND: [{ profileId: { not: 'null' } }, { postId: { not: 'null' } }],
+        },
+        _count: {
+          sentiment: true,
+        },
+        _sum: {
+          sats: true,
+        },
+      })
+      const downvotes = await tx.rankTransaction.groupBy({
+        by: ['scriptPayload'],
+        where: {
+          sentiment: 'negative',
+          timestamp: {
+            gte: getTimestampUTC(startTime),
+            lte: getTimestampUTC(endTime),
+          },
+          AND: [{ profileId: { not: 'null' } }, { postId: { not: 'null' } }],
+        },
+        _count: {
+          sentiment: true,
+        },
+        _sum: {
+          sats: true,
+        },
+      })
+      data.totalUniqueWallets = new Set(
+        Array.from(upvotes.map(vote => vote.scriptPayload)).concat(
+          Array.from(downvotes.map(vote => vote.scriptPayload)),
+        ),
+      ).size
+      data.totalUpvotes = upvotes.reduce(
+        (acc, curr) => acc + curr._count.sentiment,
+        0,
+      )
+      data.totalDownvotes = downvotes.reduce(
+        (acc, curr) => acc + curr._count.sentiment,
+        0,
+      )
+      data.totalVotes = data.totalUpvotes + data.totalDownvotes
+      data.totalSatsBurned =
+        upvotes.reduce((acc, curr) => acc + Number(curr._sum.sats), 0) +
+        downvotes.reduce((acc, curr) => acc + Number(curr._sum.sats), 0)
+
+      return data
+    })
+  }
+  /**
    * Retrieves profile information for a specific platform and profile ID
    * @param platform The platform identifier (ScriptChunkPlatformUTF8)
    * @param profileId The unique identifier of the profile

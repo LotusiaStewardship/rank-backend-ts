@@ -1,5 +1,8 @@
 import { config as dotenv } from 'dotenv'
-
+type TemporalWorkflowQuery = {
+  workflowId: string
+  queryType: string
+}
 type ParsedConfig = {
   datasourceUrl: string
   temporal: {
@@ -12,7 +15,7 @@ type ParsedConfig = {
       signal: string
     }
     api: {
-      chartsWalletActivity: string
+      chartsWalletActivity: TemporalWorkflowQuery
     }
   }
 }
@@ -40,8 +43,11 @@ class Config {
           signal: this.env.parsed?.TEMPORAL_COMMAND_WORKFLOW_SIGNAL,
         },
         api: {
-          chartsWalletActivity:
-            this.env.parsed?.TEMPORAL_API_CHARTS_WALLET_ACTIVITY,
+          chartsWalletActivity: {
+            workflowId: this.env.parsed?.TEMPORAL_API_CHARTS_WALLET_ACTIVITY,
+            queryType:
+              this.env.parsed?.TEMPORAL_API_CHARTS_WALLET_ACTIVITY_QUERY_TYPE,
+          },
         },
       },
     }
