@@ -1,7 +1,11 @@
 /* eslint-disable no-unsafe-finally */
 import { PrismaClient } from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
-import { API_STATS_RESULT_COUNT, ERR } from '../util/constants'
+import {
+  API_STATS_RESULT_COUNT,
+  API_SEARCH_RESULT_COUNT,
+  ERR,
+} from '../util/constants'
 import type {
   Block,
   RankTransaction,
@@ -12,6 +16,7 @@ import type {
   RankTarget,
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
+  IndexedRanking,
 } from 'rank-lib'
 
 type RankStatistics = Pick<
@@ -26,6 +31,11 @@ export type Timespan =
   | 'month'
   | 'quarter'
   | 'all'
+export type VoterDetails = {
+  ranking: string
+  votesPositive: number
+  votesNegative: number
+}
 export type ScriptPayloadActivitySummary = {
   scriptPayload: string
   totalVotes: number
@@ -304,6 +314,37 @@ export default class Database {
     })
   }
   /**
+   * Searches for profiles on any platform
+   * @param query - The query string to search for
+   * @returns An array of profiles matching the query
+   */
+  async apiSearchProfile(query: string): Promise<IndexedRanking[]> {
+    const searchResults: IndexedRanking[] = []
+    // execute the transaction, properly structuring the results
+    return await this.db.$transaction(async tx => {
+      const profiles = await tx.profile.findMany({
+        where: {
+          id: {
+            contains: query,
+            mode: 'insensitive',
+          },
+        },
+        take: API_SEARCH_RESULT_COUNT,
+      })
+      for (const profile of profiles) {
+        const data: IndexedRanking = {
+          platform: profile.platform,
+          profileId: profile.id,
+          ranking: profile.ranking.toString(),
+          votesPositive: profile.votesPositive,
+          votesNegative: profile.votesNegative,
+        }
+        searchResults.push(data)
+      }
+      return searchResults
+    })
+  }
+  /**
    * Retrieves profile information for a specific platform and profile ID
    * @param platform The platform identifier (ScriptChunkPlatformUTF8)
    * @param profileId The unique identifier of the profile
@@ -319,6 +360,8 @@ export default class Database {
       ranking: '0',
       votesPositive: 0,
       votesNegative: 0,
+      uniqueVoters: 0,
+      voterDetails: {},
     }
     return await this.db.$transaction(async tx => {
       try {
@@ -327,10 +370,17 @@ export default class Database {
             platform_id: { platform, id: profileId },
           },
         })
+        // get the voter details for the profile
+        const voterDetails = await this.getProfileVoterDetails(
+          tx as PrismaClient,
+          profileId,
+        )
         // Add indexed post data to return data
         data.ranking = profile.ranking.toString()
         data.votesPositive = profile.votesPositive
         data.votesNegative = profile.votesNegative
+        data.uniqueVoters = Object.keys(voterDetails).length ?? 0
+        data.voterDetails = voterDetails
       } catch (e) {
         // nothing to do here
       } finally {
@@ -1005,5 +1055,56 @@ export default class Database {
     for (const [id, post] of posts) {
       yield [id, post]
     }
+  }
+  /**
+   * Retrieves voter details for a specific platform profile
+   * @param tx - The Prisma client transaction
+   * @param platform - The platform identifier (ScriptChunkPlatformUTF8)
+   * @param profileId - The unique identifier of the profile
+   * @returns Object containing voter details for the profile
+   */
+  private async getProfileVoterDetails(tx: PrismaClient, profileId: string) {
+    const voters = await tx.rankTransaction.groupBy({
+      by: ['scriptPayload', 'sentiment'],
+      where: {
+        profileId,
+        AND: [{ profileId: { not: 'null' } }],
+      },
+      // How many votes total
+      // TODO: get total upvotes and downvotes
+      _count: {
+        sentiment: true,
+      },
+      _sum: {
+        sats: true,
+      },
+    })
+    const voterDetails: Record<string, VoterDetails> = {}
+    voters.forEach(details => {
+      let voter = voterDetails[details.scriptPayload]
+      if (!voter) {
+        voter = {
+          votesPositive: 0,
+          votesNegative: 0,
+          ranking: '0',
+        }
+      }
+
+      const ranking = BigInt(voter.ranking)
+      switch (details.sentiment) {
+        case 'positive':
+          voter.votesPositive += details._count.sentiment
+          voter.ranking = (ranking + details._sum.sats).toString()
+          break
+        case 'negative':
+          voter.votesNegative += details._count.sentiment
+          voter.ranking = (ranking - details._sum.sats).toString()
+          break
+      }
+
+      voterDetails[details.scriptPayload] = voter
+    })
+
+    return voterDetails
   }
 }
