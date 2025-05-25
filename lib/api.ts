@@ -92,7 +92,14 @@ type AuthCacheEntry = {
 }
 /** Runtime cache of authenticated instances, where string is the instanceId*/
 type AuthCache = Map<string, AuthCacheEntry>
-type Endpoint = 'profile' | 'post' | 'stats' | 'instance' | 'wallet' | 'charts'
+type Endpoint =
+  | 'profile'
+  | 'post'
+  | 'stats'
+  | 'instance'
+  | 'wallet'
+  | 'charts'
+  | 'search'
 type EndpointHandler = (req: Request, res: Response) => void
 type EndpointParameter =
   | 'platform'
@@ -104,6 +111,7 @@ type EndpointParameter =
   | 'instanceId'
   | 'chartType'
   | 'dataType'
+  | 'searchType'
 /** This type is data returned from the database, not Temporal */
 type ChartWalletSummary = {
   /** Total number of votes cast */
@@ -128,6 +136,7 @@ type WalletRankActivityWorkflowResult = {
 }
 type Chart = 'wallet'
 type ChartData = 'summary' | 'activity'
+type SearchType = 'profile' | 'post'
 type EndpointParameterHandler = (
   req: Request,
   res: Response,
@@ -182,6 +191,9 @@ export default class API extends EventEmitter {
     this.router.param('pageNum', this.param.pageNum)
     this.router.param('scriptPayload', this.param.scriptPayload)
     this.router.param('instanceId', this.param.instanceId)
+    this.router.param('chartType', this.param.chartType)
+    this.router.param('dataType', this.param.dataType)
+    this.router.param('searchType', this.param.searchType)
     // Router GET endpoint configuration (DEEPEST ROUTES FIRST!)
     this.router.get(
       '/wallet/summary/:scriptPayload/:startTime?/:endTime?',
@@ -196,6 +208,7 @@ export default class API extends EventEmitter {
       '/stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
       this.get.stats,
     )
+    this.router.get('/search/:searchType/:query', this.get.search)
     this.router.get(
       '/:platform/:profileId/:postId/:scriptPayload',
       this.get.post,
@@ -352,6 +365,26 @@ export default class API extends EventEmitter {
         }
       }
       return { signature }
+    },
+    /**
+     * Validates a search type
+     * @param searchType - The search type to validate
+     * @returns The validated search type
+     */
+    searchType: (searchType: SearchType | undefined) => {
+      if (searchType === undefined) {
+        return {
+          error: 'search type must be specified',
+          statusCode: HTTP.BAD_REQUEST,
+        }
+      }
+      if (!['profile', 'post'].includes(searchType)) {
+        return {
+          error: 'invalid search type specified',
+          statusCode: HTTP.BAD_REQUEST,
+        }
+      }
+      return { searchType }
     },
   }
   /**
@@ -517,6 +550,30 @@ export default class API extends EventEmitter {
           )
       }
       req.params.dataType = dataType
+      next()
+    },
+    /**
+     *
+     * @param req
+     * @param res
+     * @param next
+     * @param searchType
+     */
+    searchType: async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+      searchType: SearchType,
+    ) => {
+      const validated = this.validate.searchType(searchType)
+      if (validated.error) {
+        return this.sendJSON(
+          res,
+          { error: validated.error },
+          validated.statusCode,
+        )
+      }
+      req.params.searchType = validated.searchType
       next()
     },
     /**
@@ -742,6 +799,50 @@ export default class API extends EventEmitter {
             { error: `invalid chart type specified` },
             HTTP.BAD_REQUEST,
           )
+      }
+    },
+    /**
+     *
+     * @param req
+     * @param res
+     * @returns
+     */
+    search: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      const query = req.params.query ?? ''
+      // if no query or query length is insufficient, return empty array
+      if (!query || query.length < 2) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.search'],
+          ...this.toLogEntries(req.params),
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(res, [], HTTP.OK)
+      }
+      try {
+        const result = await this.db.apiSearchProfile(query)
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.search'],
+          ...this.toLogEntries(req.params),
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(res, result, HTTP.OK)
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'get.search'],
+          ...this.toLogEntries(req.params),
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(
+          res,
+          { error: 'search not found', params: req.params },
+          HTTP.NOT_FOUND,
+        )
       }
     },
     /**
