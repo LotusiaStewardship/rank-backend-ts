@@ -134,8 +134,8 @@ type WalletRankActivityWorkflowResult = {
   /** Total amount of sats sent */
   totalPayoutAmount: number
 }
-type Chart = 'wallet'
-type ChartData = 'summary' | 'activity'
+type ChartType = 'wallet'
+type ChartDataType = 'summary' | 'activity'
 type SearchType = 'profile' | 'post'
 type EndpointParameterHandler = (
   req: Request,
@@ -511,7 +511,7 @@ export default class API extends EventEmitter {
       req: Request,
       res: Response,
       next: NextFunction,
-      chartType: Chart,
+      chartType: ChartType,
     ) => {
       switch (chartType) {
         case 'wallet':
@@ -537,10 +537,12 @@ export default class API extends EventEmitter {
       req: Request,
       res: Response,
       next: NextFunction,
-      dataType: ChartData,
+      dataType: ChartDataType,
     ) => {
       switch (dataType) {
         case 'activity':
+          break
+        case 'summary':
           break
         default:
           return this.sendJSON(
@@ -764,8 +766,8 @@ export default class API extends EventEmitter {
      */
     charts: async (req: Request, res: Response) => {
       const t0 = performance.now()
-      const chartType = req.params.chartType as Chart
-      const dataType = req.params.dataType as ChartData
+      const chartType = req.params.chartType as ChartType
+      const dataType = req.params.dataType as ChartDataType
       const startTime = (req.params.timespan ?? 'day') as Timespan
 
       switch (chartType) {
