@@ -14,7 +14,6 @@ import {
   Client as TemporalClient,
   type SearchAttributes,
   type SignalDefinition,
-  type WorkflowExecutionInfo,
 } from '@temporalio/client'
 import { Worker as TemporalWorker, NativeConnection } from '@temporalio/worker'
 import { Address, Message, Networks } from 'bitcore-lib-xpi'
@@ -24,7 +23,6 @@ import {
   type ScriptChunkPlatformUTF8,
   type InstanceData,
   type AuthorizationData,
-  API as API_LIB,
   Util,
   Block,
   LogEntry,
@@ -94,7 +92,7 @@ type AuthCacheEntry = {
 }
 /** Runtime cache of authenticated instances, where string is the instanceId*/
 type AuthCache = Map<string, AuthCacheEntry>
-type Endpoint = 'profile' | 'post' | 'stats' | 'instance' | 'wallet'
+type Endpoint = 'profile' | 'post' | 'stats' | 'instance' | 'wallet' | 'charts'
 type EndpointHandler = (req: Request, res: Response) => void
 type EndpointParameter =
   | 'platform'
@@ -104,6 +102,32 @@ type EndpointParameter =
   | 'statsRoute'
   | 'pageNum'
   | 'instanceId'
+  | 'chartType'
+  | 'dataType'
+/** This type is data returned from the database, not Temporal */
+type ChartWalletSummary = {
+  /** Total number of votes cast */
+  totalVotes: number
+  /** Total number of upvotes cast */
+  totalUpvotes: number
+  /** Total number of downvotes cast */
+  totalDownvotes: number
+  /** Total number of unique wallets that voted */
+  totalUniqueWallets: number
+  /** Total amount of Lotus burned in all of the votes */
+  totalSatsBurned: number
+}
+/** This type is data returned from the Temporal workflow */
+type WalletRankActivityWorkflowResult = {
+  /** Total number of votes cast */
+  totalVotes: number
+  /** Total number of payouts sent */
+  totalPayoutsSent: number
+  /** Total amount of sats sent */
+  totalPayoutAmount: number
+}
+type Chart = 'wallet'
+type ChartData = 'summary' | 'activity'
 type EndpointParameterHandler = (
   req: Request,
   res: Response,
@@ -167,6 +191,7 @@ export default class API extends EventEmitter {
       '/wallet/:scriptPayload/:startTime?/:endTime?',
       this.get.wallet,
     )
+    this.router.get('/charts/:chartType/:dataType/:timespan?', this.get.charts)
     this.router.get(
       '/stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
       this.get.stats,
@@ -447,6 +472,58 @@ export default class API extends EventEmitter {
      * @param req
      * @param res
      * @param next
+     * @param chartType
+     */
+    chartType: async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+      chartType: Chart,
+    ) => {
+      switch (chartType) {
+        case 'wallet':
+          break
+        default:
+          return this.sendJSON(
+            res,
+            { error: `invalid chart type specified` },
+            HTTP.BAD_REQUEST,
+          )
+      }
+      req.params.chartType = chartType
+      next()
+    },
+    /**
+     *
+     * @param req
+     * @param res
+     * @param next
+     * @param dataType
+     */
+    dataType: async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+      dataType: ChartData,
+    ) => {
+      switch (dataType) {
+        case 'activity':
+          break
+        default:
+          return this.sendJSON(
+            res,
+            { error: `invalid chart data type specified` },
+            HTTP.BAD_REQUEST,
+          )
+      }
+      req.params.dataType = dataType
+      next()
+    },
+    /**
+     *
+     * @param req
+     * @param res
+     * @param next
      * @param scriptPayload
      */
     scriptPayload: async (
@@ -613,6 +690,58 @@ export default class API extends EventEmitter {
           { error: 'post not found', params: req.params },
           HTTP.NOT_FOUND,
         )
+      }
+    },
+    /**
+     * Charts API endpoint that provides different chart data based on chart type and timespan
+     * @remarks
+     * Supports wallet activity and wallet summary charts with different timespan options
+     * @example
+     * ```
+     * GET /api/v1/charts/wallet/activity/week
+     * GET /api/v1/charts/wallet/summary/month
+     * ```
+     * @param req - Express request object containing chart type and timespan parameters
+     * @param res - Express response object to send back chart data
+     * @returns JSON response with chart data or error message
+     */
+    charts: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      const chartType = req.params.chartType as Chart
+      const dataType = req.params.dataType as ChartData
+      const startTime = (req.params.timespan ?? 'day') as Timespan
+
+      switch (chartType) {
+        case 'wallet': {
+          let result: object
+          if (dataType == 'activity') {
+            const timespan =
+              startTime.charAt(0).toUpperCase() + startTime.slice(1)
+            result = (await this.temporalActivities.queryWorkflow({
+              workflowId: config.temporal.api.chartsWalletActivity.workflowId,
+              queryType:
+                config.temporal.api.chartsWalletActivity.queryType + timespan,
+            })) as WalletRankActivityWorkflowResult
+          }
+          if (dataType == 'summary') {
+            result = (await this.db.apiChartWalletSummary(
+              startTime,
+            )) as ChartWalletSummary
+          }
+          const t1 = (performance.now() - t0).toFixed(3)
+          log([
+            ['api', 'get.charts'],
+            ...this.toLogEntries(req.params),
+            ['elapsed', `${t1}ms`],
+          ])
+          return this.sendJSON(res, result, HTTP.OK)
+        }
+        default:
+          return this.sendJSON(
+            res,
+            { error: `invalid chart type specified` },
+            HTTP.BAD_REQUEST,
+          )
       }
     },
     /**
@@ -857,53 +986,20 @@ export default class API extends EventEmitter {
    */
   temporalActivities = {
     /**
-     * List all workflows matching the query and return the workflow execution info
-     * @param query - The SQL-like query to list workflows
-     * @returns The list of workflow executions
+     * Query a Temporal workflow, returning the query result
+     * @param workflowId - The ID of the workflow for which to query
+     * @param queryType - The type of query to execute
+     * @returns The query result
      */
-    listWorkflows: async ({ query }: { query: string }) => {
-      const workflowList = this.temporalClient.workflow.list({ query })
-      const workflows: WorkflowExecutionInfo[] = []
-      for await (const workflowInfo of workflowList) {
-        workflows.push(workflowInfo)
-      }
-      return workflows
-    },
-    /**
-     * Get the result of a workflow execution
-     * @param workflowId - The ID of the workflow for which to get the result
-     * @returns The result of the workflow execution
-     */
-    resultWorkflow: async ({
+    queryWorkflow: async ({
       workflowId,
-      runId,
+      queryType,
     }: {
       workflowId: string
-      runId?: string
+      queryType: string
     }) => {
-      return await this.temporalClient.workflow.result(workflowId, runId, {
-        followRuns: false,
-      })
-    },
-    /**
-     * Execute a Temporal workflow, waiting for completion
-     * @param param0 - Workflow type, workflowId, and args
-     * @returns Workflow result
-     */
-    executeWorkflow: async ({
-      workflowType,
-      workflowId,
-      args,
-    }: {
-      workflowType: string
-      workflowId: string
-      args?: unknown[]
-    }) => {
-      return await this.temporalClient.workflow.execute(workflowType, {
-        taskQueue: config.temporal.taskQueue,
-        workflowId,
-        args,
-      })
+      const handle = this.temporalClient.workflow.getHandle(workflowId)
+      return await handle.query(queryType)
     },
     /**
      * Start a Temporal workflow, returning a handle to the workflow
