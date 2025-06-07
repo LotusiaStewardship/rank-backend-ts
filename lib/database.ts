@@ -883,6 +883,7 @@ export default class Database {
           const {
             platform,
             profileId,
+            hash,
             ranks,
             ranking,
             votesPositive,
@@ -917,6 +918,7 @@ export default class Database {
                 ranking,
                 votesPositive,
                 votesNegative,
+                hash,
                 ranks: {
                   connect: ranks,
                 },

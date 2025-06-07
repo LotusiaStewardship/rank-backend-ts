@@ -49,6 +49,9 @@ model Post {
   ranking       BigInt // Overall post ranking, in satoshis
   votesPositive Int // Total number of RANK txs with positive sentiment
   votesNegative Int // Total number of RANK txs with negative sentiment
+  // sha256 hash of the post content
+  // optional for backwards compatibility
+  hash          String?
   // Each Post correlates with a Profile
   profile       Profile           @relation(fields: [profileId, platform], references: [id, platform])
   // RANK txs specific to this Post

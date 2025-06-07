@@ -1,4 +1,4 @@
-import { Chunk, Transaction } from 'bitcore-lib-xpi'
+import { Transaction } from 'bitcore-lib-xpi'
 import { Builder, ByteBuffer } from 'flatbuffers'
 import { isIP } from 'validator'
 import * as NNG from './nng-interface'
@@ -9,17 +9,13 @@ import { EventEmitter } from 'events'
 import RuntimeState from './state'
 import Database from './database'
 import {
-  toCommentUTF8,
-  toProfileIdUTF8,
-  toPlatformUTF8,
-  toSentimentUTF8,
   log,
-  RANK_SCRIPT_REQUIRED_LENGTH,
+  RankScriptProcessor,
+  RANK_BLOCK_GENESIS_V1,
+  RANK_OUTPUT_MIN_VALID_SATS,
 } from 'rank-lib'
 import {
   ERR,
-  NNG_PUB_DEFAULT_SOCKET_PATH,
-  NNG_RPC_DEFAULT_SOCKET_PATH,
   NNG_REQUEST_TIMEOUT_LENGTH,
   NNG_RPC_BLOCKRANGE_SIZE,
   NNG_RPC_RCVMAXSIZE_POLICY,
@@ -27,24 +23,12 @@ import {
   NNG_SOCKET_RECONN,
   NNG_MESSAGE_BATCH_SIZE,
 } from '../util/constants'
-import {
-  PLATFORMS,
-  RANK_BLOCK_GENESIS_V1,
-  RANK_OUTPUT_MIN_VALID_SATS,
-  RANK_SCRIPT_CHUNKS_REQUIRED,
-  RANK_SCRIPT_CHUNKS_OPTIONAL,
-} from 'rank-lib'
 import type {
   LogEntry,
   RankOutput,
   RankTransaction,
   Block,
   ProfileMap,
-  RankTarget,
-  ScriptChunk,
-  ScriptChunkField,
-  ScriptChunkPlatformUTF8,
-  ScriptChunkSentimentUTF8,
 } from 'rank-lib'
 /** NNG types */
 type NNGMessageType =
@@ -83,16 +67,6 @@ export default class Indexer extends EventEmitter {
   private mempool: MempoolCache
   /** Queue for processing NNG messages */
   private queue: NNGQueue
-  /** Required script chunk definitions */
-  private chunksRequired = Object.entries(RANK_SCRIPT_CHUNKS_REQUIRED) as [
-    keyof typeof RANK_SCRIPT_CHUNKS_REQUIRED,
-    ScriptChunk,
-  ][]
-  /** Optional script chunk definitions */
-  private chunksOptional = Object.entries(RANK_SCRIPT_CHUNKS_OPTIONAL) as [
-    keyof typeof RANK_SCRIPT_CHUNKS_OPTIONAL,
-    ScriptChunk,
-  ][]
   /** Runtime state used across modules */
   private state: RuntimeState
   /**
@@ -873,83 +847,13 @@ export default class Indexer extends EventEmitter {
     if (satoshis < RANK_OUTPUT_MIN_VALID_SATS) {
       return null
     }
-    // Buffer of output script
-    const scriptBuf = script.toBuffer()
-    // platform name
-    const rankOutput: RankOutput = {
-      sentiment: null,
-      platform: null,
-      profileId: null,
+
+    // Process all chunks and return the RankOutput, if possible
+    const processor = new RankScriptProcessor(script.toBuffer())
+    const rankOutput = processor.processRankOutput()
+    if (!rankOutput) {
+      return null
     }
-    // parse required chunks into rankOutput
-    // return null if any required chunk is missing
-    for (const [requiredChunkField, requiredChunk] of this.chunksRequired) {
-      const scriptChunkBuf = scriptBuf.subarray(
-        requiredChunk.offset,
-        requiredChunk.offset + requiredChunk.len,
-      )
-      const scriptChunkHex = scriptChunkBuf.toString('hex')
-      const scriptChunkUIntBE = parseInt(scriptChunkHex, 16)
-      switch (requiredChunkField) {
-        // default processing for chunks that have a map
-        default: {
-          if (requiredChunk.map) {
-            if (!requiredChunk.map.has(scriptChunkUIntBE)) {
-              return null
-            }
-          }
-          // do not break here; fallthrough to chunk-specific processing
-        }
-        case 'sentiment': {
-          rankOutput.sentiment = toSentimentUTF8(scriptChunkBuf)
-          break
-        }
-        case 'platform': {
-          rankOutput.platform = toPlatformUTF8(scriptChunkBuf)
-          break
-        }
-        case 'profileId': {
-          const profileIdSpec = PLATFORMS[rankOutput.platform].profileId
-          const profileIdBuf = scriptBuf.subarray(
-            requiredChunk.offset,
-            requiredChunk.offset + profileIdSpec.len,
-          )
-          // profileId chunk must be padded to required length
-          if (profileIdBuf.length < profileIdSpec.len) {
-            return null
-          }
-          // convert profileId to UTF-8 and remove padding null bytes
-          rankOutput.profileId = toProfileIdUTF8(profileIdBuf)
-          break
-        }
-      }
-    }
-    const scriptBufOptional = scriptBuf.subarray(
-      RANK_SCRIPT_REQUIRED_LENGTH +
-        PLATFORMS[rankOutput.platform as ScriptChunkPlatformUTF8].profileId.len,
-    )
-    // if there are any remaining chunks, process them into rankOutput
-    if (scriptBufOptional.length > 0) {
-      for (const [optionalChunkField] of this.chunksOptional) {
-        switch (optionalChunkField) {
-          case 'postId': {
-            const postIdSpec =
-              PLATFORMS[rankOutput.platform as ScriptChunkPlatformUTF8].postId
-            // skip the first byte for the push op
-            const postIdBuf = scriptBufOptional.subarray(1, postIdSpec.len + 1)
-            try {
-              rankOutput.postId = postIdBuf[postIdSpec.reader]().toString()
-            } catch (e) {
-              // leave postId undefined if reader fails
-              // TODO: need to add fallbacks for platforms with variable postId format
-            }
-            break
-          }
-          // TODO: add cases for additional optional chunks
-        }
-      }
-    }
-    // return the processed rankOutput
     return rankOutput
   }
   /**
@@ -1028,7 +932,7 @@ export default class Indexer extends EventEmitter {
       let votesPositive = 0
       let votesNegative = 0
       // Do a switch here in case sentiment is more than binary in the future
-      switch (rank.sentiment as ScriptChunkSentimentUTF8) {
+      switch (rank.sentiment) {
         case 'positive':
           ranking += rank.sats
           votesPositive++
@@ -1039,7 +943,7 @@ export default class Indexer extends EventEmitter {
           break
       }
       // pull out the fields we need to create a new profile/post
-      const { platform, profileId, postId, ...partialRank } = rank
+      const { platform, profileId, postId, postHash, ...partialRank } = rank
       let profile = profiles.get(profileId)
       // If this profile exists in the map, add the RANK tx and update stats
       if (profile) {
@@ -1073,6 +977,7 @@ export default class Indexer extends EventEmitter {
             platform,
             id: postId,
             profileId,
+            hash: postHash,
             ranks: [partialRank],
             ranking,
             votesPositive,
