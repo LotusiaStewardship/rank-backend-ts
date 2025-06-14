@@ -100,6 +100,7 @@ type Endpoint =
   | 'wallet'
   | 'charts'
   | 'search'
+  | 'txs'
 type EndpointHandler = (req: Request, res: Response) => void
 type EndpointParameter =
   | 'platform'
@@ -213,6 +214,7 @@ export default class API extends EventEmitter {
       '/:platform/:profileId/:postId/:scriptPayload',
       this.get.post,
     )
+    this.router.get('/txs/:platform/:profileId/:page?/:pageSize?', this.get.txs)
     this.router.get('/:platform/:profileId/:postId', this.get.post)
     this.router.get('/:platform/:profileId', this.get.profile)
     // Router POST endpoint configuration (DEEPEST ROUTES FIRST!)
@@ -891,6 +893,47 @@ export default class API extends EventEmitter {
         return this.sendJSON(
           res,
           { error: 'stats not found', params: req.params },
+          HTTP.NOT_FOUND,
+        )
+      }
+    },
+    /**
+     *
+     * @param req
+     * @param res
+     * @returns
+     */
+    txs: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      const { platform, profileId } = req.params
+      const page = Number(req.params.page)
+      const pageSize = Number(req.params.pageSize)
+      try {
+        const result = await this.db.apiGetPlatformProfileRankTransactions(
+          platform as ScriptChunkPlatformUTF8,
+          profileId,
+          page,
+          pageSize,
+        )
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.txs'],
+          ...this.toLogEntries(req.params),
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(res, result, HTTP.OK)
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'get.txs'],
+          ...this.toLogEntries(req.params),
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(
+          res,
+          { error: 'txs not found', params: req.params },
           HTTP.NOT_FOUND,
         )
       }

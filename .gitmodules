@@ -3,7 +3,7 @@
 	url = https://github.com/zboszor/node-nanomsg.git
 [submodule "rank-lib"]
 	path = submodules/rank-lib
-	url = https://github.com/LotusiaStewardship/rank-lib.git
+	url = git@github.com:LotusiaStewardship/rank-lib.git
 	branch = master
 [submodule "submodules/bitcore-lib-xpi"]
 	path = submodules/bitcore-lib-xpi

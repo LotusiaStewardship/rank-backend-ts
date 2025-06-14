@@ -497,6 +497,83 @@ export default class Database {
     })
   }
   /**
+   * Retrieves `RankTransaction`s for a specific `platform` and `profileId`
+   * @param platform The platform identifier (ScriptChunkPlatformUTF8)
+   * @param profileId The unique identifier of the profile
+   * @param page The page number to retrieve
+   * @param pageSize The number of transactions per page
+   * @returns Array of `RankTransaction`s
+   */
+  async apiGetPlatformProfileRankTransactions(
+    platform: ScriptChunkPlatformUTF8,
+    profileId: string,
+    page?: number,
+    pageSize?: number,
+  ) {
+    // Make sure parameters are set
+    if (!page) {
+      page = 1
+    }
+    if (!pageSize) {
+      pageSize = 10
+    }
+    if (page < 1) {
+      page = 1
+    }
+    if (pageSize > 40) {
+      pageSize = 40
+    }
+    try {
+      return await this.db.$transaction(async tx => {
+        const totalRanks = await tx.rankTransaction.count({
+          where: {
+            platform,
+            profileId,
+          },
+        })
+        const ranks = await tx.rankTransaction.findMany({
+          where: {
+            platform,
+            profileId,
+          },
+          orderBy: {
+            timestamp: 'desc',
+          },
+          // convert page to 0-based index
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+          select: {
+            txid: true,
+            sentiment: true,
+            timestamp: true,
+            sats: true,
+            post: {
+              select: {
+                id: true,
+                ranking: true,
+              },
+            },
+          },
+        })
+        return {
+          votes: ranks.map(tx => ({
+            ...tx,
+            timestamp: tx.timestamp.toString(),
+            sats: tx.sats.toString(),
+            post: {
+              ...tx.post,
+              ranking: tx.post.ranking.toString(),
+            },
+          })),
+          numPages: Math.ceil(totalRanks / pageSize),
+        }
+      })
+    } catch (e) {
+      console.warn(e)
+      return { votes: [], numPages: 0 }
+    }
+  }
+  /**
    * Retrieves ranked statistics for a specific platform
    * @param dataType - The type of data to rank ('profileId' or 'postId')
    * @param rankingType - The ranking order ('top' or 'lowest')
