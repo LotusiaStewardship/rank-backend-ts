@@ -531,8 +531,9 @@ export default class Indexer extends EventEmitter {
       }
       const rank = {
         txid: tx.txid,
+        firstSeen: BigInt(Date.now()),
         scriptPayload,
-        timestamp: mempooltx.time(),
+        timestamp: undefined,
         sats: BigInt(tx.outputs[0].satoshis),
         ...output,
       } as RankTransaction
@@ -818,11 +819,13 @@ export default class Indexer extends EventEmitter {
           }
           ranks.push({
             txid: tx.txid,
+            firstSeen: block
+              ? undefined
+              : BigInt(Math.round(Date.now() / 1000)),
             scriptPayload,
             height: block?.height, // undefined if mempool tx
             sats: BigInt(tx.outputs[0].satoshis),
-            timestamp:
-              block?.timestamp ?? BigInt(Math.round(Date.now() / 1000)),
+            timestamp: block?.timestamp, // undefined until block is connected
             ...output,
           })
         }
@@ -929,16 +932,20 @@ export default class Indexer extends EventEmitter {
     for (const rank of ranks) {
       // Determine positive/negative stats per RANK sentiment
       let ranking = 0n
+      let satsPositive = 0n
+      let satsNegative = 0n
       let votesPositive = 0
       let votesNegative = 0
       // Do a switch here in case sentiment is more than binary in the future
       switch (rank.sentiment) {
         case 'positive':
           ranking += rank.sats
+          satsPositive += rank.sats
           votesPositive++
           break
         case 'negative':
           ranking -= rank.sats
+          satsNegative += rank.sats
           votesNegative++
           break
       }
@@ -948,6 +955,8 @@ export default class Indexer extends EventEmitter {
       // If this profile exists in the map, add the RANK tx and update stats
       if (profile) {
         profile.ranking += ranking
+        profile.satsPositive += satsPositive
+        profile.satsNegative += satsNegative
         profile.votesPositive += votesPositive
         profile.votesNegative += votesNegative
         profile.ranks.push(partialRank)
@@ -959,6 +968,8 @@ export default class Indexer extends EventEmitter {
           platform,
           ranks: [partialRank],
           ranking,
+          satsPositive,
+          satsNegative,
           votesPositive,
           votesNegative,
           posts: new Map(),
@@ -969,6 +980,8 @@ export default class Indexer extends EventEmitter {
         const post = profile.posts.get(postId)
         if (post) {
           post.ranking += ranking
+          post.satsPositive += satsPositive
+          post.satsNegative += satsNegative
           post.votesPositive += votesPositive
           post.votesNegative += votesNegative
           post.ranks.push(partialRank)
@@ -980,6 +993,8 @@ export default class Indexer extends EventEmitter {
             hash: postHash,
             ranks: [partialRank],
             ranking,
+            satsPositive,
+            satsNegative,
             votesPositive,
             votesNegative,
           })
