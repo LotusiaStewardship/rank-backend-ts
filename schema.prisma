@@ -88,6 +88,7 @@ model RankTransaction {
   instance      ExtensionInstance? @relation(fields: [instanceId, scriptPayload], references: [id, scriptPayload])
 
   // Poll RANK txs for raw SQL queries
+  @@index([platform(type: hash), profileId(type: hash)])
   @@index([platform(type: hash), profileId(type: hash), sentiment(type: hash)])
   @@index([platform(type: hash), profileId(type: hash), postId(type: hash), sentiment(type: hash)])
   // Poll RANK txs by height (primarily for block rewinds)
