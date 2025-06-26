@@ -28,6 +28,8 @@ model Profile {
   accountId     String
   platform      String // e.g. Twitter/X.com
   ranking       BigInt // overall ranking, in satoshis
+  satsPositive  BigInt // Total amount of sats burned for positive sentiment
+  satsNegative  BigInt // Total amount of sats burned for negative sentiment
   votesPositive Int // Total number of RANK txs with positive sentinment
   votesNegative Int // Total number of RANK txs with negative sentiment
   ranks         RankTransaction[]
@@ -47,6 +49,8 @@ model Post {
   platform      String // e.g. Twitter/x.com
   profileId     String // Platform profile ID (i.e. username)
   ranking       BigInt // Overall post ranking, in satoshis
+  satsPositive  BigInt // Total amount of sats burned for positive sentiment
+  satsNegative  BigInt // Total amount of sats burned for negative sentiment
   votesPositive Int // Total number of RANK txs with positive sentiment
   votesNegative Int // Total number of RANK txs with negative sentiment
   // sha256 hash of the post content
@@ -69,10 +73,11 @@ model Post {
 model RankTransaction {
   // RankTransaction data
   txid          String             @id // 32-byte hex
+  firstSeen     BigInt? // Time first seen by indexer, only for new mempool transactions
   scriptPayload String // the p2pkh script payload that spent a UTXO for this transaction
   instanceId    String? // the ID of the extension instance that casted the vote
   height        Int? // null for mempool transactions
-  timestamp     BigInt // Block timestamp or indexer first-seen time
+  timestamp     BigInt? // null until block is connected
   // RankOutput data
   platform      String // references platform field on Profile model
   profileId     String // references id field on Profile model

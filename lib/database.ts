@@ -19,6 +19,11 @@ import type {
   IndexedRanking,
 } from 'rank-lib'
 
+type RequestPost = {
+  profileId: string
+  postId: string
+}
+
 type RankStatistics = Pick<
   RankTarget,
   'ranking' | 'votesPositive' | 'votesNegative'
@@ -205,7 +210,7 @@ export default class Database {
             totalVotes: _count,
             totalSats: _sum.sats.toString(),
             lastSeen: new Date(Number(_max.timestamp * 1_000n)).toISOString(),
-            firstSeen: new Date(Number(_min.timestamp * 1_000n)).toISOString(),
+            firstSeen: new Date(Number(_min.timestamp)).toISOString(),
           }) as ScriptPayloadActivitySummary,
       )
     } catch (e) {
@@ -336,6 +341,8 @@ export default class Database {
           platform: profile.platform,
           profileId: profile.id,
           ranking: profile.ranking.toString(),
+          satsPositive: profile.satsPositive.toString(),
+          satsNegative: profile.satsNegative.toString(),
           votesPositive: profile.votesPositive,
           votesNegative: profile.votesNegative,
         }
@@ -358,6 +365,8 @@ export default class Database {
       platform,
       profileId,
       ranking: '0',
+      satsPositive: '0',
+      satsNegative: '0',
       votesPositive: 0,
       votesNegative: 0,
       uniqueVoters: 0,
@@ -377,6 +386,8 @@ export default class Database {
         )
         // Add indexed post data to return data
         data.ranking = profile.ranking.toString()
+        data.satsPositive = profile.satsPositive.toString()
+        data.satsNegative = profile.satsNegative.toString()
         data.votesPositive = profile.votesPositive
         data.votesNegative = profile.votesNegative
         data.uniqueVoters = Object.keys(voterDetails).length ?? 0
@@ -408,12 +419,16 @@ export default class Database {
       profileId,
       profile: {
         ranking: '0',
+        satsPositive: '0',
+        satsNegative: '0',
         votesPositive: 0,
         votesNegative: 0,
       },
       postId,
       postMeta: null,
       ranking: '0',
+      satsPositive: '0',
+      satsNegative: '0',
       votesPositive: 0,
       votesNegative: 0,
     }
@@ -427,6 +442,8 @@ export default class Database {
             profile: {
               select: {
                 ranking: true,
+                satsPositive: true,
+                satsNegative: true,
                 votesPositive: true,
                 votesNegative: true,
               },
@@ -444,6 +461,8 @@ export default class Database {
         })
         // Add indexed post data to return data
         data.ranking = post.ranking.toString()
+        data.satsPositive = post.satsPositive.toString()
+        data.satsNegative = post.satsNegative.toString()
         data.votesPositive = post.votesPositive
         data.votesNegative = post.votesNegative
         // set up post metadata
@@ -470,6 +489,8 @@ export default class Database {
         }
         data.profile = {
           ranking: post.profile.ranking.toString(),
+          satsPositive: post.profile.satsPositive.toString(),
+          satsNegative: post.profile.satsNegative.toString(),
           votesPositive: post.profile.votesPositive,
           votesNegative: post.profile.votesNegative,
         }
@@ -481,12 +502,16 @@ export default class Database {
           },
           select: {
             ranking: true,
+            satsPositive: true,
+            satsNegative: true,
             votesPositive: true,
             votesNegative: true,
           },
         })
         data.profile = {
           ranking: profile.ranking.toString(),
+          satsPositive: profile.satsPositive.toString(),
+          satsNegative: profile.satsNegative.toString(),
           votesPositive: profile.votesPositive,
           votesNegative: profile.votesNegative,
         }
@@ -495,6 +520,100 @@ export default class Database {
         return data
       }
     })
+  }
+  /**
+   * Retrieves posts for a platform
+   * @param platform The platform identifier (ScriptChunkPlatformUTF8)
+   * @param postRequests An array of post requests, containing objects with `profileId` and `postId` properties
+   * @returns An array of posts
+   */
+  async apiGetPlatformPosts(
+    platform: ScriptChunkPlatformUTF8,
+    postRequests: RequestPost[],
+  ) {
+    const data = {
+      platform,
+      posts: [],
+    }
+    try {
+      const posts = await this.db.post.findMany({
+        where: {
+          platform,
+          OR: [
+            ...postRequests.map(post => ({
+              id: post.postId,
+              profileId: post.profileId,
+            })),
+          ],
+        },
+      })
+      data.posts = posts.map(post => ({
+        ...post,
+        ranking: post.ranking.toString(),
+        satsPositive: post.satsPositive.toString(),
+        satsNegative: post.satsNegative.toString(),
+      }))
+    } catch (e) {
+      console.warn(e)
+    } finally {
+      return data
+    }
+  }
+  /**
+   * Retrieves profiles from the database
+   * @param page The page number to retrieve
+   * @param pageSize The number of profiles per page
+   * @returns An object containing the profiles and the number of pages
+   */
+  async apiGetProfiles(page: number, pageSize: number) {
+    if (!page) {
+      page = 1
+    }
+    if (!pageSize) {
+      pageSize = 10
+    }
+    if (page < 1) {
+      page = 1
+    }
+    if (pageSize > 40) {
+      pageSize = 40
+    }
+    try {
+      return await this.db.$transaction(async tx => {
+        const totalProfiles = await tx.profile.count()
+        const profiles = await tx.profile.findMany({
+          orderBy: {
+            ranking: 'desc',
+          },
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+          select: {
+            id: true,
+            platform: true,
+            ranking: true,
+            satsPositive: true,
+            satsNegative: true,
+            votesPositive: true,
+            votesNegative: true,
+          },
+        })
+        return {
+          profiles: profiles.map(profile => ({
+            id: profile.id,
+            platform: profile.platform,
+            ranking: profile.ranking.toString(),
+            satsPositive: profile.satsPositive.toString(),
+            satsNegative: profile.satsNegative.toString(),
+            votesPositive: profile.votesPositive,
+            votesNegative: profile.votesNegative,
+          })),
+          numPages: Math.ceil(totalProfiles / pageSize),
+        }
+      })
+    } catch (e) {
+      console.warn(e)
+      return { profiles: [], numPages: 0 }
+    }
   }
   /**
    * Retrieves `RankTransaction`s for a specific `platform` and `profileId`
@@ -574,6 +693,138 @@ export default class Database {
     }
   }
   /**
+   * Retrieves posts for a platform profile
+   * @param platform The platform identifier (ScriptChunkPlatformUTF8)
+   * @param profileId The unique identifier of the profile
+   * @param page The page number to retrieve
+   * @param pageSize The number of posts per page
+   * @returns An array of posts, sorted by ranking in descending order
+   */
+  async apiGetPlatformProfilePosts(
+    platform: ScriptChunkPlatformUTF8,
+    profileId: string,
+    page?: number,
+    pageSize?: number,
+  ) {
+    if (!page) {
+      page = 1
+    }
+    if (!pageSize) {
+      pageSize = 10
+    }
+    if (page < 1) {
+      page = 1
+    }
+    if (pageSize > 40) {
+      pageSize = 40
+    }
+    try {
+      const totalPosts = await this.db.post.count({
+        where: {
+          platform,
+          profileId,
+        },
+      })
+      const posts = await this.db.post.findMany({
+        where: {
+          platform,
+          profileId,
+        },
+        orderBy: {
+          ranking: 'desc',
+        },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          ranking: true,
+          satsPositive: true,
+          satsNegative: true,
+          votesPositive: true,
+          votesNegative: true,
+        },
+      })
+      return {
+        posts: posts.map(post => ({
+          ...post,
+          ranking: post.ranking.toString(),
+          satsPositive: post.satsPositive.toString(),
+          satsNegative: post.satsNegative.toString(),
+        })),
+        numPages: Math.ceil(totalPosts / pageSize),
+      }
+    } catch (e) {
+      console.warn(e)
+      return { posts: [], numPages: 0 }
+    }
+  }
+  /**
+   * Retrieves vote activity
+   * @param page The page number to retrieve
+   * @param pageSize The number of votes per page
+   * @returns An object containing the votes and the number of pages
+   */
+  async apiGetVoteActivity(page: number, pageSize: number) {
+    if (!page) {
+      page = 1
+    }
+    if (!pageSize) {
+      pageSize = 10
+    }
+    if (page < 1) {
+      page = 1
+    }
+    if (pageSize > 40) {
+      pageSize = 40
+    }
+    try {
+      return await this.db.$transaction(async tx => {
+        const totalVotes = await tx.rankTransaction.count()
+        const votes = await tx.rankTransaction.findMany({
+          orderBy: [
+            // need to sort by timestamp first
+            {
+              timestamp: 'desc',
+            },
+            // then sort by txid to ensure consistent ordering
+            {
+              txid: 'asc',
+            },
+            // finally, sort by firstSeen if available
+            {
+              firstSeen: 'desc',
+            },
+          ],
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+          select: {
+            platform: true,
+            profileId: true,
+            postId: true,
+            scriptPayload: true,
+            txid: true,
+            firstSeen: true,
+            sentiment: true,
+            timestamp: true,
+            sats: true,
+          },
+        })
+        return {
+          votes: votes.map(vote => ({
+            ...vote,
+            firstSeen: (vote.firstSeen / 1_000n)?.toString(),
+            timestamp: vote.timestamp?.toString(),
+            sats: vote.sats.toString(),
+          })),
+          numPages: Math.ceil(totalVotes / pageSize),
+        }
+      })
+    } catch (e) {
+      console.warn(e)
+      return { votes: [], numPages: 0 }
+    }
+  }
+  /**
    * Retrieves ranked statistics for a specific platform
    * @param dataType - The type of data to rank ('profileId' or 'postId')
    * @param rankingType - The ranking order ('top' or 'lowest')
@@ -623,7 +874,7 @@ export default class Database {
     const groupBy: [typeof dataType, 'sentiment'] = [dataType, 'sentiment']
     // Get the timestamp according to the specified Timespan
     try {
-      const ranksByProfileIdSentiment = await this.db.rankTransaction.groupBy({
+      const ranksBySentiment = await this.db.rankTransaction.groupBy({
         by: groupBy,
         where: {
           timestamp: {
@@ -648,7 +899,7 @@ export default class Database {
           votesNegative: number
         }
       > = new Map()
-      ranksByProfileIdSentiment.forEach(rank => {
+      ranksBySentiment.forEach(rank => {
         const { _count, _sum, sentiment } = rank
         if (!dataChanges.has(rank[dataType])) {
           dataChanges.set(rank[dataType], {
@@ -746,12 +997,12 @@ export default class Database {
                 platform: item.platform,
                 ...ids,
                 total: {
-                  ranking: String(item.ranking),
+                  ranking: item.ranking.toString(),
                   votesPositive: item.votesPositive,
                   votesNegative: item.votesNegative,
                 },
                 changed: {
-                  ranking: String(changes.ranking),
+                  ranking: changes.ranking.toString(),
                   rate: rankingChangePercentage.toLocaleString(undefined, {
                     minimumFractionDigits: 1,
                     maximumFractionDigits: 1,
@@ -763,6 +1014,16 @@ export default class Database {
               }
             },
           )
+          .filter(item => {
+            switch (rankingType) {
+              case 'top': {
+                return BigInt(item.changed.ranking) > 0n
+              }
+              case 'lowest': {
+                return BigInt(item.changed.ranking) < 0n
+              }
+            }
+          })
       )
     } catch (e) {
       throw new Error(`db.getStatsPlatformRanked: ${e.message}`)
@@ -918,7 +1179,15 @@ export default class Database {
       typeof this.db.post.upsert | typeof this.db.profile.upsert
     >[] = []
     for await (const [id, profile] of this.iterateProfiles(profiles)) {
-      const { platform, ranks, ranking, votesPositive, votesNegative } = profile
+      const {
+        platform,
+        ranks,
+        ranking,
+        satsPositive,
+        satsNegative,
+        votesPositive,
+        votesNegative,
+      } = profile
       // push profile upsert first
       upserts.push(
         this.db.profile.upsert({
@@ -930,6 +1199,8 @@ export default class Database {
             id,
             platform,
             ranking,
+            satsPositive,
+            satsNegative,
             votesPositive,
             votesNegative,
             account: { create: { id: randomUUID() } },
@@ -944,6 +1215,12 @@ export default class Database {
             },
             ranking: {
               increment: ranking,
+            },
+            satsPositive: {
+              increment: satsPositive,
+            },
+            satsNegative: {
+              increment: satsNegative,
             },
             votesPositive: {
               increment: votesPositive,
@@ -963,12 +1240,20 @@ export default class Database {
             hash,
             ranks,
             ranking,
+            satsPositive,
+            satsNegative,
             votesPositive,
             votesNegative,
           } = post
           const increments = {
             ranking: {
               increment: ranking,
+            },
+            satsPositive: {
+              increment: satsPositive,
+            },
+            satsNegative: {
+              increment: satsNegative,
             },
             votesPositive: {
               increment: votesPositive,
@@ -993,6 +1278,8 @@ export default class Database {
                 platform,
                 profileId,
                 ranking,
+                satsPositive,
+                satsNegative,
                 votesPositive,
                 votesNegative,
                 hash,
@@ -1024,7 +1311,15 @@ export default class Database {
       typeof this.db.post.update | typeof this.db.profile.update
     >[] = []
     for await (const [id, profile] of this.iterateProfiles(profiles)) {
-      const { platform, ranks, ranking, votesPositive, votesNegative } = profile
+      const {
+        platform,
+        ranks,
+        ranking,
+        satsPositive,
+        satsNegative,
+        votesPositive,
+        votesNegative,
+      } = profile
       // push profile rewind first
       rewinds.push(
         this.db.profile.update({
@@ -1041,6 +1336,12 @@ export default class Database {
             },
             ranking: {
               decrement: ranking,
+            },
+            satsPositive: {
+              decrement: satsPositive,
+            },
+            satsNegative: {
+              decrement: satsNegative,
             },
             votesPositive: {
               decrement: votesPositive,
@@ -1059,12 +1360,20 @@ export default class Database {
             profileId,
             ranks,
             ranking,
+            satsPositive,
+            satsNegative,
             votesPositive,
             votesNegative,
           } = post
           const decrements = {
             ranking: {
               decrement: ranking,
+            },
+            satsPositive: {
+              decrement: satsPositive,
+            },
+            satsNegative: {
+              decrement: satsNegative,
             },
             votesPositive: {
               decrement: votesPositive,

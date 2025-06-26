@@ -93,14 +93,18 @@ type AuthCacheEntry = {
 /** Runtime cache of authenticated instances, where string is the instanceId*/
 type AuthCache = Map<string, AuthCacheEntry>
 type Endpoint =
+  | 'profiles'
   | 'profile'
   | 'post'
+  | 'posts'
+  | 'profilePosts'
   | 'stats'
   | 'instance'
   | 'wallet'
   | 'charts'
   | 'search'
   | 'txs'
+  | 'voteActivity'
 type EndpointHandler = (req: Request, res: Response) => void
 type EndpointParameter =
   | 'platform'
@@ -109,6 +113,7 @@ type EndpointParameter =
   | 'scriptPayload'
   | 'statsRoute'
   | 'pageNum'
+  | 'pageSize'
   | 'instanceId'
   | 'chartType'
   | 'dataType'
@@ -214,12 +219,20 @@ export default class API extends EventEmitter {
       '/:platform/:profileId/:postId/:scriptPayload',
       this.get.post,
     )
+    this.router.get('/votes/:page?/:pageSize?', this.get.voteActivity)
     this.router.get('/txs/:platform/:profileId/:page?/:pageSize?', this.get.txs)
+    this.router.get('/profiles/:page?/:pageSize?', this.get.profiles)
+    this.router.get(
+      '/:platform/:profileId/posts/:page?/:pageSize?',
+      this.get.profilePosts,
+    )
     this.router.get('/:platform/:profileId/:postId', this.get.post)
     this.router.get('/:platform/:profileId', this.get.profile)
     // Router POST endpoint configuration (DEEPEST ROUTES FIRST!)
     // TODO: implement referral codes rather than mining instanceId
     //this.router.post('/instance/register', this.post.instance)
+    // Get posts for a platform, up to 50 maximum per request
+    this.router.post('/posts/:platform/:scriptPayload', this.post.posts)
     // App/Server setup
     this.app = express()
     this.app.use(json())
@@ -652,6 +665,34 @@ export default class API extends EventEmitter {
      * @param req
      * @param res
      * @param next
+     * @param pageSize
+     */
+    pageSize: async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+      pageSize: string | undefined,
+    ) => {
+      const pageSizeNum = Number(pageSize)
+      if (isNaN(pageSizeNum) || pageSizeNum < 1) {
+        return this.sendJSON(
+          res,
+          { error: `invalid page size specified` },
+          HTTP.BAD_REQUEST,
+        )
+      }
+      // enforce max page size
+      if (pageSizeNum > 40) {
+        pageSize = '40'
+      }
+      req.params.pageSize = pageSize
+      next()
+    },
+    /**
+     *
+     * @param req
+     * @param res
+     * @param next
      * @param instanceId
      */
     instanceId: async (
@@ -672,6 +713,41 @@ export default class API extends EventEmitter {
    * GET Method Handlers
    */
   private get: { [name in Endpoint]?: EndpointHandler } = {
+    /**
+     *
+     * @param req
+     * @param res
+     * @returns
+     */
+    profiles: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      const page = Number(req.params.page)
+      const pageSize = Number(req.params.pageSize)
+      try {
+        const result = await this.db.apiGetProfiles(page, pageSize)
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.profiles'],
+          ...this.toLogEntries(req.params),
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(res, result, HTTP.OK)
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'get.profiles'],
+          ...this.toLogEntries(req.params),
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(
+          res,
+          { error: 'profiles not found', params: req.params },
+          HTTP.NOT_FOUND,
+        )
+      }
+    },
     /**
      *
      * @param req
@@ -708,6 +784,47 @@ export default class API extends EventEmitter {
         return this.sendJSON(
           res,
           { error: 'profile not found', params: req.params },
+          HTTP.NOT_FOUND,
+        )
+      }
+    },
+    /**
+     * Retrieves posts for a platform profile
+     * @param req Express Request object containing `platform` and `profileId` parameters
+     * @param res Express Response object to send back posts data
+     * @returns JSON response with posts data or error message
+     */
+    profilePosts: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      const { platform, profileId } = req.params
+      const page = Number(req.params.page)
+      const pageSize = Number(req.params.pageSize)
+      try {
+        const result = await this.db.apiGetPlatformProfilePosts(
+          platform as ScriptChunkPlatformUTF8,
+          profileId,
+          page,
+          pageSize,
+        )
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.profilePosts'],
+          ...this.toLogEntries(req.params),
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(res, result, HTTP.OK)
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'get.profilePosts'],
+          ...this.toLogEntries(req.params),
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(
+          res,
+          { error: 'profile posts not found', params: req.params },
           HTTP.NOT_FOUND,
         )
       }
@@ -1026,11 +1143,96 @@ export default class API extends EventEmitter {
         return this.sendJSON(res, { error: e.message }, HTTP.BAD_REQUEST)
       }
     },
+    /**
+     * Handles vote activity requests by retrieving vote activity data
+     * @param req Express Request object containing `page` and `pageSize` parameters
+     * @param res Express Response object to send back vote activity data
+     */
+    voteActivity: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      const page = Number(req.params.page)
+      const pageSize = Number(req.params.pageSize)
+      try {
+        const result = await this.db.apiGetVoteActivity(page, pageSize)
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.voteActivity'],
+          ...this.toLogEntries(req.params),
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(res, result, HTTP.OK)
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'get.voteActivity'],
+          ...this.toLogEntries(req.params),
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(
+          res,
+          { error: 'vote activity not found', params: req.params },
+          HTTP.NOT_FOUND,
+        )
+      }
+    },
   }
   /**
    * POST Method Handlers
    */
   private post: { [name in Endpoint]?: EndpointHandler } = {
+    /**
+     * Retrieves posts for a platform
+     * @param req Express Request object containing `platform` and `scriptPayload` parameters
+     * @param res Express Response object to send back posts data
+     */
+    posts: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      if (req.headers['content-type'] !== 'application/json') {
+        return this.sendJSON(
+          res,
+          { error: 'invalid content type' },
+          HTTP.BAD_REQUEST,
+        )
+      }
+      const { platform, scriptPayload } = req.params
+      // if we don't have the scriptPayload, it was not validated
+      if (!scriptPayload) {
+        return this.sendJSON(
+          res,
+          { error: 'scriptPayload invalid or not specified' },
+          HTTP.BAD_REQUEST,
+        )
+      }
+      const body = Array.from(req.body) as Array<{
+        profileId: string
+        postId: string
+      }>
+      try {
+        const result = await this.db.apiGetPlatformPosts(
+          platform as ScriptChunkPlatformUTF8,
+          body,
+        )
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'post.posts'],
+          ...this.toLogEntries(req.params),
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(res, result, HTTP.OK)
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'post.posts'],
+          ...this.toLogEntries(req.params),
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return this.sendJSON(res, { error: e.message }, HTTP.BAD_REQUEST)
+      }
+    },
     /**
      *
      * @param req
