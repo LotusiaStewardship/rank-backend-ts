@@ -781,20 +781,9 @@ export default class Database {
       return await this.db.$transaction(async tx => {
         const totalVotes = await tx.rankTransaction.count()
         const votes = await tx.rankTransaction.findMany({
-          orderBy: [
-            // need to sort by timestamp first
-            {
-              timestamp: 'desc',
-            },
-            // then sort by txid to ensure consistent ordering
-            {
-              txid: 'asc',
-            },
-            // finally, sort by firstSeen if available
-            {
-              firstSeen: 'desc',
-            },
-          ],
+          orderBy: {
+            firstSeen: 'desc',
+          },
           skip: (page - 1) * pageSize,
           take: pageSize,
           select: {
