@@ -782,17 +782,14 @@ export default class Database {
         const totalVotes = await tx.rankTransaction.count()
         const votes = await tx.rankTransaction.findMany({
           orderBy: [
-            // need to sort by timestamp first
             {
               timestamp: 'desc',
             },
-            // then sort by txid to ensure consistent ordering
             {
-              txid: 'asc',
-            },
-            // finally, sort by firstSeen if available
-            {
-              firstSeen: 'desc',
+              firstSeen: {
+                sort: 'desc',
+                nulls: 'last',
+              },
             },
           ],
           skip: (page - 1) * pageSize,
@@ -812,7 +809,7 @@ export default class Database {
         return {
           votes: votes.map(vote => ({
             ...vote,
-            firstSeen: (vote.firstSeen / 1_000n)?.toString(),
+            firstSeen: ((vote.firstSeen ?? 0n) / 1_000n)?.toString(),
             timestamp: vote.timestamp?.toString(),
             sats: vote.sats.toString(),
           })),
