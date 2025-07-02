@@ -788,9 +788,9 @@ export default class Indexer extends EventEmitter {
     }
   }
   /**
-   *
-   * @param data
-   * @returns
+   * Process transactions from a block or mempool to extract RANK transactions
+   * @param data Block or mempool data containing transactions to process
+   * @returns Array of parsed RANK transactions with metadata
    */
   private processBlockOrMempool(
     data: NNG.Block | NNG.GetMempoolResponse,
@@ -798,8 +798,9 @@ export default class Indexer extends EventEmitter {
     const ranks: RankTransaction[] = []
     const txsLength = data.txsLength()
     const block = data instanceof NNG.Block ? this.toBlock(data.header()) : null
+    const startIndex = block ? 1 : 0
     // skip coinbase tx if processing block data
-    for (let i = block ? 1 : 0; i < txsLength; i++) {
+    for (let i = startIndex; i < txsLength; i++) {
       try {
         const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
