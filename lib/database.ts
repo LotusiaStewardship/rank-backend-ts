@@ -1163,6 +1163,12 @@ export default class Database {
     try {
       return await this.db.block.findFirst({
         orderBy: { height: 'desc' },
+        select: {
+          hash: true,
+          height: true,
+          timestamp: true,
+          ranksLength: true,
+        },
       })
     } catch (e) {
       throw new Error(`getCheckpoint: ${e.message}`)
