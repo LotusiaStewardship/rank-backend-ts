@@ -529,6 +529,7 @@ export default class Database {
    */
   async apiGetPlatformPosts(
     platform: ScriptChunkPlatformUTF8,
+    scriptPayload: string,
     postRequests: RequestPost[],
   ) {
     const data = {
@@ -546,12 +547,42 @@ export default class Database {
             })),
           ],
         },
+        include: {
+          profile: {
+            select: {
+              ranking: true,
+              satsPositive: true,
+              satsNegative: true,
+              votesPositive: true,
+              votesNegative: true,
+            },
+          },
+          ranks: !scriptPayload
+            ? undefined
+            : {
+                where: { scriptPayload },
+                select: {
+                  txid: true,
+                  sentiment: true,
+                },
+              },
+        },
       })
       data.posts = posts.map(post => ({
         ...post,
         ranking: post.ranking.toString(),
         satsPositive: post.satsPositive.toString(),
         satsNegative: post.satsNegative.toString(),
+        votesPositive: post.votesPositive,
+        votesNegative: post.votesNegative,
+        postMeta: null,
+        profile: {
+          ranking: post.profile.ranking.toString(),
+          satsPositive: post.profile.satsPositive.toString(),
+          satsNegative: post.profile.satsNegative.toString(),
+          votesPositive: post.profile.votesPositive,
+          votesNegative: post.profile.votesNegative,
+        },
       }))
     } catch (e) {
       console.warn(e)
