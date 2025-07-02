@@ -821,7 +821,7 @@ export default class Indexer extends EventEmitter {
             txid: tx.txid,
             firstSeen: block
               ? undefined
-              : BigInt(Math.round(Date.now() / 1000)),
+              : BigInt(Date.now()),
             scriptPayload,
             height: block?.height, // undefined if mempool tx
             sats: BigInt(tx.outputs[0].satoshis),
