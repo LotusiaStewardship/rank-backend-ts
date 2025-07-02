@@ -719,40 +719,42 @@ export default class Database {
       pageSize = 40
     }
     try {
-      const totalPosts = await this.db.post.count({
-        where: {
-          platform,
-          profileId,
-        },
+      return await this.db.$transaction(async tx => {
+        const totalPosts = await tx.post.count({
+          where: {
+            platform,
+            profileId,
+          },
+        })
+        const posts = await tx.post.findMany({
+          where: {
+            platform,
+            profileId,
+          },
+          orderBy: {
+            ranking: 'desc',
+          },
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+          select: {
+            id: true,
+            ranking: true,
+            satsPositive: true,
+            satsNegative: true,
+            votesPositive: true,
+            votesNegative: true,
+          },
+        })
+        return {
+          posts: posts.map(post => ({
+            ...post,
+            ranking: post.ranking.toString(),
+            satsPositive: post.satsPositive.toString(),
+            satsNegative: post.satsNegative.toString(),
+          })),
+          numPages: Math.ceil(totalPosts / pageSize),
+        }
       })
-      const posts = await this.db.post.findMany({
-        where: {
-          platform,
-          profileId,
-        },
-        orderBy: {
-          ranking: 'desc',
-        },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        select: {
-          id: true,
-          ranking: true,
-          satsPositive: true,
-          satsNegative: true,
-          votesPositive: true,
-          votesNegative: true,
-        },
-      })
-      return {
-        posts: posts.map(post => ({
-          ...post,
-          ranking: post.ranking.toString(),
-          satsPositive: post.satsPositive.toString(),
-          satsNegative: post.satsNegative.toString(),
-        })),
-        numPages: Math.ceil(totalPosts / pageSize),
-      }
     } catch (e) {
       console.warn(e)
       return { posts: [], numPages: 0 }
