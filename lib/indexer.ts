@@ -883,7 +883,7 @@ export default class Indexer extends EventEmitter {
    * @returns {string} Block hash or txid as hex string (little endian)
    */
   private toBlockhashOrTxid(hash: NNG.Hash): string {
-    return Buffer.from(hash.bb.bytes().slice(hash.bb_pos, hash.bb_pos + 32))
+    return Buffer.from(hash.bb.bytes().subarray(hash.bb_pos, hash.bb_pos + 32))
       .reverse() // reverse for little endian
       .toString('hex')
   }
