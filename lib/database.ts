@@ -529,6 +529,7 @@ export default class Database {
    */
   async apiGetPlatformPosts(
     platform: ScriptChunkPlatformUTF8,
+    scriptPayload: string,
     postRequests: RequestPost[],
   ) {
     const data = {
@@ -546,12 +547,42 @@ export default class Database {
             })),
           ],
         },
+        include: {
+          profile: {
+            select: {
+              ranking: true,
+              satsPositive: true,
+              satsNegative: true,
+              votesPositive: true,
+              votesNegative: true,
+            },
+          },
+          ranks: !scriptPayload
+            ? undefined
+            : {
+                where: { scriptPayload },
+                select: {
+                  txid: true,
+                  sentiment: true,
+                },
+              },
+        },
       })
       data.posts = posts.map(post => ({
         ...post,
         ranking: post.ranking.toString(),
         satsPositive: post.satsPositive.toString(),
         satsNegative: post.satsNegative.toString(),
+        votesPositive: post.votesPositive,
+        votesNegative: post.votesNegative,
+        postMeta: null,
+        profile: {
+          ranking: post.profile.ranking.toString(),
+          satsPositive: post.profile.satsPositive.toString(),
+          satsNegative: post.profile.satsNegative.toString(),
+          votesPositive: post.profile.votesPositive,
+          votesNegative: post.profile.votesNegative,
+        },
       }))
     } catch (e) {
       console.warn(e)
@@ -719,40 +750,42 @@ export default class Database {
       pageSize = 40
     }
     try {
-      const totalPosts = await this.db.post.count({
-        where: {
-          platform,
-          profileId,
-        },
+      return await this.db.$transaction(async tx => {
+        const totalPosts = await tx.post.count({
+          where: {
+            platform,
+            profileId,
+          },
+        })
+        const posts = await tx.post.findMany({
+          where: {
+            platform,
+            profileId,
+          },
+          orderBy: {
+            ranking: 'desc',
+          },
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+          select: {
+            id: true,
+            ranking: true,
+            satsPositive: true,
+            satsNegative: true,
+            votesPositive: true,
+            votesNegative: true,
+          },
+        })
+        return {
+          posts: posts.map(post => ({
+            ...post,
+            ranking: post.ranking.toString(),
+            satsPositive: post.satsPositive.toString(),
+            satsNegative: post.satsNegative.toString(),
+          })),
+          numPages: Math.ceil(totalPosts / pageSize),
+        }
       })
-      const posts = await this.db.post.findMany({
-        where: {
-          platform,
-          profileId,
-        },
-        orderBy: {
-          ranking: 'desc',
-        },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        select: {
-          id: true,
-          ranking: true,
-          satsPositive: true,
-          satsNegative: true,
-          votesPositive: true,
-          votesNegative: true,
-        },
-      })
-      return {
-        posts: posts.map(post => ({
-          ...post,
-          ranking: post.ranking.toString(),
-          satsPositive: post.satsPositive.toString(),
-          satsNegative: post.satsNegative.toString(),
-        })),
-        numPages: Math.ceil(totalPosts / pageSize),
-      }
     } catch (e) {
       console.warn(e)
       return { posts: [], numPages: 0 }
@@ -1161,6 +1194,12 @@ export default class Database {
     try {
       return await this.db.block.findFirst({
         orderBy: { height: 'desc' },
+        select: {
+          hash: true,
+          height: true,
+          timestamp: true,
+          ranksLength: true,
+        },
       })
     } catch (e) {
       throw new Error(`getCheckpoint: ${e.message}`)

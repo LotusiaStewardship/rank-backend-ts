@@ -1212,6 +1212,7 @@ export default class API extends EventEmitter {
       try {
         const result = await this.db.apiGetPlatformPosts(
           platform as ScriptChunkPlatformUTF8,
+          scriptPayload,
           body,
         )
         const t1 = (performance.now() - t0).toFixed(3)

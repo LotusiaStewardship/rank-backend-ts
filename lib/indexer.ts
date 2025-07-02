@@ -1,10 +1,10 @@
 import { Transaction } from 'bitcore-lib-xpi'
 import { Builder, ByteBuffer } from 'flatbuffers'
-import { isIP } from 'validator'
+//import { isIP } from 'validator'
 import * as NNG from './nng-interface'
 import { Socket, socket } from 'nanomsg'
-import { resolve } from 'node:path/posix'
-import { Worker } from 'node:worker_threads'
+//import { resolve } from 'node:path/posix'
+//import { Worker } from 'node:worker_threads'
 import { EventEmitter } from 'events'
 import RuntimeState from './state'
 import Database from './database'
@@ -456,27 +456,21 @@ export default class Indexer extends EventEmitter {
     // Prevents clobbering; maintains healthy database state
     this.queue.busy = true
     try {
-      // Process messages in batches with a small delay
-      const messagesToProcess = this.queue.pending.splice(
-        0,
-        NNG_MESSAGE_BATCH_SIZE,
-      )
-
-      for (const [NNGMessageProcessor, ByteBuffer] of messagesToProcess) {
-        await NNGMessageProcessor(ByteBuffer)
-      }
+      const [NNGMessageProcessor, ByteBuffer] = this.queue.pending.shift()
+      await NNGMessageProcessor(ByteBuffer)
     } catch (e) {
+      // Should never get here; shut down if we do
       this.emit('exception', ERR.NNG_PROCESS_MESSAGE, e.message)
       this.queue.busy = false
       return
     }
 
-    // Schedule next batch with a small delay to allow event loop to breathe
+    // Recursively process the next message in the queue
     if (this.queue.pending.length > 0) {
-      setTimeout(() => this.nngProcessMessage(), 10)
-    } else {
-      this.queue.busy = false
+      return this.nngProcessMessage()
     }
+    // queue is now idle
+    this.queue.busy = false
   }
   /**
    * Called when our NNG sub `Socket` receives data published by lotusd
@@ -788,9 +782,9 @@ export default class Indexer extends EventEmitter {
     }
   }
   /**
-   *
-   * @param data
-   * @returns
+   * Process transactions from a block or mempool to extract RANK transactions
+   * @param data Block or mempool data containing transactions to process
+   * @returns Array of parsed RANK transactions with metadata
    */
   private processBlockOrMempool(
     data: NNG.Block | NNG.GetMempoolResponse,
@@ -798,8 +792,9 @@ export default class Indexer extends EventEmitter {
     const ranks: RankTransaction[] = []
     const txsLength = data.txsLength()
     const block = data instanceof NNG.Block ? this.toBlock(data.header()) : null
+    const startIndex = block ? 1 : 0
     // skip coinbase tx if processing block data
-    for (let i = block ? 1 : 0; i < txsLength; i++) {
+    for (let i = startIndex; i < txsLength; i++) {
       try {
         const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
@@ -821,7 +816,7 @@ export default class Indexer extends EventEmitter {
             txid: tx.txid,
             firstSeen: block
               ? undefined
-              : BigInt(Math.round(Date.now() / 1000)),
+              : BigInt(Date.now()),
             scriptPayload,
             height: block?.height, // undefined if mempool tx
             sats: BigInt(tx.outputs[0].satoshis),
@@ -866,15 +861,14 @@ export default class Indexer extends EventEmitter {
    * @returns `scriptPayload` as a hex string or `null` if inputs are invalid
    */
   private getScriptPayload(tx: Transaction): string | null {
+    const scriptPayloadBuffer = tx.inputs[0].script.toAddress().hashBuffer
     if (
       tx.inputs.every(
-        (input, _idx, array) =>
-          array[0].script
-            .toAddress()
-            .hashBuffer.compare(input.script.toAddress().hashBuffer) === 0,
+        (input) =>
+          scriptPayloadBuffer.compare(input.script.toAddress().hashBuffer) === 0,
       )
     ) {
-      return tx.inputs[0].script.toAddress().hashBuffer.toString('hex')
+      return scriptPayloadBuffer.toString('hex')
     }
     return null
   }
@@ -884,7 +878,7 @@ export default class Indexer extends EventEmitter {
    * @returns {string} Block hash or txid as hex string (little endian)
    */
   private toBlockhashOrTxid(hash: NNG.Hash): string {
-    return Buffer.from(hash.bb.bytes().slice(hash.bb_pos, hash.bb_pos + 32))
+    return Buffer.from(hash.bb.bytes().subarray(hash.bb_pos, hash.bb_pos + 32))
       .reverse() // reverse for little endian
       .toString('hex')
   }
