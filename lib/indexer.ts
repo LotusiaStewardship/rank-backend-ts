@@ -456,27 +456,21 @@ export default class Indexer extends EventEmitter {
     // Prevents clobbering; maintains healthy database state
     this.queue.busy = true
     try {
-      // Process messages in batches with a small delay
-      const messagesToProcess = this.queue.pending.splice(
-        0,
-        NNG_MESSAGE_BATCH_SIZE,
-      )
-
-      for (const [NNGMessageProcessor, ByteBuffer] of messagesToProcess) {
-        await NNGMessageProcessor(ByteBuffer)
-      }
+      const [NNGMessageProcessor, ByteBuffer] = this.queue.pending.shift()
+      await NNGMessageProcessor(ByteBuffer)
     } catch (e) {
+      // Should never get here; shut down if we do
       this.emit('exception', ERR.NNG_PROCESS_MESSAGE, e.message)
       this.queue.busy = false
       return
     }
 
-    // Schedule next batch with a small delay to allow event loop to breathe
+    // Recursively process the next message in the queue
     if (this.queue.pending.length > 0) {
-      setTimeout(() => this.nngProcessMessage(), 10)
-    } else {
-      this.queue.busy = false
+      return this.nngProcessMessage()
     }
+    // queue is now idle
+    this.queue.busy = false
   }
   /**
    * Called when our NNG sub `Socket` receives data published by lotusd
