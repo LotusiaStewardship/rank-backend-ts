@@ -866,15 +866,14 @@ export default class Indexer extends EventEmitter {
    * @returns `scriptPayload` as a hex string or `null` if inputs are invalid
    */
   private getScriptPayload(tx: Transaction): string | null {
+    const scriptPayloadBuffer = tx.inputs[0].script.toAddress().hashBuffer
     if (
       tx.inputs.every(
-        (input, _idx, array) =>
-          array[0].script
-            .toAddress()
-            .hashBuffer.compare(input.script.toAddress().hashBuffer) === 0,
+        (input) =>
+          scriptPayloadBuffer.compare(input.script.toAddress().hashBuffer) === 0,
       )
     ) {
-      return tx.inputs[0].script.toAddress().hashBuffer.toString('hex')
+      return scriptPayloadBuffer.toString('hex')
     }
     return null
   }
