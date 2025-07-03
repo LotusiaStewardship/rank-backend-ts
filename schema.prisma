@@ -72,7 +72,8 @@ model Post {
 
 model RankTransaction {
   // RankTransaction data
-  txid          String             @id // 32-byte hex
+  txid          String // 32-byte hex
+  outIdx        Int                @default(0) // index of the output that contains the RANK data
   firstSeen     BigInt? // Time first seen by indexer, only for new mempool transactions
   scriptPayload String // the p2pkh script payload that spent a UTXO for this transaction
   instanceId    String? // the ID of the extension instance that casted the vote
@@ -92,6 +93,7 @@ model RankTransaction {
   block         Block?             @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
   instance      ExtensionInstance? @relation(fields: [instanceId, scriptPayload], references: [id, scriptPayload])
 
+  @@id([txid, outIdx])
   // Poll RANK txs for raw SQL queries
   @@index([platform(type: hash), profileId(type: hash)])
   @@index([platform(type: hash), profileId(type: hash), sentiment(type: hash)])
