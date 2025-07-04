@@ -854,7 +854,7 @@ export default class Indexer extends EventEmitter {
       ranks.push({
         txid: tx.txid,
         outIdx: 0,
-        firstSeen: block ? undefined : BigInt(Date.now()),
+        firstSeen: BigInt(Date.now()),
         scriptPayload,
         height: block?.height, // undefined if mempool tx
         sats: BigInt(firstOutput.satoshis),
@@ -874,7 +874,7 @@ export default class Indexer extends EventEmitter {
         ranks.push({
           txid: tx.txid,
           outIdx: i,
-          firstSeen: block ? undefined : BigInt(Date.now()),
+          firstSeen: BigInt(Date.now()),
           scriptPayload,
           height: block?.height, // undefined if mempool tx
           sats: BigInt(output.satoshis),
