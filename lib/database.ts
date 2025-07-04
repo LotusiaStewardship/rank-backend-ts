@@ -1141,7 +1141,7 @@ export default class Database {
    */
   async saveBlock(
     block: Block,
-    rankTxids: Pick<RankTransaction, 'txid'>[],
+    rankTxids: { txid_outIdx: Pick<RankTransaction, 'txid' | 'outIdx'> }[],
     profiles: Map<string, Profile>,
   ) {
     try {
@@ -1320,13 +1320,23 @@ export default class Database {
                 votesNegative,
                 hash,
                 ranks: {
-                  connect: ranks,
+                  connect: ranks.map(rank => ({
+                    txid_outIdx: {
+                      txid: rank.txid,
+                      outIdx: rank.outIdx,
+                    },
+                  })),
                 },
               },
               // post exists
               update: {
                 ranks: {
-                  connect: ranks,
+                  connect: ranks.map(rank => ({
+                    txid_outIdx: {
+                      txid: rank.txid,
+                      outIdx: rank.outIdx,
+                    },
+                  })),
                 },
                 ...increments,
               },
