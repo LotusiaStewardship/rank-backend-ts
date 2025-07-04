@@ -199,7 +199,9 @@ export default class Indexer extends EventEmitter {
     try {
       const ranks = await this.initSyncMempool()
       // Initialize the mempool queue with these RANK txs
-      ranks.forEach(rank => this.mempool.set(rank.txid, rank))
+      ranks.forEach(rank =>
+        this.mempool.set(`${rank.txid}_${rank.outIdx}`, rank),
+      )
     } catch (e) {
       throw [ERR.IDX_MEMPOOL_SYNC, e.message]
     }
@@ -516,29 +518,26 @@ export default class Indexer extends EventEmitter {
       ).mempoolTx()
     const rawArray = mempooltx.tx().rawArray()
     const tx = new Transaction(Buffer.from(rawArray))
-    const output = this.toRankOutput(tx.outputs[0])
-    if (output) {
-      // silently ignore RANK txs that send change to a different address
-      const scriptPayload = this.getScriptPayload(tx)
-      if (!scriptPayload) {
-        return
-      }
-      const rank = {
-        txid: tx.txid,
-        firstSeen: BigInt(Date.now()),
-        scriptPayload,
-        timestamp: undefined,
-        sats: BigInt(tx.outputs[0].satoshis),
-        ...output,
-      } as RankTransaction
-      const profiles = this.toProfileMap([rank])
+
+    // Process the transaction using the processTransaction function
+    // block is null for mempool transactions
+    const ranks = this.processTransaction(tx, null)
+
+    if (ranks.length > 0) {
+      // Add RANK transactions to mempool cache for reconciliation
+      ranks.forEach(rank => {
+        this.mempool.set(`${rank.txid}_${rank.outIdx}`, rank)
+      })
+
+      // Upsert profiles to database
+      const profiles = this.toProfileMap(ranks)
       await this.db.upsertProfiles(profiles)
+
       const t1 = (performance.now() - t0).toFixed(3)
-      // Keep this RANK tx to reconcile with next block
-      this.mempool.set(tx.txid, rank)
       log([
         ['nng', 'mempooltxadd'],
-        ...this.toLogEntries(rank),
+        ['txid', tx.txid],
+        ['ranksLength', `${ranks.length}`],
         ['action', 'upsertProfiles'],
         ['elapsed', `${t1}ms`],
       ])
@@ -558,20 +557,34 @@ export default class Indexer extends EventEmitter {
         bb,
       )
     const txid = this.toBlockhashOrTxid(tx.txid().hash())
-    // Get the RANK tx from in-memory mempool cache
-    const rank = this.mempool.get(txid)
+
+    // Find all RANK txs from in-memory mempool cache for this transaction
+    const ranks: RankTransaction[] = []
+    const keysToDelete: string[] = []
+
+    // Iterate through mempool cache to find all entries for this txid
+    for (const [key, rank] of this.mempool.entries()) {
+      if (key.startsWith(`${txid}_`)) {
+        ranks.push(rank)
+        keysToDelete.push(key)
+      }
+    }
+
     // Make sure our in-memory cache had the conflicting tx
-    if (rank) {
-      // Rewind the associated profile
-      const profiles = this.toProfileMap([rank])
+    if (ranks.length > 0) {
+      // Rewind the associated profiles
+      const profiles = this.toProfileMap(ranks)
       await this.db.rewindProfiles(profiles)
       const t1 = (performance.now() - t0).toFixed(3)
-      // Remove the RANK tx from mempool cache
-      this.mempool.delete(txid)
+
+      // Remove all RANK txs from mempool cache
+      keysToDelete.forEach(key => this.mempool.delete(key))
+
       // Log the result
       log([
         ['nng', 'mempooltxrem'],
-        ...this.toLogEntries(rank),
+        ['txid', txid],
+        ['ranksLength', `${ranks.length}`],
         ['action', 'rewindProfiles'],
         ['elapsed', `${t1}ms`],
       ])
@@ -597,16 +610,20 @@ export default class Indexer extends EventEmitter {
     entries.push(...this.toLogEntries(best))
     // Prepare ProfileMap in case any RANK txs need to be upserted
     let profiles: ProfileMap = new Map()
-    const rankTxids: Pick<RankTransaction, 'txid'>[] = []
+    const rankTxids: {
+      txid_outIdx: Pick<RankTransaction, 'txid' | 'outIdx'>
+    }[] = []
     if (ranks.length > 0) {
       // Find any RANK txs that were missing from mempool cache (i.e. not already upserted)
-      const missing = ranks.filter(rank => {
+      const missing = ranks.filter(({ txid, outIdx }) => {
         // If mempool has RANK tx from block then it can be removed
-        if (this.mempool.has(rank.txid)) {
+        if (this.mempool.has(`${txid}_${outIdx}`)) {
           // save this txid for database connect statement
-          rankTxids.push({ txid: rank.txid })
+          rankTxids.push({
+            txid_outIdx: { txid, outIdx },
+          })
           // Mempool no longer contains this RANK tx
-          this.mempool.delete(rank.txid)
+          this.mempool.delete(`${txid}_${outIdx}`)
           return false
         }
         // If we can't find the block RANK tx in mempool cache, return it as missing
@@ -799,31 +816,9 @@ export default class Indexer extends EventEmitter {
         const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
         const tx = new Transaction(Buffer.from(rawArray))
-        // RANK output is always at index 0
-        const output = this.toRankOutput(tx.outputs[0])
-        if (output) {
-          // get the address that spent UTXO
-          // TODO: should collect multiple scriptPayloads into array;
-          //       this would allow multiple addresses to vote at once 👀
-          //       WARNING: this could open attack surface to game reward system,
-          //                e.g. 2 addresses, 1 vote = 1 vote, 2 addresses rewarded
-          // silently ignore RANK txs that send change to a different address
-          const scriptPayload = this.getScriptPayload(tx)
-          if (!scriptPayload) {
-            continue
-          }
-          ranks.push({
-            txid: tx.txid,
-            firstSeen: block
-              ? undefined
-              : BigInt(Date.now()),
-            scriptPayload,
-            height: block?.height, // undefined if mempool tx
-            sats: BigInt(tx.outputs[0].satoshis),
-            timestamp: block?.timestamp, // undefined until block is connected
-            ...output,
-          })
-        }
+        // Process the transaction using the processTransaction function
+        const transactionRanks = this.processTransaction(tx, block)
+        ranks.push(...transactionRanks)
       } catch (e) {
         throw new Error(`processBlockOrMempool(${typeof data}): ${e.message}`)
       }
@@ -831,21 +826,86 @@ export default class Indexer extends EventEmitter {
     return ranks
   }
   /**
+   * Process a single transaction to extract RANK transactions
+   * @param tx `Transaction` object
+   * @returns Array of parsed RANK transactions with metadata
+   */
+  private processTransaction(
+    tx: Transaction,
+    block: Block | null,
+  ): RankTransaction[] {
+    const ranks: RankTransaction[] = []
+
+    if (tx.outputs.length > 0) {
+      // Process first transaction output as RANK output
+      const firstOutput = tx.outputs[0]
+      const firstRankOutput = this.toRankOutput(firstOutput)
+      // Return empty array if first output is not valid RANK
+      if (!firstRankOutput) {
+        return ranks
+      }
+      // Get script payload for the transaction
+      const scriptPayload = this.getScriptPayload(tx)
+      // Return empty array if script payload is invalid
+      if (!scriptPayload) {
+        return ranks
+      }
+      // Add first RANK output to array
+      ranks.push({
+        txid: tx.txid,
+        outIdx: 0,
+        firstSeen: block ? undefined : BigInt(Date.now()),
+        scriptPayload,
+        height: block?.height, // undefined if mempool tx
+        sats: BigInt(firstOutput.satoshis),
+        timestamp: block?.timestamp, // undefined until block is connected
+        ...firstRankOutput,
+      })
+      // Process second and third transaction outputs as RANK outputs (can have zero value)
+      for (let i = 1; i <= 2 && i < tx.outputs.length; i++) {
+        const output = tx.outputs[i]
+        // Allow zero value for outputs 1 and 2 (e.g. `neutral` sentiment)
+        const rankOutput = this.toRankOutput(output, true)
+        // If second or third output is not valid RANK, return the array we have
+        if (!rankOutput) {
+          return ranks
+        }
+        // Add valid RANK output to array
+        ranks.push({
+          txid: tx.txid,
+          outIdx: i,
+          firstSeen: block ? undefined : BigInt(Date.now()),
+          scriptPayload,
+          height: block?.height, // undefined if mempool tx
+          sats: BigInt(output.satoshis),
+          timestamp: block?.timestamp, // undefined until block is connected
+          ...rankOutput,
+        })
+      }
+    }
+
+    return ranks
+  }
+  /**
    * Process the output script to get the rankOutput
    * @param output `Transaction.Output` object
+   * @param zeroOutValueAllowed `boolean` to allow zero-value OP_RETURN outputs
    * @returns `RankOutput` object or `null` if output script is invalid
    */
-  private toRankOutput(output: Transaction.Output): RankOutput {
+  private toRankOutput(
+    output: Transaction.Output,
+    zeroOutValueAllowed: boolean = false,
+  ): RankOutput {
     const { script, satoshis } = output
     // first output script MUST be OP_RETURN
     if (!script.isDataOut()) {
       return null
     }
     // OP_RETURN output value MUST be >= defined minimum
-    if (satoshis < RANK_OUTPUT_MIN_VALID_SATS) {
+    // unless zeroOutValueAllowed is true
+    if (!zeroOutValueAllowed && satoshis < RANK_OUTPUT_MIN_VALID_SATS) {
       return null
     }
-
     // Process all chunks and return the RankOutput, if possible
     const processor = new RankScriptProcessor(script.toBuffer())
     const rankOutput = processor.processRankOutput()
@@ -864,8 +924,9 @@ export default class Indexer extends EventEmitter {
     const scriptPayloadBuffer = tx.inputs[0].script.toAddress().hashBuffer
     if (
       tx.inputs.every(
-        (input) =>
-          scriptPayloadBuffer.compare(input.script.toAddress().hashBuffer) === 0,
+        input =>
+          scriptPayloadBuffer.compare(input.script.toAddress().hashBuffer) ===
+          0,
       )
     ) {
       return scriptPayloadBuffer.toString('hex')
