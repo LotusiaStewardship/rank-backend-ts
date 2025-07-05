@@ -850,11 +850,12 @@ export default class Indexer extends EventEmitter {
       if (!scriptPayload) {
         return ranks
       }
+      let firstSeen = BigInt(Date.now())
       // Add first RANK output to array
       ranks.push({
         txid: tx.txid,
         outIdx: 0,
-        firstSeen: BigInt(Date.now()),
+        firstSeen,
         scriptPayload,
         height: block?.height, // undefined if mempool tx
         sats: BigInt(firstOutput.satoshis),
@@ -870,11 +871,13 @@ export default class Indexer extends EventEmitter {
         if (!rankOutput) {
           return ranks
         }
+        firstSeen += 1n
         // Add valid RANK output to array
         ranks.push({
           txid: tx.txid,
           outIdx: i,
-          firstSeen: BigInt(Date.now()),
+          // Add a single millisecond to the current time to ensure the firstSeen is always greater than the first output
+          firstSeen,
           scriptPayload,
           height: block?.height, // undefined if mempool tx
           sats: BigInt(output.satoshis),

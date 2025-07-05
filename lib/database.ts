@@ -822,10 +822,7 @@ export default class Database {
               profileId: 'asc',
             },
             {
-              firstSeen: {
-                sort: 'desc',
-                nulls: 'last',
-              },
+              firstSeen: 'desc',
             },
           ],
           skip: (page - 1) * pageSize,
