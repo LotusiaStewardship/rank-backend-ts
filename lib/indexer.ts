@@ -874,7 +874,8 @@ export default class Indexer extends EventEmitter {
         ranks.push({
           txid: tx.txid,
           outIdx: i,
-          firstSeen: BigInt(Date.now()),
+          // Add a single millisecond to the current time to ensure the firstSeen is always greater than the first output
+          firstSeen: BigInt(Date.now() + 1),
           scriptPayload,
           height: block?.height, // undefined if mempool tx
           sats: BigInt(output.satoshis),
