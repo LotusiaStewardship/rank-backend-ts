@@ -819,6 +819,9 @@ export default class Database {
               timestamp: 'desc',
             },
             {
+              profileId: 'asc',
+            },
+            {
               firstSeen: {
                 sort: 'desc',
                 nulls: 'last',
