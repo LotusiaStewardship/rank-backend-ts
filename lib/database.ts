@@ -210,7 +210,7 @@ export default class Database {
             totalVotes: _count,
             totalSats: _sum.sats.toString(),
             lastSeen: new Date(Number(_max.timestamp * 1_000n)).toISOString(),
-            firstSeen: new Date(Number(_min.timestamp)).toISOString(),
+            firstSeen: new Date(Number(_min.timestamp * 1_000n)).toISOString(),
           }) as ScriptPayloadActivitySummary,
       )
     } catch (e) {
@@ -845,7 +845,7 @@ export default class Database {
         return {
           votes: votes.map(vote => ({
             ...vote,
-            firstSeen: ((vote.firstSeen ?? 0n) / 1_000n)?.toString(),
+            firstSeen: (vote.firstSeen / 1_000n).toString(),
             timestamp: vote.timestamp?.toString(),
             sats: vote.sats.toString(),
           })),
