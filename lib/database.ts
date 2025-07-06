@@ -691,7 +691,10 @@ export default class Database {
               timestamp: 'desc',
             },
             {
-              firstSeen: 'desc',
+              firstSeen: {
+                sort: 'desc',
+                nulls: 'last',
+              },
             },
           ],
           // convert page to 0-based index
@@ -714,7 +717,7 @@ export default class Database {
         return {
           votes: ranks.map(rank => ({
             ...rank,
-            firstSeen: (rank.firstSeen / 1_000n).toString(),
+            firstSeen: (rank.firstSeen ?? 0n / 1_000n).toString(),
             timestamp: rank.timestamp?.toString(),
             sats: rank.sats.toString(),
             post: {
