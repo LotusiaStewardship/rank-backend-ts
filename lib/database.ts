@@ -686,15 +686,21 @@ export default class Database {
             platform,
             profileId,
           },
-          orderBy: {
-            timestamp: 'desc',
-          },
+          orderBy: [
+            {
+              timestamp: 'desc',
+            },
+            {
+              firstSeen: 'desc',
+            },
+          ],
           // convert page to 0-based index
           skip: (page - 1) * pageSize,
           take: pageSize,
           select: {
             txid: true,
             sentiment: true,
+            firstSeen: true,
             timestamp: true,
             sats: true,
             post: {
@@ -706,13 +712,14 @@ export default class Database {
           },
         })
         return {
-          votes: ranks.map(tx => ({
-            ...tx,
-            timestamp: tx.timestamp.toString(),
-            sats: tx.sats.toString(),
+          votes: ranks.map(rank => ({
+            ...rank,
+            firstSeen: (rank.firstSeen / 1_000n).toString(),
+            timestamp: rank.timestamp?.toString(),
+            sats: rank.sats.toString(),
             post: {
-              ...tx.post,
-              ranking: tx.post.ranking.toString(),
+              ...rank.post,
+              ranking: rank.post.ranking.toString(),
             },
           })),
           numPages: Math.ceil(totalRanks / pageSize),
