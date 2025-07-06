@@ -691,7 +691,10 @@ export default class Database {
               timestamp: 'desc',
             },
             {
-              firstSeen: 'desc',
+              firstSeen: {
+                sort: 'desc',
+                nulls: 'last',
+              },
             },
           ],
           // convert page to 0-based index
