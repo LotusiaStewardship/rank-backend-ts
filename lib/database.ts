@@ -26,7 +26,11 @@ type RequestPost = {
 
 type RankStatistics = Pick<
   RankTarget,
-  'ranking' | 'votesPositive' | 'votesNegative'
+  | 'ranking'
+  | 'satsPositive'
+  | 'satsNegative'
+  | 'votesPositive'
+  | 'votesNegative'
 >
 export type Timespan =
   | 'now'
@@ -829,9 +833,6 @@ export default class Database {
               timestamp: 'desc',
             },
             {
-              profileId: 'asc',
-            },
-            {
               firstSeen: 'desc',
             },
           ],
@@ -931,19 +932,14 @@ export default class Database {
         },
       })
       // process the RANK txs and calculate changes over `Timespan`
-      const dataChanges: Map<
-        string,
-        {
-          ranking: bigint
-          votesPositive: number
-          votesNegative: number
-        }
-      > = new Map()
+      const dataChanges: Map<string, RankStatistics> = new Map()
       ranksBySentiment.forEach(rank => {
         const { _count, _sum, sentiment } = rank
         if (!dataChanges.has(rank[dataType])) {
           dataChanges.set(rank[dataType], {
             ranking: 0n,
+            satsPositive: 0n,
+            satsNegative: 0n,
             votesPositive: 0,
             votesNegative: 0,
           })
@@ -952,11 +948,13 @@ export default class Database {
         switch (sentiment as ScriptChunkSentimentUTF8) {
           case 'positive': {
             data.ranking += BigInt(_sum.sats)
+            data.satsPositive += BigInt(_sum.sats)
             data.votesPositive += _count.sentiment
             break
           }
           case 'negative': {
             data.ranking -= BigInt(_sum.sats)
+            data.satsNegative += BigInt(_sum.sats)
             data.votesNegative += _count.sentiment
             break
           }
@@ -1020,6 +1018,8 @@ export default class Database {
                 platform: string
                 profileId?: string
                 ranking: bigint
+                satsPositive: bigint
+                satsNegative: bigint
                 votesPositive: number
                 votesNegative: number
               },
@@ -1038,6 +1038,8 @@ export default class Database {
                 ...ids,
                 total: {
                   ranking: item.ranking.toString(),
+                  satsPositive: item.satsPositive.toString(),
+                  satsNegative: item.satsNegative.toString(),
                   votesPositive: item.votesPositive,
                   votesNegative: item.votesNegative,
                 },
@@ -1047,6 +1049,8 @@ export default class Database {
                     minimumFractionDigits: 1,
                     maximumFractionDigits: 1,
                   }),
+                  satsPositive: changes.satsPositive.toString(),
+                  satsNegative: changes.satsNegative.toString(),
                   votesPositive: changes.votesPositive,
                   votesNegative: changes.votesNegative,
                 },
