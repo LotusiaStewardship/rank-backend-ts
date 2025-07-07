@@ -833,9 +833,6 @@ export default class Database {
               timestamp: 'desc',
             },
             {
-              profileId: 'asc',
-            },
-            {
               firstSeen: 'desc',
             },
           ],
