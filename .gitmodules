@@ -1,10 +1,6 @@
-[submodule "submodules/nanomsg"]
-	path = submodules/nanomsg
-	url = https://github.com/zboszor/node-nanomsg.git
-[submodule "rank-lib"]
-	path = submodules/rank-lib
-	url = git@github.com:LotusiaStewardship/rank-lib.git
-	branch = master
 [submodule "submodules/bitcore-lib-xpi"]
 	path = submodules/bitcore-lib-xpi
 	url = https://github.com/LotusiaStewardship/bitcore-lib-xpi.git
+[submodule "submodules/lotus-lib"]
+	path = submodules/lotus-lib
+	url = git@github.com:LotusiaStewardship/lotus-lib.git

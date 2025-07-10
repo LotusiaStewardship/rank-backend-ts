@@ -8,12 +8,25 @@ import { Socket, socket } from 'nanomsg'
 import { EventEmitter } from 'events'
 import RuntimeState from './state'
 import Database from './database'
+import type {
+  TransactionOutputRANK,
+  TransactionOutputRNKC,
+  IndexedTransactionRNKC,
+  IndexedTransactionRANK,
+  IndexedTransaction,
+  Block,
+  ProfileMap,
+  Profile,
+  Post,
+  ScriptChunkLokadUTF8,
+} from 'lotus-lib'
 import {
-  log,
-  RankScriptProcessor,
+  ScriptProcessor,
   RANK_BLOCK_GENESIS_V1,
   RANK_OUTPUT_MIN_VALID_SATS,
-} from 'rank-lib'
+  MAX_OP_RETURN_OUTPUTS,
+  toAsyncIterable,
+} from 'lotus-lib'
 import {
   ERR,
   NNG_REQUEST_TIMEOUT_LENGTH,
@@ -21,15 +34,8 @@ import {
   NNG_RPC_RCVMAXSIZE_POLICY,
   NNG_SOCKET_MAXRECONN,
   NNG_SOCKET_RECONN,
-  NNG_MESSAGE_BATCH_SIZE,
 } from '../util/constants'
-import type {
-  LogEntry,
-  RankOutput,
-  RankTransaction,
-  Block,
-  ProfileMap,
-} from 'rank-lib'
+import { log, type LogEntry } from '../util/functions'
 /** NNG types */
 type NNGMessageType =
   | 'mempooltxadd'
@@ -42,8 +48,37 @@ type NNGQueue = {
   busy: boolean
   pending: NNGPendingMessageProcessor[]
 }
-/** Runtime cache for quickly reconciling conflicting RANK txs with blocks */
-type MempoolCache = Map<string, RankTransaction>
+/**
+ * Runtime cache for quickly reconciling missing LOKAD txs with blocks
+ *
+ * Key is `txid_outIdx`
+ * */
+type MempoolCache = Map<string, MempoolCacheEntry>
+/**
+ * Mempool cache entry
+ *
+ * This is a union of IndexedTransactionRANK and IndexedTransactionRNKC
+ * with an additional type field to distinguish between the two.
+ */
+type MempoolCacheEntry = (IndexedTransactionRANK | IndexedTransactionRNKC) & {
+  type: ScriptChunkLokadUTF8
+}
+/**
+ * Result of processing a transaction
+ * */
+type ProcessedTransaction = {
+  ranks?: IndexedTransactionRANK[]
+  rnkc?: IndexedTransactionRNKC
+}
+/**
+ * Result of processing a block or mempool
+ * */
+type ProcessedBlockOrMempool = {
+  ranks: IndexedTransactionRANK[]
+  rnkcs: IndexedTransactionRNKC[]
+}
+/** Object containing primary key fields connecting saved transactions to blocks */
+type Outpoint = Pick<IndexedTransaction, 'txid' | 'outIdx'>
 /**
  * Processes all transactions to find, parse, and index OP_RETURN outputs with
  * the `RANK` LOKAD prefix.
@@ -65,6 +100,8 @@ export default class Indexer extends EventEmitter {
   private rpcUri: string
   /** Cache of unconfirmed RANK transactions */
   private mempool: MempoolCache
+  /** Queue for upserting/rewinding profiles */
+  private profileQueue: ProfileMap
   /** Queue for processing NNG messages */
   private queue: NNGQueue
   /** Runtime state used across modules */
@@ -101,14 +138,15 @@ export default class Indexer extends EventEmitter {
     this.rpc.maxreconn(NNG_SOCKET_MAXRECONN)
     // Runtime state setup
     this.mempool = new Map()
+    this.profileQueue = new Map()
     this.queue = { busy: false, pending: [] }
   }
   /**
-   * Converts a Block or RankTransaction object into an array of LogEntry tuples
-   * @param data - The Block or RankTransaction object to convert
+   * Converts a Block or IndexedTransactionRANK object into an array of LogEntry tuples
+   * @param data - The Block or IndexedTransactionRANK object to convert
    * @returns Array of [key, value] tuples representing the object's properties as strings
    */
-  private toLogEntries(data: Block | RankTransaction): LogEntry[] {
+  private toLogEntries(data: Block | IndexedTransactionRANK): LogEntry[] {
     return Object.entries(data).map(([k, v]) => [k, String(v)])
   }
   /**
@@ -157,14 +195,18 @@ export default class Indexer extends EventEmitter {
     // rewind all unconfirmed state from the database
     try {
       const t0 = performance.now()
-      const mempooltxs = await this.db.getRankTransactionsByHeight(null)
-      if (mempooltxs.length > 0) {
-        const profiles = this.toProfileMap(mempooltxs)
-        await this.db.rewindProfiles(profiles)
+      const ranks = await this.db.getRankTransactionsByHeight(null)
+      const rnkcs = await this.db.getRankCommentsByHeight(null)
+      ranks.forEach(this.addRankTransactionToProfileQueue)
+      rnkcs.forEach(this.addRankCommentToProfileQueue)
+      if (this.profileQueue.size > 0) {
+        await this.db.rewindProfiles(this.profileQueue)
+        this.profileQueue.clear()
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['init', 'cleanup'],
-          ['ranksLength', `${mempooltxs.length}`],
+          ['ranksLength', `${ranks.length}`],
+          ['rnkcsLength', `${rnkcs.length}`],
           ['action', 'rewindProfiles'],
           ['elapsed', `${t1}ms`],
         ])
@@ -197,10 +239,19 @@ export default class Indexer extends EventEmitter {
     }
     // Sync mempool
     try {
-      const ranks = await this.initSyncMempool()
-      // Initialize the mempool queue with these RANK txs
-      ranks.forEach(rank =>
-        this.mempool.set(`${rank.txid}_${rank.outIdx}`, rank),
+      const results = await this.initSyncMempool()
+      // Initialize the mempool cache with these RANK txs
+      results.ranks.forEach(rank =>
+        this.mempool.set(`${rank.txid}_${rank.outIdx}`, {
+          ...rank,
+          type: 'RANK',
+        }),
+      )
+      results.rnkcs.forEach(rnkc =>
+        this.mempool.set(`${rnkc.txid}_${rnkc.outIdx}`, {
+          ...rnkc,
+          type: 'RNKC',
+        }),
       )
     } catch (e) {
       throw [ERR.IDX_MEMPOOL_SYNC, e.message]
@@ -321,34 +372,40 @@ export default class Indexer extends EventEmitter {
   }
   /**
    * Synchronizes database state with the current lotusd mempool by fetching and processing unconfirmed transactions
-   * @returns {Promise<RankTransaction[]>} Array of RANK transactions currently in mempool
+   * @returns {Promise<IndexedTransactionRANK[]>} Array of RANK transactions currently in mempool
    * @property {number} txsLength - Number of transactions in mempool
    * @property {number} ranksLength - Number of RANK transactions processed
    * @property {number} elapsed - Time taken to sync mempool in milliseconds
    */
-  async initSyncMempool(): Promise<RankTransaction[]> {
+  async initSyncMempool(): Promise<ProcessedBlockOrMempool> {
     const t0 = performance.now()
     const entries: LogEntry[] = [['init', 'syncMempool']]
     const mempool = await this.rpcGetMempool()
     const txsLength = mempool.txsLength()
     entries.push(['txsLength', `${txsLength}`])
-    let ranks: RankTransaction[] = []
-    if (txsLength > 0) {
-      ranks = this.processBlockOrMempool(mempool)
-      if (ranks.length > 0) {
-        const profiles = this.toProfileMap(ranks)
-        await this.db.upsertProfiles(profiles)
-        const t1 = (performance.now() - t0).toFixed(3)
-        entries.push(
-          ['ranksLength', `${ranks.length}`],
-          ['action', 'upsertProfiles'],
-          ['elapsed', `${t1}ms`],
+    const results = this.processBlockOrMempool(mempool)
+    results.ranks.forEach(this.addRankTransactionToProfileQueue)
+    results.rnkcs.forEach(this.addRankCommentToProfileQueue)
+    if (this.profileQueue.size > 0) {
+      try {
+        await this.db.upsertProfiles(this.profileQueue)
+        this.profileQueue.clear()
+      } catch (e) {
+        throw new Error(
+          `db.upsertProfiles(${typeof this.profileQueue}): ${e.message}`,
         )
       }
     }
+    const t1 = (performance.now() - t0).toFixed(3)
+    entries.push(
+      ['ranksLength', `${results.ranks.length}`],
+      ['rnkcsLength', `${results.rnkcs.length}`],
+      ['action', 'upsertProfiles'],
+      ['elapsed', `${t1}ms`],
+    )
     log(entries)
     // Return the RANK txs currently in mempool
-    return ranks
+    return results
   }
   /**
    * Cleanly shuts down all network connections and closes the indexer
@@ -396,9 +453,10 @@ export default class Indexer extends EventEmitter {
   private async saveBlockRange(
     blockrange: NNG.GetBlockRangeResponse,
     blocksLength: number,
-  ): Promise<[Block, number]> {
+  ): Promise<[Block, number, number]> {
     const blocks: Block[] = []
-    const ranks: RankTransaction[] = []
+    const ranks: IndexedTransactionRANK[] = []
+    const rnkcs: IndexedTransactionRNKC[] = []
     for (let i = 0; i < blocksLength; i++) {
       try {
         const block = blockrange.blocks(i)
@@ -410,38 +468,51 @@ export default class Indexer extends EventEmitter {
           blocks.push(checkpoint)
           continue
         }
-        const result = this.processBlockOrMempool(block)
+        const results = this.processBlockOrMempool(block)
         // Saving these for later
-        blocks.push({ ...checkpoint, ranksLength: result.length })
-        ranks.push(...result)
+        blocks.push({ ...checkpoint, ranksLength: results.ranks.length })
+        ranks.push(...results.ranks)
+        rnkcs.push(...results.rnkcs)
       } catch (e) {
         throw new Error(
           `saveBlockRange(${typeof blockrange}, ${blocksLength}): ${e.message}`,
         )
       }
     }
+    // Process any available LOKAD transactions into the profile queue
+    ranks.forEach(this.addRankTransactionToProfileQueue)
+    // Process any available RNKC transactions into the profile queue
+    rnkcs.forEach(this.addRankCommentToProfileQueue)
     // Save blocks and Profile upserts in one atomic database transaction
-    const profiles = this.toProfileMap(ranks)
     try {
-      await this.db.saveBlockRange(blocks, profiles)
+      await this.db.saveBlockRange(blocks, this.profileQueue)
+      this.profileQueue.clear()
     } catch (e) {
       throw new Error(
-        `db.saveBlockRange(${typeof blocks}, ${typeof profiles}): ${e.message}`,
+        `db.saveBlockRange(${typeof blocks}, ${typeof this.profileQueue}): ${e.message}`,
       )
     }
     // Return the latest block as the new checkpoint block
-    return [blocks.pop(), ranks.length]
+    // Also return the number of RANK txs and RNKC txs processed
+    return [blocks.pop(), ranks.length, rnkcs.length]
   }
   /**
    * Rewind the database state created at `height`
    * @param height `height` parsed from `NNG.BlockHeader`
-   * @returns Number of `RankTransaction`s removed from database
+   * @returns Number of `IndexedTransactionRANK`s removed from database
    */
   private async rewindBlock(height: number): Promise<number> {
     try {
+      // Fetch RANK/RNKC txs at height and add profiles to queue for rewind
       const ranks = await this.db.getRankTransactionsByHeight(height)
-      const profiles = this.toProfileMap(ranks)
-      await this.db.rewindProfiles(profiles)
+      const rnkcs = await this.db.getRankCommentsByHeight(height)
+      ranks.forEach(this.addRankTransactionToProfileQueue)
+      rnkcs.forEach(this.addRankCommentToProfileQueue)
+      // Execute rewind statements if necessary
+      if (this.profileQueue.size > 0) {
+        await this.db.rewindProfiles(this.profileQueue)
+        this.profileQueue.clear()
+      }
       await this.db.deleteBlockByHeight(height)
       return ranks.length
     } catch (e) {
@@ -518,29 +589,49 @@ export default class Indexer extends EventEmitter {
       ).mempoolTx()
     const rawArray = mempooltx.tx().rawArray()
     const tx = new Transaction(Buffer.from(rawArray))
-
     // Process the transaction using the processTransaction function
     // block is null for mempool transactions
-    const ranks = this.processTransaction(tx, null)
-
-    if (ranks.length > 0) {
-      // Add RANK transactions to mempool cache for reconciliation
-      ranks.forEach(rank => {
-        this.mempool.set(`${rank.txid}_${rank.outIdx}`, rank)
+    const processed = this.processTransaction(tx, null)
+    // Add RANK transactions to mempool cache for reconciliation
+    // Also add profiles to queue for upserting
+    if (processed.ranks) {
+      processed.ranks.forEach(rank => {
+        this.mempool.set(`${rank.txid}_${rank.outIdx}`, {
+          ...rank,
+          type: 'RANK',
+        })
+        this.addRankTransactionToProfileQueue(rank)
       })
-
-      // Upsert profiles to database
-      const profiles = this.toProfileMap(ranks)
-      await this.db.upsertProfiles(profiles)
-
-      const t1 = (performance.now() - t0).toFixed(3)
-      log([
-        ['nng', 'mempooltxadd'],
-        ['txid', tx.txid],
-        ['ranksLength', `${ranks.length}`],
-        ['action', 'upsertProfiles'],
-        ['elapsed', `${t1}ms`],
-      ])
+    }
+    // Add RNKC tx to mempool cache for reconciliation
+    // Also add profiles to queue for upserting
+    if (processed.rnkc) {
+      this.mempool.set(`${processed.rnkc.txid}_${processed.rnkc.outIdx}`, {
+        ...processed.rnkc,
+        type: 'RNKC',
+      })
+      this.addRankCommentToProfileQueue(processed.rnkc)
+    }
+    // Upsert profiles to database and clear profile queue
+    if (this.profileQueue.size > 0) {
+      try {
+        // Upsert profiles to database and clear profile queue
+        await this.db.upsertProfiles(this.profileQueue)
+        this.profileQueue.clear()
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['nng', 'mempooltxadd'],
+          ['txid', tx.txid],
+          ['ranksLength', `${processed.ranks.length}`],
+          ['isComment', `${!!processed.rnkc}`],
+          ['action', 'upsertProfiles'],
+          ['elapsed', `${t1}ms`],
+        ])
+      } catch (e) {
+        throw new Error(
+          `db.upsertProfiles(${typeof this.profileQueue}): ${e.message}`,
+        )
+      }
     }
   }
   /**
@@ -558,33 +649,45 @@ export default class Indexer extends EventEmitter {
       )
     const txid = this.toBlockhashOrTxid(tx.txid().hash())
 
-    // Find all RANK txs from in-memory mempool cache for this transaction
-    const ranks: RankTransaction[] = []
+    // Find all LOKAD txs from in-memory mempool cache for this transaction
+    const txs: MempoolCacheEntry[] = []
     const keysToDelete: string[] = []
 
     // Iterate through mempool cache to find all entries for this txid
-    for (const [key, rank] of this.mempool.entries()) {
+    const mempoolEntries = toAsyncIterable(this.mempool.entries())
+    for await (const [key, tx] of mempoolEntries) {
       if (key.startsWith(`${txid}_`)) {
-        ranks.push(rank)
+        // Add the key to the list of keys to delete from mempool cache
         keysToDelete.push(key)
+        txs.push(tx)
       }
     }
 
-    // Make sure our in-memory cache had the conflicting tx
-    if (ranks.length > 0) {
-      // Rewind the associated profiles
-      const profiles = this.toProfileMap(ranks)
-      await this.db.rewindProfiles(profiles)
+    // Convert RANK txs to profiles and add to queue for rewind
+    txs.forEach(tx => {
+      switch (tx.type) {
+        case 'RANK':
+          this.addRankTransactionToProfileQueue(tx as IndexedTransactionRANK)
+          break
+        case 'RNKC':
+          this.addRankCommentToProfileQueue(tx as IndexedTransactionRNKC)
+          break
+      }
+    })
+    // Execute rewind statements if necessary
+    if (this.profileQueue.size > 0) {
+      await this.db.rewindProfiles(this.profileQueue)
+      this.profileQueue.clear()
       const t1 = (performance.now() - t0).toFixed(3)
 
-      // Remove all RANK txs from mempool cache
+      // Remove all txs from mempool cache
       keysToDelete.forEach(key => this.mempool.delete(key))
 
       // Log the result
       log([
         ['nng', 'mempooltxrem'],
         ['txid', txid],
-        ['ranksLength', `${ranks.length}`],
+        ['outpointsLength', `${txs.length}`],
         ['action', 'rewindProfiles'],
         ['elapsed', `${t1}ms`],
       ])
@@ -605,37 +708,41 @@ export default class Indexer extends EventEmitter {
     const block = connectedBlock.block()
     const best = this.toBlock(block.header())
     // Process block for any RANK txs
-    const ranks = this.processBlockOrMempool(block)
-    best.ranksLength = ranks.length
+    const results = this.processBlockOrMempool(block)
+    best.ranksLength = results.ranks.length
+    best.rnkcsLength = results.rnkcs.length
     entries.push(...this.toLogEntries(best))
-    // Prepare ProfileMap in case any RANK txs need to be upserted
-    let profiles: ProfileMap = new Map()
-    const rankTxids: {
-      txid_outIdx: Pick<RankTransaction, 'txid' | 'outIdx'>
-    }[] = []
-    if (ranks.length > 0) {
-      // Find any RANK txs that were missing from mempool cache (i.e. not already upserted)
-      const missing = ranks.filter(({ txid, outIdx }) => {
-        // If mempool has RANK tx from block then it can be removed
-        if (this.mempool.has(`${txid}_${outIdx}`)) {
-          // save this txid for database connect statement
-          rankTxids.push({
-            txid_outIdx: { txid, outIdx },
-          })
-          // Mempool no longer contains this RANK tx
-          this.mempool.delete(`${txid}_${outIdx}`)
-          return false
-        }
-        // If we can't find the block RANK tx in mempool cache, return it as missing
-        return true
-      })
-      // Convert missing RANK txs to profiles for upsert
+    // Reconcile mempool cache with block transactions
+    // Outpoints are used to connect existing transactions to the new block
+    const outpointsRANK: Outpoint[] = []
+    const outpointsRNKC: Outpoint[] = []
+    // Find any RANK txs that were missing from mempool cache (i.e. not already upserted)
+    if (results.ranks.length > 0) {
+      const { outpoints, missing } = await this.reconcileMempoolCache(
+        results.ranks,
+      )
+      outpointsRANK.push(...outpoints)
       if (missing.length > 0) {
-        profiles = this.toProfileMap(missing)
+        missing.forEach(this.addRankTransactionToProfileQueue)
+      }
+    }
+    if (results.rnkcs.length > 0) {
+      const { outpoints, missing } = await this.reconcileMempoolCache(
+        results.rnkcs,
+      )
+      outpointsRNKC.push(...outpoints)
+      // Find any RNKC txs that were missing from mempool cache (i.e. not already upserted)
+      if (missing.length > 0) {
+        missing.forEach(this.addRankCommentToProfileQueue)
       }
     }
     // Save latest checkpoint plus any missing RANK txs
-    await this.db.saveBlock(best, rankTxids, profiles)
+    await this.db.saveBlock(
+      best,
+      { ranks: outpointsRANK, rnkcs: outpointsRNKC },
+      this.profileQueue,
+    )
+    this.profileQueue.clear()
     const t1 = (performance.now() - t0).toFixed(3)
     entries.push(['action', 'saveBlock'], ['elapsed', `${t1}ms`])
     // TODO: we may need to add some additional state checks here, but maybe not
@@ -805,8 +912,11 @@ export default class Indexer extends EventEmitter {
    */
   private processBlockOrMempool(
     data: NNG.Block | NNG.GetMempoolResponse,
-  ): RankTransaction[] {
-    const ranks: RankTransaction[] = []
+  ): ProcessedBlockOrMempool {
+    const results: ProcessedBlockOrMempool = {
+      ranks: [],
+      rnkcs: [],
+    }
     const txsLength = data.txsLength()
     const block = data instanceof NNG.Block ? this.toBlock(data.header()) : null
     const startIndex = block ? 1 : 0
@@ -816,106 +926,209 @@ export default class Indexer extends EventEmitter {
         const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
         const tx = new Transaction(Buffer.from(rawArray))
-        // Process the transaction using the processTransaction function
-        const transactionRanks = this.processTransaction(tx, block)
-        ranks.push(...transactionRanks)
+        // Process the transaction
+        const processed = this.processTransaction(tx, block)
+        if (processed.ranks) {
+          results.ranks.push(...processed.ranks)
+        }
+        if (processed.rnkc) {
+          results.rnkcs.push(processed.rnkc)
+        }
       } catch (e) {
         throw new Error(`processBlockOrMempool(${typeof data}): ${e.message}`)
       }
     }
-    return ranks
+    return results
   }
   /**
-   * Process a single transaction to extract RANK transactions
+   * Process a single transaction to extract compatible LOKAD protocols
    * @param tx `Transaction` object
-   * @returns Array of parsed RANK transactions with metadata
+   * @param block `Block` object, if available
+   * @returns {void}
    */
   private processTransaction(
     tx: Transaction,
     block: Block | null,
-  ): RankTransaction[] {
-    const ranks: RankTransaction[] = []
+  ): ProcessedTransaction {
+    // Set up return object
+    const result: ProcessedTransaction = {
+      ranks: [],
+      rnkc: null,
+    }
+    // Get script payload for the transaction
+    const scriptPayload = this.getScriptPayload(tx)
+    // Return null if script payload does not meet our requirements in `getScriptPayload`
+    if (!scriptPayload) {
+      return result
+    }
+    // Get the ScriptProcessor for the first output
+    // Several validations are done here, including:
+    // - checking if the output is OP_RETURN
+    // - checking if the output has a valid LOKAD protocol
+    const scriptProcessor = this.validateOutputScript(
+      tx.outputs[0].script.toBuffer(),
+    )
+    if (!scriptProcessor) {
+      return result
+    }
 
-    if (tx.outputs.length > 0) {
-      // Process first transaction output as RANK output
-      const firstOutput = tx.outputs[0]
-      const firstRankOutput = this.toRankOutput(firstOutput)
-      // Return empty array if first output is not valid RANK
-      if (!firstRankOutput) {
-        return ranks
-      }
-      // Get script payload for the transaction
-      const scriptPayload = this.getScriptPayload(tx)
-      // Return empty array if script payload is invalid
-      if (!scriptPayload) {
-        return ranks
-      }
-      let firstSeen = BigInt(Date.now())
-      // Add first RANK output to array
-      ranks.push({
-        txid: tx.txid,
-        outIdx: 0,
-        firstSeen,
-        scriptPayload,
-        height: block?.height, // undefined if mempool tx
-        sats: BigInt(firstOutput.satoshis),
-        timestamp: block?.timestamp, // undefined until block is connected
-        ...firstRankOutput,
-      })
-      // Process second and third transaction outputs as RANK outputs (can have zero value)
-      for (let i = 1; i <= 2 && i < tx.outputs.length; i++) {
-        const output = tx.outputs[i]
-        // Allow zero value for outputs 1 and 2 (e.g. `neutral` sentiment)
-        const rankOutput = this.toRankOutput(output, true)
-        // If second or third output is not valid RANK, return the array we have
-        if (!rankOutput) {
-          return ranks
+    // Get the first seen timestamp, updated later for additional outputs
+    let firstSeen = BigInt(Date.now())
+    // Process the transaction based on the LOKAD protocol
+    switch (scriptProcessor.lokadType) {
+      // RankTransaction model
+      case 'RANK': {
+        // If the first output has a value less than the minimum required
+        // for a valid RANK output, return current result object
+        if (tx.outputs[0].satoshis < RANK_OUTPUT_MIN_VALID_SATS) {
+          return result
         }
-        firstSeen += 1n
-        // Add valid RANK output to array
-        ranks.push({
+        // process the first RANK output
+        const rank = scriptProcessor.processScriptRANK()
+        if (!rank) {
+          return result
+        }
+        result.ranks.push({
           txid: tx.txid,
-          outIdx: i,
-          // Add a single millisecond to the current time to ensure the firstSeen is always greater than the first output
+          outIdx: 0,
+          firstSeen: firstSeen++,
+          scriptPayload,
+          height: block?.height, // undefined if mempool tx
+          sats: BigInt(tx.outputs[0].satoshis),
+          timestamp: block?.timestamp, // undefined until block is connected
+          ...rank,
+        })
+        // outIdx 1 and 2 may be valid RANK outputs, so we process those here
+        for (let i = 1; i < MAX_OP_RETURN_OUTPUTS; i++) {
+          const output = tx.outputs[i]
+          const scriptProcessor = this.validateOutputScript(
+            output.script.toBuffer(),
+          )
+          // For any output that fails at this point, abandon the loop
+          // and switch blocks to return the results we have
+          if (!scriptProcessor) {
+            break
+          }
+          // Try to process as a neutral RANK output and add to results if valid
+          const neutralRank = this.processNeutralRANK(output)
+          if (neutralRank) {
+            result.ranks.push({
+              txid: tx.txid,
+              outIdx: i,
+              firstSeen: firstSeen++,
+              scriptPayload,
+              height: block?.height, // undefined if mempool tx
+              sats: BigInt(output.satoshis),
+              timestamp: block?.timestamp, // undefined until block is connected
+              ...neutralRank,
+            })
+            // continue to the next output
+            continue
+          }
+          // TODO: can add more checks for additional RANK scenarios here
+          //
+        }
+        break
+      }
+      // RankComment model
+      case 'RNKC': {
+        // Add supplemental scripts to the ScriptProcessor
+        // Maximum of 2 supplemental scripts (outIdx 1 and 2)
+        for (const output of tx.outputs.slice(1, MAX_OP_RETURN_OUTPUTS)) {
+          // if we can't add the next script, abandon the loop and process
+          // the RNKC data we have so far
+          if (!scriptProcessor.addScript(output.script.toBuffer())) {
+            break
+          }
+        }
+        const rnkc = scriptProcessor.processScriptRNKC(tx.outputs[0].satoshis)
+        // If the RNKC is invalid, return current result object
+        if (!rnkc) {
+          return result
+        }
+        result.rnkc = {
+          txid: tx.txid,
+          outIdx: 0, // RNKC is always the first output
           firstSeen,
           scriptPayload,
           height: block?.height, // undefined if mempool tx
-          sats: BigInt(output.satoshis),
+          sats: BigInt(tx.outputs[0].satoshis),
           timestamp: block?.timestamp, // undefined until block is connected
-          ...rankOutput,
-        })
+          ...rnkc,
+        }
+        break
       }
     }
-
-    return ranks
+    return result
   }
   /**
-   * Process the output script to get the rankOutput
+   * Create a `ScriptProcessor` object from a `Transaction.Output` object
    * @param output `Transaction.Output` object
-   * @param zeroOutValueAllowed `boolean` to allow zero-value OP_RETURN outputs
-   * @returns `RankOutput` object or `null` if output script is invalid
+   * @returns `ScriptProcessor` object or `null` if invalid
    */
-  private toRankOutput(
+  private validateOutputScript(script: Buffer): ScriptProcessor | null {
+    // Create a ScriptProcessor to validate the output script
+    let processor: ScriptProcessor | null = null
+    try {
+      processor = new ScriptProcessor(script)
+    } catch (e) {
+      return null
+    }
+    // Check if the output script is OP_RETURN
+    if (!processor.isOpReturn()) {
+      return null
+    }
+    // TODO: add more validation here as needed
+    //
+    return processor
+  }
+  /**
+   * Validate a `RANK` output that is OP_RETURN at outIdx 1 or 2
+   *
+   * These outputs are allowed to have zero value if the first output has a value
+   * greater than the minimum required for a valid RANK output
+   * @param output `Transaction.Output` object
+   * @returns `TransactionOutputRANK` object or `null` if invalid
+   */
+  private processNeutralRANK(
     output: Transaction.Output,
-    zeroOutValueAllowed: boolean = false,
-  ): RankOutput {
-    const { script, satoshis } = output
-    // first output script MUST be OP_RETURN
-    if (!script.isDataOut()) {
+  ): TransactionOutputRANK | null {
+    const processor = new ScriptProcessor(output.script.toBuffer())
+    const rank = processor.processScriptRANK()
+    if (!rank) {
       return null
     }
-    // OP_RETURN output value MUST be >= defined minimum
-    // unless zeroOutValueAllowed is true
-    if (!zeroOutValueAllowed && satoshis < RANK_OUTPUT_MIN_VALID_SATS) {
+    // Only neutral sentiments are allowed to have zero value
+    // any other sentiments must have a non-zero value
+    //
+    // We don't need to check the value of the output here, only the sentiment
+    if (rank.sentiment !== 'neutral') {
       return null
     }
-    // Process all chunks and return the RankOutput, if possible
-    const processor = new RankScriptProcessor(script.toBuffer())
-    const rankOutput = processor.processRankOutput()
-    if (!rankOutput) {
-      return null
+    return rank
+  }
+  /**
+   * Filter the mempool of transactions that are in the provided array of block transactions
+   * @param blockTxs `IndexedTransaction` objects (RANK, RNKC, etc.)
+   * @returns Object containing array of `Outpoint`s to connect existing transactions to
+   * the new block, and array of `IndexedTransaction` objects that were missing from the mempool
+   */
+  private async reconcileMempoolCache(
+    blockTxs: IndexedTransaction[],
+  ): Promise<{ outpoints: Outpoint[]; missing: IndexedTransaction[] }> {
+    const outpoints: Outpoint[] = []
+    const missing: IndexedTransaction[] = []
+    for await (const tx of toAsyncIterable(blockTxs)) {
+      if (this.mempool.has(`${tx.txid}_${tx.outIdx}`)) {
+        // Mempool contains this block tx, so delete it from cache
+        this.mempool.delete(`${tx.txid}_${tx.outIdx}`)
+        outpoints.push({ txid: tx.txid, outIdx: tx.outIdx })
+        continue
+      }
+      // Mempool did not contain this tx, so add it to the missing list
+      missing.push(tx)
     }
-    return rankOutput
+    return { outpoints, missing }
   }
   /**
    * Process `Transaction.Input` objects to get the `scriptPayload`
@@ -961,17 +1174,23 @@ export default class Indexer extends EventEmitter {
     return Buffer.from(nHeight).readUInt32LE()
   }
   /**
-   *
-   * @param header
-   * @param includePrevHash
-   * @returns
+   * Convert `NNG.BlockHeader` to `Block` object
+   * @param header `NNG.BlockHeader`
+   * @param includePrevHash `boolean` to include previous block hash
+   * @returns `Block` object
    */
   private toBlock(header: NNG.BlockHeader, includePrevhash = false): Block {
     try {
       const height = this.toBlockHeight(header)
       const timestamp = header.timestamp()
       const hash = this.toBlockhashOrTxid(header.blockHash().hash())
-      const block: Block = { hash, height, timestamp, ranksLength: 0 }
+      const block: Block = {
+        hash,
+        height,
+        timestamp,
+        ranksLength: 0,
+        rnkcsLength: 0,
+      }
       if (includePrevhash) {
         block.prevhash = this.toBlockhashOrTxid(header.prevBlockHash().hash())
       }
@@ -981,86 +1200,195 @@ export default class Indexer extends EventEmitter {
     }
   }
   /**
-   * Convert `RankTransaction` Array into Map of `Profile`s
-   * @param ranks Array of `RankTransaction` objects
-   * @returns {ProfileMap} Map where key is `profileId` and value is `Profile` object
+   * Add a `RANK` transaction to the profile queue
+   * @param rank `IndexedTransactionRANK` object
+   * @returns `void`
    */
-  private toProfileMap(ranks: RankTransaction[]): ProfileMap {
-    const profiles: ProfileMap = new Map()
-    for (const rank of ranks) {
-      // Determine positive/negative stats per RANK sentiment
-      let ranking = 0n
-      let satsPositive = 0n
-      let satsNegative = 0n
-      let votesPositive = 0
-      let votesNegative = 0
-      // Do a switch here in case sentiment is more than binary in the future
-      switch (rank.sentiment) {
-        case 'positive':
-          ranking += rank.sats
-          satsPositive += rank.sats
-          votesPositive++
-          break
-        case 'negative':
-          ranking -= rank.sats
-          satsNegative += rank.sats
-          votesNegative++
-          break
+  private addRankTransactionToProfileQueue = (
+    rank: IndexedTransactionRANK,
+  ): void => {
+    const profile = this.toProfileFromRANK(rank)
+    this.profileQueue.set(profile.id, profile)
+  }
+  /**
+   * Add a `RNKC` transaction to the profile queue if applicable
+   * @param rnkc `IndexedTransactionRNKC` object
+   * @returns `void`
+   */
+  private addRankCommentToProfileQueue = (
+    rnkc: IndexedTransactionRNKC,
+  ): void => {
+    const profile = this.toProfileFromRNKC(rnkc)
+    if (profile) {
+      this.profileQueue.set(profile.id, profile)
+    }
+  }
+  /**
+   * Convert `IndexedTransactionRANK` to `Profile`, using existing profile
+   * from the queue or creating a new `Profile` object if it doesn't exist
+   * @param rank `IndexedTransactionRANK` object
+   * @returns `Profile` object
+   */
+  private toProfileFromRANK(rank: IndexedTransactionRANK): Profile {
+    // Determine positive/negative stats per RANK sentiment
+    let ranking = 0n
+    let satsPositive = 0n
+    let satsNegative = 0n
+    let votesPositive = 0
+    let votesNegative = 0
+    // Do a switch here in case sentiment is more than binary in the future
+    switch (rank.sentiment) {
+      case 'positive':
+        ranking += rank.sats
+        satsPositive += rank.sats
+        votesPositive++
+        break
+      case 'negative':
+        ranking -= rank.sats
+        satsNegative += rank.sats
+        votesNegative++
+        break
+    }
+    // pull out the fields we need to create a new profile/post
+    const { platform, profileId, postId, ...partialRANK } = rank
+    // check if this profile already exists in the queue
+    let profile = this.profileQueue.get(profileId)
+    // If this profile exists in the queue, add the RANK tx and update stats
+    if (profile) {
+      profile.ranking += ranking
+      profile.satsPositive += satsPositive
+      profile.satsNegative += satsNegative
+      profile.votesPositive += votesPositive
+      profile.votesNegative += votesNegative
+      profile.ranks.push(partialRANK)
+    }
+    // Otherwise, we set up a new profile
+    else {
+      profile = {
+        id: profileId,
+        platform,
+        ranks: [partialRANK],
+        comments: undefined,
+        ranking,
+        satsPositive,
+        satsNegative,
+        votesPositive,
+        votesNegative,
+        posts: new Map(),
       }
-      // pull out the fields we need to create a new profile/post
-      const { platform, profileId, postId, postHash, ...partialRank } = rank
-      let profile = profiles.get(profileId)
-      // If this profile exists in the map, add the RANK tx and update stats
-      if (profile) {
-        profile.ranking += ranking
-        profile.satsPositive += satsPositive
-        profile.satsNegative += satsNegative
-        profile.votesPositive += votesPositive
-        profile.votesNegative += votesNegative
-        profile.ranks.push(partialRank)
-      }
-      // Otherwise, we set up a new profile
-      else {
-        profile = {
-          id: profileId,
+    }
+    // If we have a postId, update stats for this post if it exists, otherwise
+    // add post to the map
+    if (postId) {
+      const post = profile.posts.get(postId)
+      if (post) {
+        post.ranking += ranking
+        post.satsPositive += satsPositive
+        post.satsNegative += satsNegative
+        post.votesPositive += votesPositive
+        post.votesNegative += votesNegative
+        post.ranks.push(partialRANK)
+      } else {
+        profile.posts.set(postId, {
           platform,
-          ranks: [partialRank],
+          id: postId,
+          profileId,
+          ranks: [partialRANK],
+          comments: undefined,
           ranking,
           satsPositive,
           satsNegative,
           votesPositive,
           votesNegative,
-          posts: new Map(),
-        }
+        })
       }
-      // If we have a postId, update post stats if it exists, or add new post to the map
-      if (postId) {
-        const post = profile.posts.get(postId)
-        if (post) {
-          post.ranking += ranking
-          post.satsPositive += satsPositive
-          post.satsNegative += satsNegative
-          post.votesPositive += votesPositive
-          post.votesNegative += votesNegative
-          post.ranks.push(partialRank)
-        } else {
-          profile.posts.set(postId, {
-            platform,
-            id: postId,
-            profileId,
-            hash: postHash,
-            ranks: [partialRank],
-            ranking,
-            satsPositive,
-            satsNegative,
-            votesPositive,
-            votesNegative,
-          })
-        }
-      }
-      // update the profile in the map and continue
-      profiles.set(profileId, profile)
     }
-    return profiles
+    // return the profile with posts
+    return profile
+  }
+  /**
+   * Convert `IndexedTransactionRNKC` to `Profile`, using existing profile
+   * from the queue or creating a new `Profile` object if it doesn't exist
+   * @param rnkc `IndexedTransactionRNKC` object
+   * @returns `Profile` object
+   */
+  private toProfileFromRNKC(rnkc: IndexedTransactionRNKC): Profile | null {
+    // pull out the fields we need to create a new profile/post
+    const { platform, inReplyToProfileId, inReplyToPostId, ...partialRNKC } =
+      rnkc
+    // if there is no profileId, return undefined
+    // This is a valid RNKC transaction, but it doesn't have a profileId
+    // so we can't add it to the profile queue
+    if (!inReplyToProfileId) {
+      return null
+    }
+    // Check if the profile exists in the queue
+    let profile = this.profileQueue.get(inReplyToProfileId)
+    if (profile) {
+      profile.comments.push(partialRNKC)
+    } else {
+      profile = this.toProfile({
+        id: inReplyToProfileId,
+        platform,
+        comments: [partialRNKC],
+      })
+    }
+    // If there is no postId, add the RNKC to the profile's comments
+    if (!inReplyToPostId) {
+      profile.comments.push(partialRNKC)
+      return profile
+    }
+    // Add the RNKC to the post's comments
+    let post = profile.posts.get(inReplyToPostId)
+    if (post) {
+      post.comments.push(partialRNKC)
+    } else {
+      post = this.toPost({
+        id: inReplyToPostId,
+        platform,
+        profileId: inReplyToProfileId,
+        comments: [partialRNKC],
+      })
+    }
+    profile.posts.set(inReplyToPostId, post)
+    return profile
+  }
+  /**
+   * Build a skeleton `Post` object with the required fields, if provided
+   * @param post `Partial<Post>` object to set the initial values for the post
+   * @returns {Post}
+   */
+  private toPost(post?: Partial<Post>): Post {
+    return {
+      id: post?.id,
+      platform: post?.platform,
+      profileId: post?.profileId,
+      ranks: post?.ranks,
+      comments: post?.comments,
+      ranking: post?.ranking ?? 0n,
+      satsPositive: post?.satsPositive ?? 0n,
+      satsNegative: post?.satsNegative ?? 0n,
+      votesPositive: post?.votesPositive ?? 0,
+      votesNegative: post?.votesNegative ?? 0,
+    }
+  }
+  /**
+   * Build a skeleton `Profile` object with the required fields, if provided
+   * @param profile `Partial<Profile>` object to set the initial values for the profile
+   * @returns {Profile}
+   */
+  private toProfile(profile?: Partial<Profile>): Profile {
+    return {
+      id: profile?.id,
+      platform: profile?.platform,
+      ranks: profile?.ranks,
+      comments: profile?.comments,
+      ranking: profile?.ranking ?? 0n,
+      satsPositive: profile?.satsPositive ?? 0n,
+      satsNegative: profile?.satsNegative ?? 0n,
+      votesPositive: profile?.votesPositive ?? 0,
+      votesNegative: profile?.votesNegative ?? 0,
+      posts: profile?.posts ?? new Map(),
+    }
   }
 }

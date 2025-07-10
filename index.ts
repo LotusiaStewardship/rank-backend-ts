@@ -1,7 +1,7 @@
 import Indexer from './lib/indexer'
 import API from './lib/api'
 import RuntimeState from './lib/state'
-import { log } from 'rank-lib'
+import { log } from './util/functions'
 import {
   ERR,
   NNG_PUB_DEFAULT_SOCKET_PATH,

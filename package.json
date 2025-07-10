@@ -30,7 +30,6 @@
   "homepage": "https://github.com/LotusiaStewardship/rank-backend-ts#readme",
   "devDependencies": {
     "@types/express": "4.17.21",
-    "@types/nanomsg": "4.2.3",
     "@types/node": "22.13.14",
     "@types/validator": "13.12.3",
     "prettier": "3.5.3",
@@ -51,8 +50,7 @@
     "dotenv-cli": "8.0.0",
     "express": "4.21.2",
     "flatbuffers": "25.2.10",
-    "nanomsg": "file:submodules/nanomsg",
-    "rank-lib": "file:submodules/rank-lib",
+    "lotus-lib": "file:submodules/lotus-lib",
     "validator": "13.12.0"
   }
 }

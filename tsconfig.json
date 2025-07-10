@@ -10,8 +10,8 @@
     ],
     "outDir": "./.output",
     "paths": {
-      "rank-lib": [
-        "./submodules/rank-lib"
+      "lotus-lib": [
+        "./submodules/lotus-lib"
       ]
     },
     "declaration": false,

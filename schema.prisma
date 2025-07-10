@@ -5,8 +5,8 @@
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
 
 generator client {
-  provider        = "prisma-client-js"
-  output          = "./prisma/prisma-client-js"
+  provider = "prisma-client-js"
+  output   = "./prisma/prisma-client-js"
 }
 
 datasource db {
@@ -23,6 +23,13 @@ model Account {
 }
 
 // Online profiles related to human identity
+// These profiles are the crux of the RANK reputation system, and thus
+// are the primary object of the RANK indexer.
+//
+// The RANK indexer upserts records for posts and comments through the `Profile` model.
+//
+// All database operations ought to be done through the `Profile` model, and upserts to
+// `Post`, `RankTransaction`, and `RankComment` should be done through database relations.
 model Profile {
   id            String // Platform-unique ID (e.g. per API)
   accountId     String
@@ -32,7 +39,9 @@ model Profile {
   satsNegative  BigInt // Total amount of sats burned for negative sentiment
   votesPositive Int // Total number of RANK txs with positive sentinment
   votesNegative Int // Total number of RANK txs with negative sentiment
+  // RANK txs and comments can be associated with a Profile
   ranks         RankTransaction[]
+  comments      RankComment[]
   posts         Post[]
   account       Account?          @relation(fields: [accountId], references: [id])
 
@@ -44,22 +53,24 @@ model Profile {
   @@index([platform(type: hash), ranking(type: btree, sort: Asc)], name: "profile_idx_ranked_lowest")
 }
 
+// Posts are indexed by platform, profileId, and postId
+// For the Lotusia platform, the profileId is the user's address (P2PKH payload), and the postId is the txid of the RNKC transaction
+// For all other platforms, the profileId is the user's unique ID (e.g. username), and the postId is the platform-specific post ID
 model Post {
   id            String // Platform-unique post ID
-  platform      String // e.g. Twitter/x.com
+  platform      String // e.g. Lotusia, Twitter/x.com
   profileId     String // Platform profile ID (i.e. username)
-  ranking       BigInt // Overall post ranking, in satoshis
+  ranking       BigInt // Overall post ranking, in satoshis (satsPositive - satsNegative)
   satsPositive  BigInt // Total amount of sats burned for positive sentiment
   satsNegative  BigInt // Total amount of sats burned for negative sentiment
   votesPositive Int // Total number of RANK txs with positive sentiment
   votesNegative Int // Total number of RANK txs with negative sentiment
-  // sha256 hash of the post content
-  // optional for backwards compatibility
-  hash          String?
   // Each Post correlates with a Profile
   profile       Profile           @relation(fields: [profileId, platform], references: [id, platform])
   // RANK txs specific to this Post
   ranks         RankTransaction[]
+  // RankComments can be associated with a Post
+  comments      RankComment[]
 
   // Each post will require these three entries
   @@id([platform, profileId, id])
@@ -74,21 +85,24 @@ model RankTransaction {
   // RankTransaction data
   txid          String // 32-byte hex
   outIdx        Int                @default(0) // index of the output that contains the RANK data
-  firstSeen     BigInt? // Time first seen by indexer, only for new mempool transactions
+  sats          BigInt // amount of sats burned
+  firstSeen     BigInt // Time first seen by indexer, only for new mempool transactions
   scriptPayload String // the p2pkh script payload that spent a UTXO for this transaction
   instanceId    String? // the ID of the extension instance that casted the vote
   height        Int? // null for mempool transactions
   timestamp     BigInt? // null until block is connected
   // RankOutput data
+  sentiment     String // 1-byte sentiment, 0x00 = negative, 0x01 = positive, and potentially more
   platform      String // references platform field on Profile model
   profileId     String // references id field on Profile model
   postId        String? // optional reference to platform post ID (e.g. x.com/:profileId/status/:postId)
-  sentiment     String // 1-byte sentiment, 0x00 = negative, 0x01 = positive, and potentially more
-  sats          BigInt // amount of sats burned
+  commentId     String? // optional reference to a RankComment txid
   // each RANK tx is associated with a Profile, else it is invalid
   profile       Profile            @relation(fields: [platform, profileId], references: [platform, id])
   // each RANK tx MAY be associated with a Post
   post          Post?              @relation(fields: [platform, profileId, postId], references: [platform, profileId, id])
+  // each RANK tx can be associated with a RankComment
+  comment       RankComment?       @relation(fields: [platform, commentId], references: [platform, txid])
   // each RANK tx from the mempool does not yet have a Block
   block         Block?             @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
   instance      ExtensionInstance? @relation(fields: [instanceId, scriptPayload], references: [id, scriptPayload])
@@ -102,12 +116,63 @@ model RankTransaction {
   @@index([height(sort: Desc)])
 }
 
+// OP_RETURN output order and spec:
+// outIdx 0: OP_RETURN <RNKC> <Platform> <ProfileId> <PostId>
+// outIdx 1: OP_RETURN <OP_PUSHDATA1> <Comment byte length> <Comment UTF-8>
+// outIdx 2: OP_RETURN <OP_PUSHDATA1> <Comment byte length> <Comment UTF-8 contd.>
+//
+// outIdx 0 MUST pay a minimum sat/byte fee for each byte of outIdx 1 and 2 (minus OP_RETURN bytes)
+// in order for the RANK indexer to process the comment. Fee rate is determined by the RANK indexer.
+//
+// Example: outIdx 1 uses all 220 available OP_RETURN bytes, and outIdx 2 uses 70 available bytes (290 bytes total)
+// If indexer fee rate is 1 XPI/byte, the total burned fee in outIdx 0 MUST be at least 290 XPI.
+//
+// Comments can be ranked just like other posts on other platforms. The XPI burned in outIdx 0 is used
+// as the initial positive ranking for the comment (similar to comments on Reddit which have 1 upvote by default)
+//
+model RankComment {
+  txid               String            @id // 32-byte hex
+  outIdx             Int               @default(0) // For RNKC txs, this is always 0
+  sats               BigInt // amount of sats burned (this is the default upvote amount for the comment)
+  firstSeen          BigInt // Time first seen by indexer
+  scriptPayload      String // address that submitted the comment (20-byte P2PKH)
+  instanceId         String? // the ID of the extension instance that posted the comment
+  height             Int? // null until block is connected
+  timestamp          BigInt? // null until block is connected
+  // RankComment data, including some data not present in the OP_RETURN protocol
+  data               Bytes // the comment text (UTF-8)
+  feeRate            Int // fee rate in sat/byte at time of comment insertion to the RANK indexer
+  platform           String // e.g. Lotusia, Twitter, etc.
+  inReplyToProfileId String? // id of the Profile that is being replied to (if no profileId, then the comment is a Lotusia post)
+  inReplyToPostId    String? // id of the Post that is being replied to (requires profileId)
+  inReplyToCommentId String? // id of the RankComment that is being replied to (requires profileId and postId)
+  // each RNKC tx from the mempool does not yet have a Block
+  block              Block?            @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
+  // each RankComment is directly replying to a Profile or Post
+  profile            Profile?          @relation(fields: [platform, inReplyToProfileId], references: [platform, id])
+  post               Post?             @relation(fields: [platform, inReplyToProfileId, inReplyToPostId], references: [platform, profileId, id])
+  comment            RankComment?      @relation("RankCommentReplies", fields: [platform, inReplyToProfileId, inReplyToCommentId], references: [platform, inReplyToProfileId, txid])
+  // RankComments can be ranked by RankTransactions
+  ranks              RankTransaction[]
+  // RankComments can be replying to other RankComments
+  comments           RankComment[]     @relation("RankCommentReplies")
+
+  // Unique constraints for relations to other tables
+  @@unique([platform, txid])
+  @@unique([platform, inReplyToProfileId, txid])
+  @@index([scriptPayload(type: hash)])
+  @@index([inReplyToProfileId(type: hash)])
+  @@index([inReplyToPostId(type: hash)])
+}
+
 model Block {
   hash        String            @unique
   height      Int               @unique
   timestamp   BigInt
   ranksLength Int               @default(0)
+  rnkcsLength Int               @default(0)
   ranks       RankTransaction[]
+  comments    RankComment[]
 
   @@unique([height, timestamp])
   @@index([hash(type: hash)])
@@ -115,9 +180,15 @@ model Block {
   @@index([height, ranksLength(sort: Desc)])
 }
 
+// This should be a separate registration database (e.g. like Cashweb Registry)
 model ExtensionInstance {
   id            String            @unique
   scriptPayload String            @unique
+  /**
+   * Transaction ID of the payment for API access
+   */
+  //paymentProof  String?           @unique
+  authToken     String?           @unique
   createdAt     DateTime
   lastSeen      DateTime
   optin         Boolean           @default(false)
