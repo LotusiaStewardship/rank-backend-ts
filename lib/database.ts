@@ -458,6 +458,7 @@ export default class Database {
                   where: { scriptPayload },
                   select: {
                     txid: true,
+                    sats: true,
                     sentiment: true,
                   },
                 },
@@ -474,6 +475,8 @@ export default class Database {
           const postMeta = {
             hasWalletUpvoted: false,
             hasWalletDownvoted: false,
+            satsUpvoted: 0n,
+            satsDownvoted: 0n,
             txidsUpvoted: [],
             txidsDownvoted: [],
           }
@@ -482,14 +485,21 @@ export default class Database {
               case 'positive':
                 postMeta.hasWalletUpvoted = true
                 postMeta.txidsUpvoted.push(rank.txid)
+                postMeta.satsUpvoted += rank.sats
                 break
               case 'negative':
                 postMeta.hasWalletDownvoted = true
                 postMeta.txidsDownvoted.push(rank.txid)
+                postMeta.satsDownvoted += rank.sats
                 break
             }
           })
-          data.postMeta = postMeta
+          // convert the sats to strings for JSON serialization
+          data.postMeta = {
+            ...postMeta,
+            satsUpvoted: postMeta.satsUpvoted.toString(),
+            satsDownvoted: postMeta.satsDownvoted.toString(),
+          }
         }
         data.profile = {
           ranking: post.profile.ranking.toString(),
