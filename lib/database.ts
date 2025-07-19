@@ -716,6 +716,7 @@ export default class Database {
           take: pageSize,
           select: {
             txid: true,
+            outIdx: true,
             sentiment: true,
             firstSeen: true,
             timestamp: true,
