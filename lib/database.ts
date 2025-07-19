@@ -8,6 +8,7 @@ import {
 } from '../util/constants'
 import type {
   Block,
+  RankTransaction,
   Profile,
   ProfileMap,
   Post,
@@ -15,10 +16,8 @@ import type {
   RankTarget,
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
-  IndexedProfileRanking,
-  IndexedTransactionRANK,
-  IndexedTransactionRNKC,
-} from 'lotus-lib'
+  IndexedRanking,
+} from 'rank-lib'
 
 type RequestPost = {
   profileId: string
@@ -328,8 +327,8 @@ export default class Database {
    * @param query - The query string to search for
    * @returns An array of profiles matching the query
    */
-  async apiSearchProfile(query: string): Promise<IndexedProfileRanking[]> {
-    const searchResults: IndexedProfileRanking[] = []
+  async apiSearchProfile(query: string): Promise<IndexedRanking[]> {
+    const searchResults: IndexedRanking[] = []
     // execute the transaction, properly structuring the results
     return await this.db.$transaction(async tx => {
       const profiles = await tx.profile.findMany({
@@ -342,7 +341,7 @@ export default class Database {
         take: API_SEARCH_RESULT_COUNT,
       })
       for (const profile of profiles) {
-        const data: IndexedProfileRanking = {
+        const data: IndexedRanking = {
           platform: profile.platform,
           profileId: profile.id,
           ranking: profile.ranking.toString(),
@@ -706,7 +705,10 @@ export default class Database {
               timestamp: 'desc',
             },
             {
-              firstSeen: 'desc',
+              firstSeen: {
+                sort: 'desc',
+                nulls: 'last',
+              },
             },
           ],
           // convert page to 0-based index
@@ -990,7 +992,8 @@ export default class Database {
         (
           await this.db.$transaction(
             changesSortedFiltered.map(([id, changes]) =>
-              // @ts-expect-error we don't care if the call signatures match because we know that the same input data powers both queries
+              // @ts-expect-error we don't care if the call signatures match
+              // because we know that the same input data powers both queries
               this.db[dataType == 'profileId' ? 'profile' : 'post'].findFirst({
                 where: {
                   id,
@@ -1114,32 +1117,14 @@ export default class Database {
    */
   async getRankTransactionsByHeight(
     height: number,
-  ): Promise<IndexedTransactionRANK[]> {
+  ): Promise<RankTransaction[]> {
     try {
       const result = await this.db.rankTransaction.findMany({
         where: { height },
       })
-      return result as IndexedTransactionRANK[]
+      return result as RankTransaction[]
     } catch (e) {
       throw new Error(`getRankTransactionsByHeight: ${e.message}`)
-    }
-  }
-  /**
-   * Retrieves all rank comments for a specific block height
-   * @param height The block height to query
-   * @returns Array of RankComment objects
-   * @throws {Error} If the query fails
-   */
-  async getRankCommentsByHeight(
-    height: number,
-  ): Promise<IndexedTransactionRNKC[]> {
-    try {
-      const result = await this.db.rankComment.findMany({
-        where: { height },
-      })
-      return result as IndexedTransactionRNKC[]
-    } catch (e) {
-      throw new Error(`getRankCommentsByHeight: ${e.message}`)
     }
   }
   /**
@@ -1174,27 +1159,15 @@ export default class Database {
   /**
    * Saves a new block with its associated rank transactions and profiles
    * @param block The block data to save
-   * @param outpoints Array of outpoints to connect to the block
+   * @param rankTxids Array of rank transaction IDs to connect to the block
    * @param profiles Map of profiles to upsert with the block
    * @throws {Error} If the save operation fails
    */
   async saveBlock(
     block: Block,
-    outpoints: {
-      ranks: Pick<IndexedTransactionRANK, 'txid' | 'outIdx'>[]
-      rnkcs: Pick<IndexedTransactionRNKC, 'txid' | 'outIdx'>[]
-    },
-    profiles: ProfileMap,
+    rankTxids: { txid_outIdx: Pick<RankTransaction, 'txid' | 'outIdx'> }[],
+    profiles: Map<string, Profile>,
   ) {
-    const ranksConnect = outpoints.ranks.map(({ txid, outIdx }) => ({
-      txid_outIdx: {
-        txid,
-        outIdx,
-      },
-    }))
-    const commentsConnect = outpoints.rnkcs.map(({ txid }) => ({
-      txid,
-    }))
     try {
       await this.db.$transaction([
         // Create the block and connect corresponding RANK txs
@@ -1202,21 +1175,17 @@ export default class Database {
           data: {
             ...block,
             ranks: {
-              connect: ranksConnect,
-            },
-            comments: {
-              connect: commentsConnect,
+              connect: rankTxids,
             },
           },
         }),
-        // Upsert any profiles that were confirmed in the block but not already
-        // upserted from the mempool
+        // Upsert any profiles if necessary
         // RANK txs upserted here will be connected to above block
         ...(await this.toProfileUpsertStatements(profiles)),
       ])
     } catch (e) {
       throw new Error(
-        `saveBlock(${block.height}, ${outpoints.ranks.length}, ${outpoints.rnkcs.length}, ${profiles.size}): ${e.message}`,
+        `saveBlock(${block.height}, ${rankTxids.length}, ${typeof profiles}): ${e.message}`,
       )
     }
   }
@@ -1254,7 +1223,6 @@ export default class Database {
           height: true,
           timestamp: true,
           ranksLength: true,
-          rnkcsLength: true,
         },
       })
     } catch (e) {
@@ -1274,29 +1242,13 @@ export default class Database {
       const {
         platform,
         ranks,
-        comments,
         ranking,
         satsPositive,
         satsNegative,
         votesPositive,
         votesNegative,
       } = profile
-      const ranksCreateMany = ranks
-        ? {
-            createMany: {
-              data: ranks,
-            },
-          }
-        : undefined
-      const commentsCreateMany = comments
-        ? {
-            createMany: {
-              data: comments,
-            },
-          }
-        : undefined
       // push profile upsert first
-      // These upserts will create the RankTransaction records
       upserts.push(
         this.db.profile.upsert({
           where: {
@@ -1312,13 +1264,15 @@ export default class Database {
             votesPositive,
             votesNegative,
             account: { create: { id: randomUUID() } },
-            ranks: ranksCreateMany,
-            comments: commentsCreateMany,
+            ranks: {
+              createMany: { data: ranks },
+            },
           },
           // profile exists
           update: {
-            ranks: ranksCreateMany,
-            comments: commentsCreateMany,
+            ranks: {
+              createMany: { data: ranks },
+            },
             ranking: {
               increment: ranking,
             },
@@ -1338,37 +1292,19 @@ export default class Database {
         }),
       )
       // push any post upsert(s) after Profile exists
-      // These upserts will connect the RankTransaction records to the Post
       if (profile.posts) {
         for await (const [id, post] of this.iteratePosts(profile.posts)) {
           const {
             platform,
             profileId,
+            hash,
             ranks,
-            comments,
             ranking,
             satsPositive,
             satsNegative,
             votesPositive,
             votesNegative,
           } = post
-          const ranksConnect = ranks
-            ? {
-                connect: ranks.map(rank => ({
-                  txid_outIdx: {
-                    txid: rank.txid,
-                    outIdx: rank.outIdx,
-                  },
-                })),
-              }
-            : undefined
-          const commentsConnect = comments
-            ? {
-                connect: comments.map(comment => ({
-                  txid: comment.txid,
-                })),
-              }
-            : undefined
           const increments = {
             ranking: {
               increment: ranking,
@@ -1406,13 +1342,26 @@ export default class Database {
                 satsNegative,
                 votesPositive,
                 votesNegative,
-                ranks: ranksConnect,
-                comments: commentsConnect,
+                hash,
+                ranks: {
+                  connect: ranks.map(rank => ({
+                    txid_outIdx: {
+                      txid: rank.txid,
+                      outIdx: rank.outIdx,
+                    },
+                  })),
+                },
               },
               // post exists
               update: {
-                ranks: ranksConnect,
-                comments: commentsConnect,
+                ranks: {
+                  connect: ranks.map(rank => ({
+                    txid_outIdx: {
+                      txid: rank.txid,
+                      outIdx: rank.outIdx,
+                    },
+                  })),
+                },
                 ...increments,
               },
             }),
@@ -1435,31 +1384,12 @@ export default class Database {
       const {
         platform,
         ranks,
-        comments,
         ranking,
         satsPositive,
         satsNegative,
         votesPositive,
         votesNegative,
       } = profile
-      const ranksDelete = ranks
-        ? {
-            deleteMany: {
-              txid: {
-                in: ranks.map(rank => rank.txid),
-              },
-            },
-          }
-        : undefined
-      const commentsDelete = comments
-        ? {
-            deleteMany: {
-              txid: {
-                in: comments.map(comment => comment.txid),
-              },
-            },
-          }
-        : undefined
       // push profile rewind first
       rewinds.push(
         this.db.profile.update({
@@ -1467,8 +1397,13 @@ export default class Database {
             platform_id: { platform, id },
           },
           data: {
-            ranks: ranksDelete,
-            comments: commentsDelete,
+            ranks: {
+              deleteMany: {
+                txid: {
+                  in: ranks.map(rank => rank.txid),
+                },
+              },
+            },
             ranking: {
               decrement: ranking,
             },
@@ -1494,31 +1429,12 @@ export default class Database {
             platform,
             profileId,
             ranks,
-            comments,
             ranking,
             satsPositive,
             satsNegative,
             votesPositive,
             votesNegative,
           } = post
-          const ranksDelete = ranks
-            ? {
-                deleteMany: {
-                  txid: {
-                    in: ranks.map(rank => rank.txid),
-                  },
-                },
-              }
-            : undefined
-          const commentsDelete = comments
-            ? {
-                deleteMany: {
-                  txid: {
-                    in: comments.map(comment => comment.txid),
-                  },
-                },
-              }
-            : undefined
           const decrements = {
             ranking: {
               decrement: ranking,
@@ -1546,8 +1462,13 @@ export default class Database {
                 },
               },
               data: {
-                ranks: ranksDelete,
-                comments: commentsDelete,
+                ranks: {
+                  deleteMany: {
+                    txid: {
+                      in: ranks.map(rank => rank.txid),
+                    },
+                  },
+                },
                 // decrement post counters
                 ...decrements,
               },
