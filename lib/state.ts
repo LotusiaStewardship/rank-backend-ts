@@ -1,4 +1,4 @@
-import type { Block } from 'lotus-lib'
+import type { Block } from 'rank-lib'
 
 export default class RuntimeState {
   public checkpoint: Block
