@@ -714,6 +714,7 @@ export default class Database {
           take: pageSize,
           select: {
             txid: true,
+            outIdx: true,
             sentiment: true,
             firstSeen: true,
             timestamp: true,
@@ -732,10 +733,12 @@ export default class Database {
             firstSeen: (rank.firstSeen / 1_000n).toString(),
             timestamp: rank.timestamp?.toString(),
             sats: rank.sats.toString(),
-            post: {
-              ...rank.post,
-              ranking: rank.post.ranking.toString(),
-            },
+            post: rank.post
+              ? {
+                  ...rank.post,
+                  ranking: rank.post.ranking.toString(),
+                }
+              : undefined,
           })),
           numPages: Math.ceil(totalRanks / pageSize),
         }
