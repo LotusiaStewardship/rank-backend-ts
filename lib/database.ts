@@ -6,18 +6,17 @@ import {
   API_SEARCH_RESULT_COUNT,
   ERR,
 } from '../util/constants'
-import type {
-  Block,
-  Profile,
-  ProfileMap,
-  Post,
-  PostMap,
-  RankTarget,
-  ScriptChunkPlatformUTF8,
-  ScriptChunkSentimentUTF8,
-  IndexedProfileRanking,
-  IndexedTransactionRANK,
-  IndexedTransactionRNKC,
+import type { Outpoint } from './indexer'
+import {
+  type Block,
+  type ProfileMap,
+  type RankTarget,
+  type ScriptChunkPlatformUTF8,
+  type ScriptChunkSentimentUTF8,
+  type IndexedProfileRanking,
+  type IndexedTransactionRANK,
+  type IndexedTransactionRNKC,
+  toAsyncIterable,
 } from 'lotus-lib'
 
 type RequestPost = {
@@ -1175,7 +1174,7 @@ export default class Database {
     }
   }
   /**
-   * Saves a new block with its associated rank transactions and profiles
+   * Saves a new block with its associated LOKAD transactions and profiles
    * @param block The block data to save
    * @param outpoints Array of outpoints to connect to the block
    * @param profiles Map of profiles to upsert with the block
@@ -1184,17 +1183,19 @@ export default class Database {
   async saveBlock(
     block: Block,
     outpoints: {
-      ranks: Pick<IndexedTransactionRANK, 'txid' | 'outIdx'>[]
-      rnkcs: Pick<IndexedTransactionRNKC, 'txid' | 'outIdx'>[]
+      ranks: Outpoint[]
+      rnkcs: Outpoint[]
     },
     profiles: ProfileMap,
   ) {
+    // Connect RANK txs to the block, since they were upserted from mempool
     const ranksConnect = outpoints.ranks.map(({ txid, outIdx }) => ({
       txid_outIdx: {
         txid,
         outIdx,
       },
     }))
+    // Connect RNKC txs to the block, since they were upserted from mempool
     const commentsConnect = outpoints.rnkcs.map(({ txid }) => ({
       txid,
     }))
@@ -1214,7 +1215,7 @@ export default class Database {
         }),
         // Upsert any profiles that were confirmed in the block but not already
         // upserted from the mempool
-        // RANK txs upserted here will be connected to above block
+        // LOKAD txs upserted here will be connected to above block
         ...(await this.toProfileUpsertStatements(profiles)),
       ])
     } catch (e) {
@@ -1273,7 +1274,8 @@ export default class Database {
     const upserts: ReturnType<
       typeof this.db.post.upsert | typeof this.db.profile.upsert
     >[] = []
-    for await (const [id, profile] of this.iterateProfiles(profiles)) {
+    const profilesIterable = toAsyncIterable(profiles)
+    for await (const [id, profile] of profilesIterable) {
       const {
         platform,
         ranks,
@@ -1343,17 +1345,19 @@ export default class Database {
       // push any post upsert(s) after Profile exists
       // These upserts will connect the RankTransaction records to the Post
       if (profile.posts) {
-        for await (const [id, post] of this.iteratePosts(profile.posts)) {
+        const posts = toAsyncIterable(profile.posts)
+        for await (const [id, post] of posts) {
           const {
             platform,
             profileId,
-            ranks,
-            comments,
+            data, // data is the comment text for Lotusia posts
             ranking,
             satsPositive,
             satsNegative,
             votesPositive,
             votesNegative,
+            ranks,
+            comments,
           } = post
           const ranksConnect = ranks
             ? {
@@ -1365,10 +1369,17 @@ export default class Database {
                 })),
               }
             : undefined
-          const commentsConnect = comments
+          // We don't want to connect comments here, because comments are not
+          // necessarily associated with the profile. If comments are defined
+          // in this post, then we want to create the comment record(s) in the
+          // upsert statement(s) below
+          const commentsConnectOrCreate = comments
             ? {
-                connect: comments.map(comment => ({
-                  txid: comment.txid,
+                connectOrCreate: comments.map(comment => ({
+                  where: {
+                    txid: comment.txid,
+                  },
+                  create: comment,
                 })),
               }
             : undefined
@@ -1404,18 +1415,19 @@ export default class Database {
                 id,
                 platform,
                 profileId,
+                data, // data is the comment text for Lotusia posts
                 ranking,
                 satsPositive,
                 satsNegative,
                 votesPositive,
                 votesNegative,
                 ranks: ranksConnect,
-                comments: commentsConnect,
+                comments: commentsConnectOrCreate,
               },
               // post exists
               update: {
                 ranks: ranksConnect,
-                comments: commentsConnect,
+                comments: commentsConnectOrCreate,
                 ...increments,
               },
             }),
@@ -1434,7 +1446,8 @@ export default class Database {
     const rewinds: ReturnType<
       typeof this.db.post.update | typeof this.db.profile.update
     >[] = []
-    for await (const [id, profile] of this.iterateProfiles(profiles)) {
+    const profilesIterable = toAsyncIterable(profiles)
+    for await (const [id, profile] of profilesIterable) {
       const {
         platform,
         ranks,
@@ -1560,41 +1573,6 @@ export default class Database {
       }
     }
     return rewinds
-  }
-  /**
-   * Converts a ProfileMap into an AsyncIterable for asynchronous iteration
-   * @param profiles - The ProfileMap to iterate over
-   * @returns An AsyncIterable that yields [string, Profile] tuples
-   * @example
-   * ```typescript
-   * for await (const [id, profile] of db.iterateProfiles(profiles)) {
-   *   // Process each profile asynchronously
-   * }
-   * ```
-   */
-  async *iterateProfiles(
-    profiles: ProfileMap,
-  ): AsyncIterable<[string, Profile]> {
-    for (const [id, profile] of profiles) {
-      yield [id, profile]
-    }
-  }
-
-  /**
-   * Converts a PostMap into an AsyncIterable for asynchronous iteration
-   * @param posts - The PostMap to iterate over
-   * @returns An AsyncIterable that yields [string, Post] tuples
-   * @example
-   * ```typescript
-   * for await (const [id, post] of db.iteratePosts(posts)) {
-   *   // Process each post asynchronously
-   * }
-   * ```
-   */
-  async *iteratePosts(posts: PostMap): AsyncIterable<[string, Post]> {
-    for (const [id, post] of posts) {
-      yield [id, post]
-    }
   }
   /**
    * Retrieves voter details for a specific platform profile

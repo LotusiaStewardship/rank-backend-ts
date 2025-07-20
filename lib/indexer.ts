@@ -26,6 +26,7 @@ import {
   RANK_OUTPUT_MIN_VALID_SATS,
   MAX_OP_RETURN_OUTPUTS,
   toAsyncIterable,
+  isOpReturn,
 } from 'lotus-lib'
 import {
   ERR,
@@ -78,10 +79,10 @@ type ProcessedBlockOrMempool = {
   rnkcs: IndexedTransactionRNKC[]
 }
 /** Object containing primary key fields connecting saved transactions to blocks */
-type Outpoint = Pick<IndexedTransaction, 'txid' | 'outIdx'>
+export type Outpoint = Pick<IndexedTransaction, 'txid' | 'outIdx'>
 /**
  * Processes all transactions to find, parse, and index OP_RETURN outputs with
- * the `RANK` LOKAD prefix.
+ * the `RANK` and `RNKC` LOKAD prefixes.
  *
  * Maintains a persistent connection to lotusd over the NNG interface. Subscribes
  * to the appropriate lotusd publishing endpoints and reacts to new messages
@@ -323,7 +324,8 @@ export default class Indexer extends EventEmitter {
    */
   async initSyncBlocks(checkpoint: Block): Promise<Block> {
     let totalBlocks = 0,
-      totalRanks = 0
+      totalRanks = 0,
+      totalComments = 0
     const t0 = performance.now()
     while (true) {
       const startHeight = checkpoint.height + 1
@@ -339,12 +341,14 @@ export default class Indexer extends EventEmitter {
       }
       // Save the blockrange we have
       let ranksLength: number
-      ;[checkpoint, ranksLength] = await this.saveBlockRange(
+      let rnkcsLength: number
+      ;[checkpoint, ranksLength, rnkcsLength] = await this.saveBlockRange(
         blockrange,
         blocksLength,
       )
       totalBlocks += blocksLength
       totalRanks += ranksLength
+      totalComments += rnkcsLength
       const t1 = (performance.now() - t0).toFixed(3)
       log([
         ['init', 'syncBlocks'],
@@ -352,6 +356,7 @@ export default class Indexer extends EventEmitter {
         ['startHeight', `${startHeight}`],
         ['endHeight', `${checkpoint.height}`],
         [`ranksLength`, `${ranksLength}`],
+        [`rnkcsLength`, `${rnkcsLength}`],
         ['elapsed', `${t1}ms`],
       ])
       // If we didn't sync full block range, we are now synced
@@ -365,6 +370,7 @@ export default class Indexer extends EventEmitter {
       ['status', 'finished'],
       ['totalBlocks', `${totalBlocks}`],
       ['totalRanks', `${totalRanks}`],
+      ['totalComments', `${totalComments}`],
       ['elapsed', `${t1}s`],
     ])
     // return the latest checkpoint block
@@ -918,6 +924,7 @@ export default class Indexer extends EventEmitter {
       rnkcs: [],
     }
     const txsLength = data.txsLength()
+    // `block` is null if processing mempool txs, otherwise it's the block header
     const block = data instanceof NNG.Block ? this.toBlock(data.header()) : null
     const startIndex = block ? 1 : 0
     // skip coinbase tx if processing block data
@@ -926,7 +933,7 @@ export default class Indexer extends EventEmitter {
         const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
         const tx = new Transaction(Buffer.from(rawArray))
-        // Process the transaction
+        // Process the transaction as either block or mempool tx
         const processed = this.processTransaction(tx, block)
         if (processed.ranks) {
           results.ranks.push(...processed.ranks)
@@ -1002,7 +1009,7 @@ export default class Indexer extends EventEmitter {
         for (let i = 1; i < MAX_OP_RETURN_OUTPUTS; i++) {
           const output = tx.outputs[i]
           const scriptProcessor = this.validateOutputScript(
-            output.script.toBuffer(),
+            output?.script?.toBuffer(),
           )
           // For any output that fails at this point, abandon the loop
           // and switch blocks to return the results we have
@@ -1066,21 +1073,25 @@ export default class Indexer extends EventEmitter {
    * @param output `Transaction.Output` object
    * @returns `ScriptProcessor` object or `null` if invalid
    */
-  private validateOutputScript(script: Buffer): ScriptProcessor | null {
-    // Create a ScriptProcessor to validate the output script
-    let processor: ScriptProcessor | null = null
-    try {
-      processor = new ScriptProcessor(script)
-    } catch (e) {
+  private validateOutputScript(
+    script: Buffer | undefined,
+  ): ScriptProcessor | null {
+    if (!script) {
       return null
     }
     // Check if the output script is OP_RETURN
-    if (!processor.isOpReturn()) {
+    if (!isOpReturn(script)) {
       return null
     }
-    // TODO: add more validation here as needed
-    //
-    return processor
+    // Create a ScriptProcessor to validate the output script
+    try {
+      const processor = new ScriptProcessor(script)
+      // TODO: add more validation here as needed
+      //
+      return processor
+    } catch (e) {
+      return null
+    }
   }
   /**
    * Validate a `RANK` output that is OP_RETURN at outIdx 1 or 2
@@ -1218,9 +1229,16 @@ export default class Indexer extends EventEmitter {
   private addRankCommentToProfileQueue = (
     rnkc: IndexedTransactionRNKC,
   ): void => {
-    const profile = this.toProfileFromRNKC(rnkc)
-    if (profile) {
-      this.profileQueue.set(profile.id, profile)
+    // Each RNKC is a Lotusia post from a profile, so we add it to the profile queue
+    this.profileQueue.set(
+      rnkc.scriptPayload, // scriptPayload is the profileId for Lotusia posts
+      this.toLotusiaProfileFromRNKC(rnkc),
+    )
+    // Each RNKC is also a comment on a profile or post, so we add it to the replied
+    // profile's queue as well
+    const repliedProfile = this.toProfileFromRNKC(rnkc)
+    if (repliedProfile) {
+      this.profileQueue.set(repliedProfile.id, repliedProfile)
     }
   }
   /**
@@ -1307,8 +1325,55 @@ export default class Indexer extends EventEmitter {
     return profile
   }
   /**
+   * Convert `IndexedTransactionRNKC` to a Lotusia `Profile` object, using
+   * existing profile from the queue or creating a new `Profile` object if it
+   * doesn't exist
+   * @param rnkc `IndexedTransactionRNKC` object
+   * @returns Lotusia-specific `Profile` object
+   */
+  private toLotusiaProfileFromRNKC(rnkc: IndexedTransactionRNKC): Profile {
+    // pull out the fields we need to create a new profile/post
+    const { scriptPayload: profileId, txid: postId, data } = rnkc
+    // Check if the profile exists in the queue, otherwise create
+    let profile = this.profileQueue.get(profileId)
+    if (!profile) {
+      profile = this.toProfile({
+        id: profileId,
+        // this is a Lotusia post, so we set the platform to lotusia
+        platform: 'lotusia',
+      })
+    }
+    // Increment profile ranking and satsPositive for the RNKC tx
+    // This is effectively a self-vote on the profile
+    profile.ranking += rnkc.sats
+    profile.satsPositive += rnkc.sats
+    profile.votesPositive++
+
+    // Check if the post exists in the queued profile's posts, otherwise create
+    let post = profile.posts.get(postId)
+    if (!post) {
+      post = this.toPost({
+        id: postId,
+        // this is a Lotusia post, so we set the platform to lotusia
+        platform: 'lotusia',
+        profileId,
+        data,
+      })
+    }
+    // Increment post ranking and satsPositive for the RNKC tx
+    // This is effectively a self-vote on the post
+    post.ranking += rnkc.sats
+    post.satsPositive += rnkc.sats
+    post.votesPositive++
+    // Set the post in the profile's posts map
+    profile.posts.set(postId, post)
+
+    return profile
+  }
+  /**
    * Convert `IndexedTransactionRNKC` to `Profile`, using existing profile
-   * from the queue or creating a new `Profile` object if it doesn't exist
+   * from the queue as the replied profile, or creating a new `Profile` object
+   * if it doesn't exist
    * @param rnkc `IndexedTransactionRNKC` object
    * @returns `Profile` object
    */
@@ -1322,19 +1387,19 @@ export default class Indexer extends EventEmitter {
     if (!inReplyToProfileId) {
       return null
     }
-    // Check if the profile exists in the queue
+    // Check if the profile exists in the queue, otherwise create
     let profile = this.profileQueue.get(inReplyToProfileId)
-    if (profile) {
-      profile.comments.push(partialRNKC)
-    } else {
+    if (!profile) {
       profile = this.toProfile({
         id: inReplyToProfileId,
         platform,
-        comments: [partialRNKC],
       })
     }
-    // If there is no postId, add the RNKC to the profile's comments
+    // If there is no postId, add the RNKC to the profile's comments and return
     if (!inReplyToPostId) {
+      if (!profile.comments) {
+        profile.comments = []
+      }
       profile.comments.push(partialRNKC)
       return profile
     }
@@ -1364,6 +1429,7 @@ export default class Indexer extends EventEmitter {
       platform: post?.platform,
       profileId: post?.profileId,
       ranks: post?.ranks,
+      data: post?.data,
       comments: post?.comments,
       ranking: post?.ranking ?? 0n,
       satsPositive: post?.satsPositive ?? 0n,

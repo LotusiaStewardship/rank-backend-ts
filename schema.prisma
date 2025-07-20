@@ -60,11 +60,13 @@ model Post {
   id            String // Platform-unique post ID
   platform      String // e.g. Lotusia, Twitter/x.com
   profileId     String // Platform profile ID (i.e. username)
+  data          Bytes? // the post text, in UInt8Array (decoded from UTF-8)
   ranking       BigInt // Overall post ranking, in satoshis (satsPositive - satsNegative)
   satsPositive  BigInt // Total amount of sats burned for positive sentiment
   satsNegative  BigInt // Total amount of sats burned for negative sentiment
   votesPositive Int // Total number of RANK txs with positive sentiment
   votesNegative Int // Total number of RANK txs with negative sentiment
+  comment       RankComment?      @relation("LotusiaPost")
   // Each Post correlates with a Profile
   profile       Profile           @relation(fields: [profileId, platform], references: [id, platform])
   // RANK txs specific to this Post
@@ -74,6 +76,8 @@ model Post {
 
   // Each post will require these three entries
   @@id([platform, profileId, id])
+  // Unique constraints for relation to RankComment model
+  @@unique([id, profileId, data])
   @@index([id(type: hash)])
   // these indexes are best used with a `LIMIT BY`
   // ref: https://www.postgresql.org/docs/current/indexes-ordering.html#INDEXES-ORDERING
@@ -96,13 +100,10 @@ model RankTransaction {
   platform      String // references platform field on Profile model
   profileId     String // references id field on Profile model
   postId        String? // optional reference to platform post ID (e.g. x.com/:profileId/status/:postId)
-  commentId     String? // optional reference to a RankComment txid
   // each RANK tx is associated with a Profile, else it is invalid
   profile       Profile            @relation(fields: [platform, profileId], references: [platform, id])
   // each RANK tx MAY be associated with a Post
   post          Post?              @relation(fields: [platform, profileId, postId], references: [platform, profileId, id])
-  // each RANK tx can be associated with a RankComment
-  comment       RankComment?       @relation(fields: [platform, commentId], references: [platform, txid])
   // each RANK tx from the mempool does not yet have a Block
   block         Block?             @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
   instance      ExtensionInstance? @relation(fields: [instanceId, scriptPayload], references: [id, scriptPayload])
@@ -131,8 +132,8 @@ model RankTransaction {
 // as the initial positive ranking for the comment (similar to comments on Reddit which have 1 upvote by default)
 //
 model RankComment {
-  txid               String            @id // 32-byte hex
-  outIdx             Int               @default(0) // For RNKC txs, this is always 0
+  txid               String   @id // 32-byte hex
+  outIdx             Int      @default(0) // For RNKC txs, this is always 0
   sats               BigInt // amount of sats burned (this is the default upvote amount for the comment)
   firstSeen          BigInt // Time first seen by indexer
   scriptPayload      String // address that submitted the comment (20-byte P2PKH)
@@ -142,27 +143,23 @@ model RankComment {
   // RankComment data, including some data not present in the OP_RETURN protocol
   data               Bytes // the comment text (UTF-8)
   feeRate            Int // fee rate in sat/byte at time of comment insertion to the RANK indexer
-  platform           String // e.g. Lotusia, Twitter, etc.
+  platform           String // The platform of the profile/post that is being replied to (e.g. Lotusia, Twitter, etc.)
   inReplyToProfileId String? // id of the Profile that is being replied to (if no profileId, then the comment is a Lotusia post)
   inReplyToPostId    String? // id of the Post that is being replied to (requires profileId)
-  inReplyToCommentId String? // id of the RankComment that is being replied to (requires profileId and postId)
   // each RNKC tx from the mempool does not yet have a Block
-  block              Block?            @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
+  block              Block?   @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
+  post               Post     @relation("LotusiaPost", fields: [txid, scriptPayload, data], references: [id, profileId, data])
   // each RankComment is directly replying to a Profile or Post
-  profile            Profile?          @relation(fields: [platform, inReplyToProfileId], references: [platform, id])
-  post               Post?             @relation(fields: [platform, inReplyToProfileId, inReplyToPostId], references: [platform, profileId, id])
-  comment            RankComment?      @relation("RankCommentReplies", fields: [platform, inReplyToProfileId, inReplyToCommentId], references: [platform, inReplyToProfileId, txid])
-  // RankComments can be ranked by RankTransactions
-  ranks              RankTransaction[]
-  // RankComments can be replying to other RankComments
-  comments           RankComment[]     @relation("RankCommentReplies")
+  repliedProfile     Profile? @relation(fields: [platform, inReplyToProfileId], references: [platform, id])
+  repliedPost        Post?    @relation(fields: [platform, inReplyToProfileId, inReplyToPostId], references: [platform, profileId, id])
 
-  // Unique constraints for relations to other tables
-  @@unique([platform, txid])
-  @@unique([platform, inReplyToProfileId, txid])
+  // Unique constraints for relation to Post model
+  // txid = postId, scriptPayload = profileId, data = comment text
+  @@unique([txid, scriptPayload, data])
   @@index([scriptPayload(type: hash)])
-  @@index([inReplyToProfileId(type: hash)])
-  @@index([inReplyToPostId(type: hash)])
+  @@index([platform(type: hash), inReplyToProfileId(type: hash)])
+  @@index([platform(type: hash), inReplyToPostId(type: hash)])
+  @@index([height(sort: Desc)])
 }
 
 model Block {
