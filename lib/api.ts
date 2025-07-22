@@ -18,15 +18,13 @@ import {
 import { Worker as TemporalWorker, NativeConnection } from '@temporalio/worker'
 import { Address, Message, Networks } from 'bitcore-lib-xpi'
 import {
-  PLATFORMS,
-  log,
+  PlatformConfiguration,
   type ScriptChunkPlatformUTF8,
   type InstanceData,
   type AuthorizationData,
   Util,
   Block,
-  LogEntry,
-} from 'rank-lib'
+} from 'lotus-lib'
 import RuntimeState from './state'
 import Database, { getTimestampUTC, type Timespan } from './database'
 import config from '../config'
@@ -36,7 +34,7 @@ import {
   ERR,
   HTTP,
 } from '../util/constants'
-import { isValidInstanceId } from '../util/functions'
+import { isValidInstanceId, log, type LogEntry } from '../util/functions'
 
 /**
  * Represents a profile's ranking information including total and change metrics
@@ -238,7 +236,7 @@ export default class API extends EventEmitter {
     this.app.use(json())
     this.app.use('/api/v1', this.router)
     // App settings
-    this.app.set('platformParams', PLATFORMS)
+    this.app.set('platformParams', PlatformConfiguration)
   }
   /**
    * Initialze database HTTP server and Temporal client/worker
@@ -432,7 +430,7 @@ export default class API extends EventEmitter {
       platform: ScriptChunkPlatformUTF8,
     ) => {
       platform = platform.toLowerCase() as ScriptChunkPlatformUTF8
-      const platformParams = PLATFORMS[platform]
+      const platformParams = PlatformConfiguration[platform]
       if (!platformParams) {
         return this.sendJSON(
           res,
@@ -459,7 +457,9 @@ export default class API extends EventEmitter {
     ) => {
       profileId = profileId.toLowerCase()
       const platform = req.params.platform as ScriptChunkPlatformUTF8
-      const platformParams = this.app.get('platformParams') as typeof PLATFORMS
+      const platformParams = this.app.get(
+        'platformParams',
+      ) as typeof PlatformConfiguration
       const { profileId: profileIdParams } = platformParams[platform]
       if (profileId.length > profileIdParams.len) {
         return this.sendJSON(
@@ -487,7 +487,9 @@ export default class API extends EventEmitter {
     ) => {
       postId = postId.toLowerCase()
       const platform = req.params.platform as ScriptChunkPlatformUTF8
-      const platformParams = this.app.get('platformParams') as typeof PLATFORMS
+      const platformParams = this.app.get(
+        'platformParams',
+      ) as typeof PlatformConfiguration
       const { postId: postIdParams } = platformParams[platform]
       if (!postId.match(postIdParams.regex)) {
         return this.sendJSON(
