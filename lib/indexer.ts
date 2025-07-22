@@ -1,8 +1,6 @@
 import { Transaction } from 'bitcore-lib-xpi'
 import { Builder, ByteBuffer } from 'flatbuffers'
 //import { isIP } from 'validator'
-import * as NNG from './nng-interface'
-import { Socket, socket } from 'nanomsg'
 //import { resolve } from 'node:path/posix'
 //import { Worker } from 'node:worker_threads'
 import { EventEmitter } from 'events'
@@ -21,6 +19,13 @@ import type {
   ScriptChunkLokadUTF8,
 } from 'lotus-lib'
 import {
+  NNG,
+  NNG_RPC_BLOCKRANGE_SIZE,
+  type NNGMessageType,
+  type NNGMessageProcessor,
+} from 'lotus-lib'
+import * as NNGInterface from 'lotus-lib/lib/nng-interface'
+import {
   ScriptProcessor,
   RANK_BLOCK_GENESIS_V1,
   RANK_OUTPUT_MIN_VALID_SATS,
@@ -28,27 +33,8 @@ import {
   toAsyncIterable,
   isOpReturn,
 } from 'lotus-lib'
-import {
-  ERR,
-  NNG_REQUEST_TIMEOUT_LENGTH,
-  NNG_RPC_BLOCKRANGE_SIZE,
-  NNG_RPC_RCVMAXSIZE_POLICY,
-  NNG_SOCKET_MAXRECONN,
-  NNG_SOCKET_RECONN,
-} from '../util/constants'
+import { ERR } from '../util/constants'
 import { log, type LogEntry } from '../util/functions'
-/** NNG types */
-type NNGMessageType =
-  | 'mempooltxadd'
-  | 'mempooltxrem'
-  | 'blkconnected'
-  | 'blkdisconctd'
-type NNGMessageProcessor = (bb: ByteBuffer) => Promise<void>
-type NNGPendingMessageProcessor = [NNGMessageProcessor, ByteBuffer]
-type NNGQueue = {
-  busy: boolean
-  pending: NNGPendingMessageProcessor[]
-}
 /**
  * Runtime cache for quickly reconciling missing LOKAD txs with blocks
  *
@@ -91,10 +77,8 @@ export type Outpoint = Pick<IndexedTransaction, 'txid' | 'outIdx'>
 export default class Indexer extends EventEmitter {
   /** Database instance for storing indexed data */
   private db: Database
-  /** NNG pub/sub socket for receiving messages from lotusd */
-  private pub: Socket
-  /** NNG request/reply socket for RPC calls to lotusd */
-  private rpc: Socket
+  /** NNG instance for communicating with lotusd */
+  private nng!: NNG
   /** URI for the pub/sub socket connection */
   private pubUri: string
   /** URI for the RPC socket connection */
@@ -103,8 +87,6 @@ export default class Indexer extends EventEmitter {
   private mempool: MempoolCache
   /** Queue for upserting/rewinding profiles */
   private profileQueue: ProfileMap
-  /** Queue for processing NNG messages */
-  private queue: NNGQueue
   /** Runtime state used across modules */
   private state: RuntimeState
   /**
@@ -121,26 +103,14 @@ export default class Indexer extends EventEmitter {
   ) {
     super()
     // Validate NNG parameters
-    this.pubUri = `ipc://${pubUri}`
-    this.rpcUri = `ipc://${rpcUri}`
+    this.pubUri = pubUri
+    this.rpcUri = rpcUri
     // Module setup
     this.db = db
     this.state = state
-    // Pub/Sub socket setup
-    this.pub = socket('sub', { chan: [] })
-    this.pub.on('data', this.nngReceiveMessage)
-    this.pub.rcvmaxsize(NNG_RPC_RCVMAXSIZE_POLICY)
-    this.pub.reconn(NNG_SOCKET_RECONN)
-    this.pub.maxreconn(NNG_SOCKET_MAXRECONN)
-    // RPC socket setup
-    this.rpc = socket('req')
-    this.rpc.rcvmaxsize(NNG_RPC_RCVMAXSIZE_POLICY * NNG_RPC_BLOCKRANGE_SIZE)
-    this.rpc.reconn(NNG_SOCKET_RECONN)
-    this.rpc.maxreconn(NNG_SOCKET_MAXRECONN)
     // Runtime state setup
     this.mempool = new Map()
     this.profileQueue = new Map()
-    this.queue = { busy: false, pending: [] }
   }
   /**
    * Converts a Block or IndexedTransactionRANK object into an array of LogEntry tuples
@@ -173,17 +143,18 @@ export default class Indexer extends EventEmitter {
      * - Block checkpoint reconciliation with lotusd
      */
     // TODO: Need to actually detect NNG connectivity...
-    try {
-      this.rpc.connect(this.rpcUri)
-      this.pub.connect(this.pubUri)
-      if (!this.rpc.connected || !this.pub.connected) {
-        throw new Error(
-          `NNG failed to connect. Make sure NNG is enabled in your lotus.conf and try again.`,
-        )
-      }
-    } catch (e) {
-      throw [ERR.NNG_CONNECT, e.message]
-    }
+    this.nng = new NNG({
+      sockets: [
+        { type: 'sub', path: this.pubUri },
+        { type: 'req', path: this.rpcUri },
+      ],
+      processors: {
+        mempooltxadd: this.nngMempoolTxAdd,
+        mempooltxrem: this.nngMempoolTxRemove,
+        blkconnected: this.nngBlockConnected,
+        blkdisconctd: this.nngBlockDisconnected,
+      },
+    })
     log([
       ['init', 'nng'],
       ['status', 'connected'],
@@ -264,7 +235,7 @@ export default class Indexer extends EventEmitter {
       'blkconnected',
       'blkdisconctd',
     ]
-    this.pub.chan(channels)
+    this.nng.subscribe('sub', channels)
     log([
       ['init', 'nng'],
       ['status', 'subscribed'],
@@ -330,7 +301,7 @@ export default class Indexer extends EventEmitter {
     while (true) {
       const startHeight = checkpoint.height + 1
       const t0 = performance.now()
-      const blockrange = await this.rpcGetBlockRange(
+      const blockrange = await this.nng.rpcGetBlockRange(
         startHeight,
         NNG_RPC_BLOCKRANGE_SIZE,
       )
@@ -386,7 +357,7 @@ export default class Indexer extends EventEmitter {
   async initSyncMempool(): Promise<ProcessedBlockOrMempool> {
     const t0 = performance.now()
     const entries: LogEntry[] = [['init', 'syncMempool']]
-    const mempool = await this.rpcGetMempool()
+    const mempool = await this.nng.rpcGetMempool()
     const txsLength = mempool.txsLength()
     entries.push(['txsLength', `${txsLength}`])
     const results = this.processBlockOrMempool(mempool)
@@ -418,10 +389,7 @@ export default class Indexer extends EventEmitter {
    * @returns {Promise<void>} Resolves when all connections are closed
    */
   async close(): Promise<void> {
-    this.pub?.shutdown(this.pubUri)
-    this.pub?.close()
-    this.rpc?.shutdown(this.rpcUri)
-    this.rpc?.close()
+    this.nng.close()
   }
   /**
    * Compare checkpoint `Block` against the RPC counterpart. Recurse backwards until a match is found.
@@ -432,7 +400,7 @@ export default class Indexer extends EventEmitter {
     try {
       // nanomsg library will block if there is a connection issue
       // nanomsg library will return if RPC responds
-      const best = await this.rpcGetBlock(checkpoint.height)
+      const best = await this.nng.rpcGetBlock(checkpoint.height)
       // block will be null if RPC didn't give us the block for the checkpoint height
       if (best) {
         const block = this.toBlock(best.header(), true)
@@ -450,14 +418,14 @@ export default class Indexer extends EventEmitter {
     }
   }
   /**
-   * Process the range of `NNG.Block` objects for RANK tranactions and save all `Block`s as checkpoints
-   * @param blockrange `NNG.GetBlockRangeResponse` object providing array of `NNG.Block`
-   * @param blocksLength Length of `NNG.Block` array
+   * Process the range of `NNGInterface.Block` objects for RANK tranactions and save all `Block`s as checkpoints
+   * @param blockrange `NNGInterface.GetBlockRangeResponse` object providing array of `NNGInterface.Block`
+   * @param blocksLength Length of `NNGInterface.Block` array
    * @returns {Promise<[ Block, number ]>}
    * Tuple containing latest `Block` as new checkpoint and `number` of RANK txs in the `blockrange`
    */
   private async saveBlockRange(
-    blockrange: NNG.GetBlockRangeResponse,
+    blockrange: NNGInterface.GetBlockRangeResponse,
     blocksLength: number,
   ): Promise<[Block, number, number]> {
     const blocks: Block[] = []
@@ -504,7 +472,7 @@ export default class Indexer extends EventEmitter {
   }
   /**
    * Rewind the database state created at `height`
-   * @param height `height` parsed from `NNG.BlockHeader`
+   * @param height `height` parsed from `NNGInterface.BlockHeader`
    * @returns Number of `IndexedTransactionRANK`s removed from database
    */
   private async rewindBlock(height: number): Promise<number> {
@@ -526,61 +494,6 @@ export default class Indexer extends EventEmitter {
     }
   }
   /**
-   * Process queued NNG message handlers in batches with a small delay between batches.
-   * Processes up to NNG_MESSAGE_BATCH_SIZE messages at a time to avoid blocking the event loop.
-   * @returns {Promise<void>} Resolves when current batch is complete
-   */
-  private nngProcessMessage = async (): Promise<void> => {
-    // Queue is now busy processing queued NNG handlers
-    // Prevents clobbering; maintains healthy database state
-    this.queue.busy = true
-    try {
-      const [NNGMessageProcessor, ByteBuffer] = this.queue.pending.shift()
-      await NNGMessageProcessor(ByteBuffer)
-    } catch (e) {
-      // Should never get here; shut down if we do
-      this.emit('exception', ERR.NNG_PROCESS_MESSAGE, e.message)
-      this.queue.busy = false
-      return
-    }
-
-    // Recursively process the next message in the queue
-    if (this.queue.pending.length > 0) {
-      return this.nngProcessMessage()
-    }
-    // queue is now idle
-    this.queue.busy = false
-  }
-  /**
-   * Called when our NNG sub `Socket` receives data published by lotusd
-   * @param msg Raw `Buffer` containing `NNGMessageType` prefix and `ByteBuffer` data
-   * @returns {Promise<void>}
-   */
-  private nngReceiveMessage = async (msg: Buffer): Promise<void> => {
-    // Parse out the message type and convert message to ByteBuffer
-    const msgType = msg.subarray(0, 12).toString() as NNGMessageType
-    const bb = new ByteBuffer(msg.subarray(12))
-    // Add the appropriate message handler to the back of the processing queue
-    switch (msgType) {
-      case 'mempooltxadd':
-        this.queue.pending.push([this.nngMempoolTxAdd, bb])
-        break
-      case 'mempooltxrem': // tx removed from mempool due to conflict, reorg, etc.
-        this.queue.pending.push([this.nngMempoolTxRemove, bb])
-        break
-      case 'blkconnected':
-        this.queue.pending.push([this.nngBlockConnected, bb])
-        break
-      case 'blkdisconctd':
-        this.queue.pending.push([this.nngBlockDisconnected, bb])
-        break
-    }
-    // Set immediate processing of the message queue if not already busy
-    if (!this.queue.busy) {
-      setImmediate(this.nngProcessMessage)
-    }
-  }
-  /**
    * Process NNG `mempooltxadd` messages
    * @param bb `ByteBuffer` data published by lotusd
    * @returns {Promise<void>}
@@ -590,7 +503,7 @@ export default class Indexer extends EventEmitter {
   ): Promise<void> => {
     const t0 = performance.now()
     const mempooltx =
-      NNG.TransactionAddedToMempool.getRootAsTransactionAddedToMempool(
+      NNGInterface.TransactionAddedToMempool.getRootAsTransactionAddedToMempool(
         bb,
       ).mempoolTx()
     const rawArray = mempooltx.tx().rawArray()
@@ -650,7 +563,7 @@ export default class Indexer extends EventEmitter {
   ): Promise<void> => {
     const t0 = performance.now()
     const tx =
-      NNG.TransactionRemovedFromMempool.getRootAsTransactionRemovedFromMempool(
+      NNGInterface.TransactionRemovedFromMempool.getRootAsTransactionRemovedFromMempool(
         bb,
       )
     const txid = this.toBlockhashOrTxid(tx.txid().hash())
@@ -709,7 +622,8 @@ export default class Indexer extends EventEmitter {
   ): Promise<void> => {
     const entries: LogEntry[] = [['nng', 'blkconnected']]
     const t0 = performance.now()
-    const connectedBlock = NNG.BlockConnected.getRootAsBlockConnected(bb)
+    const connectedBlock =
+      NNGInterface.BlockConnected.getRootAsBlockConnected(bb)
     // Get the NNG block and convert header to database `Block` entry
     const block = connectedBlock.block()
     const best = this.toBlock(block.header())
@@ -768,7 +682,7 @@ export default class Indexer extends EventEmitter {
   ): Promise<void> => {
     const t0 = performance.now()
     const disconnectedBlock =
-      NNG.BlockDisconnected.getRootAsBlockDisconnected(bb).block()
+      NNGInterface.BlockDisconnected.getRootAsBlockDisconnected(bb).block()
     const block = this.toBlock(disconnectedBlock.header())
     // Rewind the disconnected block
     const txsLength = await this.rewindBlock(block.height)
@@ -785,139 +699,12 @@ export default class Indexer extends EventEmitter {
     ])
   }
   /**
-   * Send RPC command to lotusd over NNG interface (`this.rpc`)
-   * @param rpcType Valid RPC request string, e.g. `GetMempoolRequest`
-   * @param params Object containing data required to build `NNG.RpcRequest` for provided `rpcType`, if applicable
-   * @returns {Promise<ByteBuffer>} `NNG.RpcResult` converted to `ByteBuffer`
-   */
-  private async rpcCall(
-    rpcType: keyof typeof NNG.RpcRequest,
-    params?: {
-      blockRangeRequest?: { startHeight: number; numBlocks: number }
-      blockRequest?: { height: number }
-    },
-  ): Promise<ByteBuffer> {
-    // Set up builder and get proper flatbuffer offset for rpcType
-    const builder = new Builder()
-    let offset: number
-    switch (rpcType) {
-      case 'GetMempoolRequest':
-        offset = NNG.GetMempoolRequest.createGetMempoolRequest(builder)
-        break
-      case 'GetBlockRangeRequest':
-        offset = NNG.GetBlockRangeRequest.createGetBlockRangeRequest(
-          builder,
-          params.blockRangeRequest.startHeight,
-          params.blockRangeRequest.numBlocks,
-        )
-        break
-      case 'GetBlockRequest':
-        offset = NNG.GetBlockRequest.createGetBlockRequest(
-          builder,
-          NNG.BlockIdentifier.Height,
-          NNG.BlockHeight.createBlockHeight(
-            builder,
-            params.blockRequest.height,
-          ),
-        )
-        break
-    }
-    const rpcCall = NNG.RpcCall.createRpcCall(
-      builder,
-      NNG.RpcRequest[rpcType],
-      offset,
-    )
-    builder.finish(rpcCall)
-    // Wrap the event listener and `rpc.send()` in a Promise to await response
-    // Promise is resolved via `.once()` event after lotusd responds
-    // Then we can process the response data accordingly
-    const bb = <ByteBuffer>await new Promise((resolve, reject) => {
-      const rpcSocketSendTimeout = setTimeout(
-        () =>
-          reject(
-            `rpcCall(${rpcType}, ${typeof params}): Socket timeout (${NNG_REQUEST_TIMEOUT_LENGTH}ms)`,
-          ),
-        NNG_REQUEST_TIMEOUT_LENGTH,
-      )
-      // set up response listener before sending request; avoids race condition
-      this.rpc.once('data', (buf: Buffer) => {
-        clearTimeout(rpcSocketSendTimeout)
-        resolve(new ByteBuffer(buf))
-      })
-      this.rpc.send(builder.asUint8Array() as Buffer)
-    })
-    const result = NNG.RpcResult.getRootAsRpcResult(bb)
-    if (!result.isSuccess()) {
-      // If the RPC call was successful but returned error data, process that now
-      switch (result.errorCode()) {
-        case 5: // block not found
-          return null
-        // what's happening
-        default:
-          throw new Error(
-            `rpcCall(${rpcType}, ${typeof params}): ${result.errorMsg()} (code: ${result.errorCode()})`,
-          )
-      }
-    }
-    return new ByteBuffer(result.dataArray())
-  }
-  /**
-   * Fetch block at `height`
-   * @param height `height` parsed from `NNG.BlockHeader`
-   * @returns {Promise<NNG.Block>}
-   */
-  private async rpcGetBlock(height: number): Promise<NNG.Block> {
-    try {
-      const bb = await this.rpcCall('GetBlockRequest', {
-        blockRequest: { height },
-      })
-      return bb?.bytes()?.length
-        ? NNG.GetBlockResponse.getRootAsGetBlockResponse(bb).block()
-        : null
-    } catch (e) {
-      throw new Error(`rpcGetBlock(${height}): ${e.message}`)
-    }
-  }
-  /**
-   * Fetches mempool txs
-   * @returns {Promise<NNG.GetMempoolResponse>}
-   */
-  private async rpcGetMempool(): Promise<NNG.GetMempoolResponse> {
-    try {
-      const bb = await this.rpcCall('GetMempoolRequest')
-      return NNG.GetMempoolResponse.getRootAsGetMempoolResponse(bb)
-    } catch (e) {
-      throw new Error(`rpcGetMempool(): ${e.message}`)
-    }
-  }
-  /**
-   * Fetches range of blocks from `startHeight`, up to `numBlocks` limit
-   * @param startHeight The starting `height` parsed from `NNG.BlockHeader`
-   * @param numBlocks Configure `NNG_RPC_BLOCKRANGE_SIZE` in `/util/constants.ts` (default: 20)
-   * @returns {Promise<NNG.GetBlockRangeResponse>}
-   */
-  private async rpcGetBlockRange(
-    startHeight: number,
-    numBlocks: number,
-  ): Promise<NNG.GetBlockRangeResponse> {
-    try {
-      const bb = await this.rpcCall('GetBlockRangeRequest', {
-        blockRangeRequest: { startHeight, numBlocks },
-      })
-      return NNG.GetBlockRangeResponse.getRootAsGetBlockRangeResponse(bb)
-    } catch (e) {
-      throw new Error(
-        `rpcGetBlockRange(${startHeight}, ${numBlocks}): ${e.message}`,
-      )
-    }
-  }
-  /**
    * Process transactions from a block or mempool to extract RANK transactions
    * @param data Block or mempool data containing transactions to process
    * @returns Array of parsed RANK transactions with metadata
    */
   private processBlockOrMempool(
-    data: NNG.Block | NNG.GetMempoolResponse,
+    data: NNGInterface.Block | NNGInterface.GetMempoolResponse,
   ): ProcessedBlockOrMempool {
     const results: ProcessedBlockOrMempool = {
       ranks: [],
@@ -925,7 +712,8 @@ export default class Indexer extends EventEmitter {
     }
     const txsLength = data.txsLength()
     // `block` is null if processing mempool txs, otherwise it's the block header
-    const block = data instanceof NNG.Block ? this.toBlock(data.header()) : null
+    const block =
+      data instanceof NNGInterface.Block ? this.toBlock(data.header()) : null
     const startIndex = block ? 1 : 0
     // skip coinbase tx if processing block data
     for (let i = startIndex; i < txsLength; i++) {
@@ -1161,22 +949,22 @@ export default class Indexer extends EventEmitter {
     return null
   }
   /**
-   * Parse raw `NNG.Hash` flatbuffer for the 32-byte block hash or txid
-   * @param hash Raw `NNG.Hash`
+   * Parse raw `NNGInterface.Hash` flatbuffer for the 32-byte block hash or txid
+   * @param hash Raw `NNGInterface.Hash`
    * @returns {string} Block hash or txid as hex string (little endian)
    */
-  private toBlockhashOrTxid(hash: NNG.Hash): string {
+  private toBlockhashOrTxid(hash: NNGInterface.Hash): string {
     return Buffer.from(hash.bb.bytes().subarray(hash.bb_pos, hash.bb_pos + 32))
       .reverse() // reverse for little endian
       .toString('hex')
   }
   /**
-   * Parse raw `NNG.BlockHeader` flatbuffer for the nHeight
+   * Parse raw `NNGInterface.BlockHeader` flatbuffer for the nHeight
    * (https://docs.givelotus.org/specs/blockheader)
-   * @param header Raw `NNG.BlockHeader`
+   * @param header Raw `NNGInterface.BlockHeader`
    * @returns {number} Block height as a number
    */
-  private toBlockHeight(header: NNG.BlockHeader): number {
+  private toBlockHeight(header: NNGInterface.BlockHeader): number {
     // header could be undefined if processing mempool tx from nng
     if (!header) {
       return undefined
@@ -1185,12 +973,15 @@ export default class Indexer extends EventEmitter {
     return Buffer.from(nHeight).readUInt32LE()
   }
   /**
-   * Convert `NNG.BlockHeader` to `Block` object
-   * @param header `NNG.BlockHeader`
+   * Convert `NNGInterface.BlockHeader` to `Block` object
+   * @param header `NNGInterface.BlockHeader`
    * @param includePrevHash `boolean` to include previous block hash
    * @returns `Block` object
    */
-  private toBlock(header: NNG.BlockHeader, includePrevhash = false): Block {
+  private toBlock(
+    header: NNGInterface.BlockHeader,
+    includePrevhash = false,
+  ): Block {
     try {
       const height = this.toBlockHeight(header)
       const timestamp = header.timestamp()
