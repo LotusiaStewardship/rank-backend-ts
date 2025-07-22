@@ -430,7 +430,7 @@ export default class API extends EventEmitter {
       platform: ScriptChunkPlatformUTF8,
     ) => {
       platform = platform.toLowerCase() as ScriptChunkPlatformUTF8
-      const platformParams = PlatformConfiguration[platform]
+      const platformParams = PlatformConfiguration.get(platform)
       if (!platformParams) {
         return this.sendJSON(
           res,
@@ -460,7 +460,7 @@ export default class API extends EventEmitter {
       const platformParams = this.app.get(
         'platformParams',
       ) as typeof PlatformConfiguration
-      const { profileId: profileIdParams } = platformParams[platform]
+      const { profileId: profileIdParams } = platformParams.get(platform)
       if (profileId.length > profileIdParams.len) {
         return this.sendJSON(
           res,
@@ -490,7 +490,7 @@ export default class API extends EventEmitter {
       const platformParams = this.app.get(
         'platformParams',
       ) as typeof PlatformConfiguration
-      const { postId: postIdParams } = platformParams[platform]
+      const { postId: postIdParams } = platformParams.get(platform)
       if (!postId.match(postIdParams.regex)) {
         return this.sendJSON(
           res,
