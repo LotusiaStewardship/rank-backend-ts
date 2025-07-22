@@ -12,6 +12,9 @@
     "paths": {
       "lotus-lib": [
         "./submodules/lotus-lib"
+      ],
+      "lotus-lib/lib/nng-interface": [
+        "./submodules/lotus-lib/lib/nng-interface"
       ]
     },
     "declaration": false,
