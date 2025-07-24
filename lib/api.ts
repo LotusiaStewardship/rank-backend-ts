@@ -24,6 +24,7 @@ import {
   type AuthorizationData,
   Util,
   Block,
+  toProfileIdBuf,
 } from 'lotus-lib'
 import RuntimeState from './state'
 import Database, { getTimestampUTC, type Timespan } from './database'
@@ -457,14 +458,11 @@ export default class API extends EventEmitter {
     ) => {
       profileId = profileId.toLowerCase()
       const platform = req.params.platform as ScriptChunkPlatformUTF8
-      const platformParams = this.app.get(
-        'platformParams',
-      ) as typeof PlatformConfiguration
-      const { profileId: profileIdParams } = platformParams.get(platform)
-      if (profileId.length > profileIdParams.len) {
+      // toProfileIdBuf will return null if the profileId is invalid
+      if (toProfileIdBuf(platform, profileId) === null) {
         return this.sendJSON(
           res,
-          { error: `profileId is invalid length` },
+          { error: `invalid profileId specified` },
           HTTP.BAD_REQUEST,
         )
       }
