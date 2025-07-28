@@ -39,34 +39,33 @@ import { isValidInstanceId, log, type LogEntry } from '../util/functions'
 
 /**
  * Represents a profile's ranking information including total and change metrics
- * @typedef {Object} RankTopProfile
- * @property {Object} total - Overall ranking statistics
- * @property {string} total.ranking - The total ranking score
- * @property {number} total.votesPositive - Total number of positive votes received
- * @property {number} total.votesNegative - Total number of negative votes received
- * @property {Object} changed - Metrics showing ranking changes
- * @property {string} changed.ranking - The change in ranking score
- * @property {string} changed.rate - The rate of change
- * @property {number} changed.votesPositive - Number of new positive votes
- * @property {number} changed.votesNegative - Number of new negative votes
- * @property {string[]} votesTimespan - Array of timestamps for vote history
- * @property {string} profileId - Unique identifier for the profile
- * @property {'twitter'} platform - The social media platform (currently only Twitter)
  */
 export type RankTopProfile = {
+  /** Overall ranking statistics */
   total: {
+    /** The total ranking score */
     ranking: string
+    /** Total number of positive votes received */
     votesPositive: number
+    /** Total number of negative votes received */
     votesNegative: number
   }
+  /** Metrics showing ranking changes */
   changed: {
+    /** The change in ranking score */
     ranking: string
+    /** The rate of change */
     rate: string
+    /** Number of new positive votes */
     votesPositive: number
+    /** Number of new negative votes */
     votesNegative: number
   }
+  /** Array of timestamps for vote history */
   votesTimespan: string[]
+  /** Unique identifier for the profile */
   profileId: string
+  /** The social media platform (currently only Twitter) */
   platform: 'twitter'
 }
 /**
@@ -83,15 +82,15 @@ export type RankTopPost = RankTopProfile & {
  * @property {string} authDataStr - Stringified `AuthorizationData` object
  * @property {number} expiresAt - Block height at which the instance authorization will expire
  */
-type AuthCacheEntry = {
+export type AuthCacheEntry = {
   /** Stringified `AuthorizationData` object */
   authDataStr: string
   /** Block height at which the instance authorization will expire */
   expiresAt: number
 }
-/** Runtime cache of authenticated instances, where string is the instanceId*/
-type AuthCache = Map<string, AuthCacheEntry>
-type Endpoint =
+/** Runtime cache of authenticated instances, where string is the `instanceId` */
+export type AuthCache = Map<string, AuthCacheEntry>
+export type Endpoint =
   | 'profiles'
   | 'profile'
   | 'post'
@@ -102,10 +101,11 @@ type Endpoint =
   | 'wallet'
   | 'charts'
   | 'search'
+  | 'tx'
   | 'txs'
   | 'voteActivity'
-type EndpointHandler = (req: Request, res: Response) => void
-type EndpointParameter =
+export type EndpointHandler = (req: Request, res: Response) => void
+export type EndpointParameter =
   | 'platform'
   | 'profileId'
   | 'postId'
@@ -117,8 +117,9 @@ type EndpointParameter =
   | 'chartType'
   | 'dataType'
   | 'searchType'
+  | 'txid'
 /** This type is data returned from the database, not Temporal */
-type ChartWalletSummary = {
+export type ChartWalletSummary = {
   /** Total number of votes cast */
   totalVotes: number
   /** Total number of upvotes cast */
@@ -131,7 +132,7 @@ type ChartWalletSummary = {
   totalSatsBurned: number
 }
 /** This type is data returned from the Temporal workflow */
-type WalletRankActivityWorkflowResult = {
+export type WalletRankActivityWorkflowResult = {
   /** Total number of votes cast */
   totalVotes: number
   /** Total number of payouts sent */
@@ -139,23 +140,416 @@ type WalletRankActivityWorkflowResult = {
   /** Total amount of sats sent */
   totalPayoutAmount: number
 }
-type ChartType = 'wallet'
-type ChartDataType = 'summary' | 'activity'
-type SearchType = 'profile' | 'post'
-type EndpointParameterHandler = (
+export type ChartType = 'wallet'
+export type ChartDataType = 'summary' | 'activity'
+export type SearchType = 'profile' | 'post'
+export type EndpointParameterHandler = (
   req: Request,
   res: Response,
   next: NextFunction,
   param: string | undefined,
 ) => void
 
-enum StatsRoutes {
+export enum StatsRoutes {
   'profiles/top-ranked' = 'getStatsPlatformRanked',
   'profiles/lowest-ranked' = 'getStatsPlatformRanked',
   'posts/top-ranked' = 'getStatsPlatformRanked',
   'posts/lowest-ranked' = 'getStatsPlatformRanked',
 }
-type StatsRoute = keyof typeof StatsRoutes
+export type StatsRoute = keyof typeof StatsRoutes
+
+/**
+ * Validates that the provided parameters are valid and sets the request parameters
+ * @param req Express Request object containing `platform` and `scriptPayload` parameters
+ * @param res Express Response object for sending HTTP responses
+ * @param next Express NextFunction for calling the next middleware function
+ * @param param The parameter to validate
+ */
+const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
+  /**
+   * Validates that the provided `platform` is a valid platform.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  platform: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    platform: ScriptChunkPlatformUTF8,
+  ) => {
+    platform = platform.toLowerCase() as ScriptChunkPlatformUTF8
+    const platformParams = PlatformConfiguration.get(platform)
+    if (!platformParams) {
+      return sendJSON(
+        res,
+        { error: `invalid platform specified` },
+        HTTP.BAD_REQUEST,
+      )
+    }
+    req.params.platform = platform
+    next()
+  },
+  /**
+   * Validates that the provided `profileId` is a valid profile ID for the specified platform.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  profileId: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    profileId: string,
+  ) => {
+    profileId = profileId.toLowerCase()
+    const platform = req.params.platform as ScriptChunkPlatformUTF8
+    // toProfileIdBuf will return null if the profileId is invalid
+    if (toProfileIdBuf(platform, profileId) === null) {
+      return sendJSON(
+        res,
+        { error: `invalid profileId specified` },
+        HTTP.BAD_REQUEST,
+      )
+    }
+    req.params.profileId = profileId
+    next()
+  },
+  /**
+   * Validates that the provided `postId` is a valid post ID for the specified platform.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  postId: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    postId: string,
+  ) => {
+    postId = postId.toLowerCase()
+    const platform = req.params.platform as ScriptChunkPlatformUTF8
+    const { postId: postIdParams } = PlatformConfiguration.get(platform)
+    if (!postId.match(postIdParams.regex)) {
+      return sendJSON(
+        res,
+        { error: `postId is invalid format` },
+        HTTP.BAD_REQUEST,
+      )
+    }
+    switch (postIdParams.type) {
+      case 'BigInt': {
+        const buffer = Buffer.from(BigInt(postId).toString(16), 'hex')
+        if (buffer.length != postIdParams.len) {
+          return sendJSON(
+            res,
+            { error: `postId is invalid length` },
+            HTTP.BAD_REQUEST,
+          )
+        }
+        break
+      }
+      case 'String': {
+        break
+      }
+    }
+    req.params.postId = postId
+    next()
+  },
+  /**
+   * Validates that the provided `chartType` is a valid chart type.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  chartType: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    chartType: ChartType,
+  ) => {
+    switch (chartType) {
+      case 'wallet':
+        break
+      default:
+        return sendJSON(
+          res,
+          { error: `invalid chart type specified` },
+          HTTP.BAD_REQUEST,
+        )
+    }
+    req.params.chartType = chartType
+    next()
+  },
+  /**
+   * Validates that the provided `dataType` is a valid chart data type.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  dataType: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    dataType: ChartDataType,
+  ) => {
+    switch (dataType) {
+      case 'activity':
+        break
+      case 'summary':
+        break
+      default:
+        return sendJSON(
+          res,
+          { error: `invalid chart data type specified` },
+          HTTP.BAD_REQUEST,
+        )
+    }
+    req.params.dataType = dataType
+    next()
+  },
+  /**
+   * Validates that the provided `searchType` is a valid search type.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  searchType: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    searchType: SearchType,
+  ) => {
+    const validated = validate.searchType(searchType)
+    if (validated.error) {
+      return sendJSON(res, { error: validated.error }, validated.statusCode)
+    }
+    req.params.searchType = validated.searchType
+    next()
+  },
+  /**
+   * Validates that the provided `scriptPayload` is a valid script payload.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  scriptPayload: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    scriptPayload: string | undefined,
+  ) => {
+    const result = validate.scriptPayload(scriptPayload)
+    req.params.scriptPayload = result?.scriptPayload
+    next()
+  },
+  /**
+   * Validates that the provided `statsRoute` is a valid stats route.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  statsRoute: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    statsRoute: StatsRoute,
+  ) => {
+    statsRoute = statsRoute.toLowerCase() as StatsRoute
+    // Must be a defined route
+    if (!StatsRoutes[statsRoute]) {
+      return sendJSON(
+        res,
+        { error: `invalid stats path specified` },
+        HTTP.BAD_REQUEST,
+      )
+    }
+    req.params.statsRoute = statsRoute
+    next()
+  },
+  /**
+   * Validates that the provided `pageNum` is a positive integer.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  pageNum: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    pageNum: string | undefined,
+  ) => {
+    if (isNaN(Number(pageNum))) {
+      return sendJSON(
+        res,
+        { error: `invalid votes page number specified` },
+        HTTP.BAD_REQUEST,
+      )
+    }
+    req.params.pageNum = pageNum
+    next()
+  },
+  /**
+   * Validates that the provided `pageSize` is a positive integer.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  pageSize: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    pageSize: string | undefined,
+  ) => {
+    const pageSizeNum = Number(pageSize)
+    if (isNaN(pageSizeNum) || pageSizeNum < 1) {
+      return sendJSON(
+        res,
+        { error: `invalid page size specified` },
+        HTTP.BAD_REQUEST,
+      )
+    }
+    // enforce max page size
+    if (pageSizeNum > 40) {
+      pageSize = '40'
+    }
+    req.params.pageSize = pageSize
+    next()
+  },
+  /**
+   * Validates that the provided `instanceId` is a 64-character hexadecimal string.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  instanceId: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    instanceId: string | undefined,
+  ) => {
+    const result = validate.instanceId(instanceId)
+    if (result.error) {
+      return sendJSON(res, { ...result }, result.statusCode)
+    }
+    req.params.instanceId = instanceId
+    next()
+  },
+  /**
+   * Validates that the provided `txid` is a 64-character hexadecimal string.
+   * If invalid, responds with HTTP 400 and an error message.
+   */
+  txid: async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    txid: string | undefined,
+  ) => {
+    if (!txid.match(/^[0-9a-fA-F]{64}$/)) {
+      return sendJSON(
+        res,
+        { error: `invalid txid specified` },
+        HTTP.BAD_REQUEST,
+      )
+    }
+    req.params.txid = txid
+    next()
+  },
+}
+
+/**
+ * Validator functions for API parameters
+ */
+const validate = {
+  /**
+   * Validates that the provided `instanceId` is a 64-character hexadecimal string.
+   * If invalid, responds with HTTP 400 and an error message.
+   * @param instanceId - The instance ID to validate
+   * @returns The validated instance ID
+   */
+  instanceId: (instanceId: string | undefined) => {
+    if (instanceId === undefined) {
+      return {
+        error: 'instanceId must be specified',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    if (!instanceId.match(/^[a-f0-9]{64}$/)) {
+      return {
+        error: 'instanceId is invalid format',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    return { instanceId }
+  },
+  /**
+   * Validates that the provided `scriptPayload` is a valid script payload.
+   * If invalid, responds with HTTP 400 and an error message.
+   * @param scriptPayload - The script payload to validate
+   * @returns The validated script payload
+   */
+  scriptPayload: (scriptPayload: string | undefined) => {
+    if (scriptPayload === undefined) {
+      return {
+        error: 'scriptPayload must be specified',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    return Buffer.from(scriptPayload, 'hex').byteLength === 20
+      ? { scriptPayload }
+      : {
+          error: 'scriptPayload is invalid',
+          statusCode: HTTP.BAD_REQUEST,
+        }
+  },
+  /**
+   * Validates a message signature
+   * @param scriptPayload - PKH used to generate `Address` for signature validation
+   * @param data - The data payload to verify against the signature
+   * @param signature - The signature of the data payload to validate
+   * @returns The validated signature
+   */
+  signature: ({
+    scriptPayload,
+    data,
+    signature,
+  }: {
+    scriptPayload: string | undefined
+    data: string | undefined
+    signature: string | undefined
+  }) => {
+    if (scriptPayload === undefined) {
+      return {
+        error: 'scriptPayload must be specified',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    if (signature === undefined) {
+      return {
+        error: 'signature must be specified',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    if (data === undefined) {
+      return {
+        error: 'data must be specified',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    // convert scriptPayload to Address
+    const address = Address.fromPublicKeyHash(
+      Buffer.from(scriptPayload, 'hex'),
+      Networks.livenet,
+    )
+    // verify message signature
+    const message = new Message(data)
+    if (!message.verify(address, signature)) {
+      return {
+        error: 'message signature is invalid',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    return { signature }
+  },
+  /**
+   * Validates a search type
+   * @param searchType - The search type to validate
+   * @returns The validated search type
+   */
+  searchType: (searchType: SearchType | undefined) => {
+    if (searchType === undefined) {
+      return {
+        error: 'search type must be specified',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    if (!['profile', 'post'].includes(searchType)) {
+      return {
+        error: 'invalid search type specified',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    return { searchType }
+  },
+}
 
 /**
  * API class for handling HTTP requests and responses
@@ -189,55 +583,57 @@ export default class API extends EventEmitter {
       strict: true,
     })
     // Router parameter configuration
-    this.router.param('platform', this.param.platform)
-    this.router.param('profileId', this.param.profileId)
-    this.router.param('postId', this.param.postId)
-    this.router.param('statsRoute', this.param.statsRoute)
-    this.router.param('pageNum', this.param.pageNum)
-    this.router.param('scriptPayload', this.param.scriptPayload)
-    this.router.param('instanceId', this.param.instanceId)
-    this.router.param('chartType', this.param.chartType)
-    this.router.param('dataType', this.param.dataType)
-    this.router.param('searchType', this.param.searchType)
+    this.router.param('platform', Parameters.platform)
+    this.router.param('profileId', Parameters.profileId)
+    this.router.param('postId', Parameters.postId)
+    this.router.param('statsRoute', Parameters.statsRoute)
+    this.router.param('pageNum', Parameters.pageNum)
+    this.router.param('scriptPayload', Parameters.scriptPayload)
+    this.router.param('instanceId', Parameters.instanceId)
+    this.router.param('chartType', Parameters.chartType)
+    this.router.param('dataType', Parameters.dataType)
+    this.router.param('searchType', Parameters.searchType)
+    this.router.param('txid', Parameters.txid)
     // Router GET endpoint configuration (DEEPEST ROUTES FIRST!)
     this.router.get(
       '/wallet/summary/:scriptPayload/:startTime?/:endTime?',
-      this.get.wallet,
+      this.GET.wallet,
     )
     this.router.get(
       '/wallet/:scriptPayload/:startTime?/:endTime?',
-      this.get.wallet,
+      this.GET.wallet,
     )
-    this.router.get('/charts/:chartType/:dataType/:timespan?', this.get.charts)
+    this.router.get('/charts/:chartType/:dataType/:timespan?', this.GET.charts)
     this.router.get(
       '/stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
-      this.get.stats,
+      this.GET.stats,
     )
-    this.router.get('/search/:searchType/:query', this.get.search)
+    this.router.get('/search/:searchType/:query', this.GET.search)
     this.router.get(
       '/:platform/:profileId/:postId/:scriptPayload',
-      this.get.post,
+      this.GET.post,
     )
-    this.router.get('/votes/:page?/:pageSize?', this.get.voteActivity)
-    this.router.get('/txs/:platform/:profileId/:page?/:pageSize?', this.get.txs)
-    this.router.get('/profiles/:page?/:pageSize?', this.get.profiles)
+    this.router.get('/votes/:page?/:pageSize?', this.GET.voteActivity)
+    this.router.get('/txs/:platform/:profileId/:page?/:pageSize?', this.GET.txs)
+    this.router.get('/profiles/:page?/:pageSize?', this.GET.profiles)
     this.router.get(
       '/:platform/:profileId/posts/:page?/:pageSize?',
-      this.get.profilePosts,
+      this.GET.profilePosts,
     )
-    this.router.get('/:platform/:profileId/:postId', this.get.post)
-    this.router.get('/:platform/:profileId', this.get.profile)
+    this.router.get('/:platform/:profileId/:postId', this.GET.post)
+    this.router.get('/:platform/:profileId', this.GET.profile)
     // Router POST endpoint configuration (DEEPEST ROUTES FIRST!)
     // TODO: implement referral codes rather than mining instanceId
     //this.router.post('/instance/register', this.post.instance)
     // Get posts for a platform, up to 50 maximum per request
-    this.router.post('/posts/:platform/:scriptPayload', this.post.posts)
+    this.router.post('/posts/:platform/:scriptPayload', this.POST.posts)
+    // Router PATCH endpoint configuration (DEEPEST ROUTES FIRST!)
+    //this.router.patch('/:platform/:profileId/:postId', this.PATCH.post)
+
     // App/Server setup
     this.app = express()
     this.app.use(json())
     this.app.use('/api/v1', this.router)
-    // App settings
-    this.app.set('platformParams', PlatformConfiguration)
   }
   /**
    * Initialze database HTTP server and Temporal client/worker
@@ -289,119 +685,6 @@ export default class API extends EventEmitter {
     }
   }
   /**
-   * POST parameter validator functions
-   */
-  private validate = {
-    /**
-     *
-     * @param instanceId
-     * @returns
-     */
-    instanceId: (instanceId: string | undefined) => {
-      if (instanceId === undefined) {
-        return {
-          error: 'instanceId must be specified',
-          statusCode: HTTP.BAD_REQUEST,
-        }
-      }
-      if (!instanceId.match(/^[a-f0-9]{64}$/)) {
-        return {
-          error: 'instanceId is invalid format',
-          statusCode: HTTP.BAD_REQUEST,
-        }
-      }
-      return { instanceId }
-    },
-    /**
-     *
-     * @param scriptPayload
-     * @returns
-     */
-    scriptPayload: (scriptPayload: string | undefined) => {
-      if (scriptPayload === undefined) {
-        return {
-          error: 'scriptPayload must be specified',
-          statusCode: HTTP.BAD_REQUEST,
-        }
-      }
-      return Buffer.from(scriptPayload, 'hex').byteLength === 20
-        ? { scriptPayload }
-        : {
-            error: 'scriptPayload is invalid',
-            statusCode: HTTP.BAD_REQUEST,
-          }
-    },
-    /**
-     * Validates a message signature
-     * @param scriptPayload - PKH used to generate `Address` for signature validation
-     * @param data - The data payload to verify against the signature
-     * @param signature - The signature of the data payload
-     * @returns The validated signature
-     */
-    signature: ({
-      scriptPayload,
-      data,
-      signature,
-    }: {
-      scriptPayload: string | undefined
-      data: string | undefined
-      signature: string | undefined
-    }) => {
-      if (scriptPayload === undefined) {
-        return {
-          error: 'scriptPayload must be specified',
-          statusCode: HTTP.BAD_REQUEST,
-        }
-      }
-      if (signature === undefined) {
-        return {
-          error: 'signature must be specified',
-          statusCode: HTTP.BAD_REQUEST,
-        }
-      }
-      if (data === undefined) {
-        return {
-          error: 'data must be specified',
-          statusCode: HTTP.BAD_REQUEST,
-        }
-      }
-      // convert scriptPayload to Address
-      const address = Address.fromPublicKeyHash(
-        Buffer.from(scriptPayload, 'hex'),
-        Networks.livenet,
-      )
-      // verify message signature
-      const message = new Message(data)
-      if (!message.verify(address, signature)) {
-        return {
-          error: 'message signature is invalid',
-          statusCode: HTTP.BAD_REQUEST,
-        }
-      }
-      return { signature }
-    },
-    /**
-     * Validates a search type
-     * @param searchType - The search type to validate
-     * @returns The validated search type
-     */
-    searchType: (searchType: SearchType | undefined) => {
-      if (searchType === undefined) {
-        return {
-          error: 'search type must be specified',
-          statusCode: HTTP.BAD_REQUEST,
-        }
-      }
-      if (!['profile', 'post'].includes(searchType)) {
-        return {
-          error: 'invalid search type specified',
-          statusCode: HTTP.BAD_REQUEST,
-        }
-      }
-      return { searchType }
-    },
-  }
-  /**
    * Shutdown the API server and Temporal interfaces
    */
   async close() {
@@ -411,308 +694,9 @@ export default class API extends EventEmitter {
     this.temporalWorker?.shutdown()
   }
   /**
-   * Parameter Handlers
-   */
-  private param: {
-    [param in EndpointParameter]: EndpointParameterHandler
-  } = {
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param platform
-     * @returns
-     */
-    platform: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      platform: ScriptChunkPlatformUTF8,
-    ) => {
-      platform = platform.toLowerCase() as ScriptChunkPlatformUTF8
-      const platformParams = PlatformConfiguration.get(platform)
-      if (!platformParams) {
-        return this.sendJSON(
-          res,
-          { error: `invalid platform specified` },
-          HTTP.BAD_REQUEST,
-        )
-      }
-      req.params.platform = platform
-      next()
-    },
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param profileId
-     * @returns
-     */
-    profileId: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      profileId: string,
-    ) => {
-      profileId = profileId.toLowerCase()
-      const platform = req.params.platform as ScriptChunkPlatformUTF8
-      // toProfileIdBuf will return null if the profileId is invalid
-      if (toProfileIdBuf(platform, profileId) === null) {
-        return this.sendJSON(
-          res,
-          { error: `invalid profileId specified` },
-          HTTP.BAD_REQUEST,
-        )
-      }
-      req.params.profileId = profileId
-      next()
-    },
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param postId
-     * @returns
-     */
-    postId: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      postId: string,
-    ) => {
-      postId = postId.toLowerCase()
-      const platform = req.params.platform as ScriptChunkPlatformUTF8
-      const platformParams = this.app.get(
-        'platformParams',
-      ) as typeof PlatformConfiguration
-      const { postId: postIdParams } = platformParams.get(platform)
-      if (!postId.match(postIdParams.regex)) {
-        return this.sendJSON(
-          res,
-          { error: `postId is invalid format` },
-          HTTP.BAD_REQUEST,
-        )
-      }
-      switch (postIdParams.type) {
-        case 'BigInt': {
-          const buffer = Buffer.from(BigInt(postId).toString(16), 'hex')
-          if (buffer.length != postIdParams.len) {
-            return this.sendJSON(
-              res,
-              { error: `postId is invalid length` },
-              HTTP.BAD_REQUEST,
-            )
-          }
-          break
-        }
-        case 'String': {
-          break
-        }
-      }
-      req.params.postId = postId
-      next()
-    },
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param chartType
-     */
-    chartType: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      chartType: ChartType,
-    ) => {
-      switch (chartType) {
-        case 'wallet':
-          break
-        default:
-          return this.sendJSON(
-            res,
-            { error: `invalid chart type specified` },
-            HTTP.BAD_REQUEST,
-          )
-      }
-      req.params.chartType = chartType
-      next()
-    },
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param dataType
-     */
-    dataType: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      dataType: ChartDataType,
-    ) => {
-      switch (dataType) {
-        case 'activity':
-          break
-        case 'summary':
-          break
-        default:
-          return this.sendJSON(
-            res,
-            { error: `invalid chart data type specified` },
-            HTTP.BAD_REQUEST,
-          )
-      }
-      req.params.dataType = dataType
-      next()
-    },
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param searchType
-     */
-    searchType: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      searchType: SearchType,
-    ) => {
-      const validated = this.validate.searchType(searchType)
-      if (validated.error) {
-        return this.sendJSON(
-          res,
-          { error: validated.error },
-          validated.statusCode,
-        )
-      }
-      req.params.searchType = validated.searchType
-      next()
-    },
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param scriptPayload
-     */
-    scriptPayload: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      scriptPayload: string | undefined,
-    ) => {
-      const result = this.validate.scriptPayload(scriptPayload)
-      req.params.scriptPayload = result?.scriptPayload
-      next()
-    },
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param statsRoute
-     * @returns
-     */
-    statsRoute: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      statsRoute: StatsRoute,
-    ) => {
-      statsRoute = statsRoute.toLowerCase() as StatsRoute
-      // Must be a defined route
-      if (!StatsRoutes[statsRoute]) {
-        return this.sendJSON(
-          res,
-          { error: `invalid stats path specified` },
-          HTTP.BAD_REQUEST,
-        )
-      }
-      req.params.statsRoute = statsRoute
-      next()
-    },
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param pageNum
-     * @returns
-     */
-    pageNum: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      pageNum: string | undefined,
-    ) => {
-      if (isNaN(Number(pageNum))) {
-        return this.sendJSON(
-          res,
-          { error: `invalid votes page number specified` },
-          HTTP.BAD_REQUEST,
-        )
-      }
-      req.params.pageNum = pageNum
-      next()
-    },
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param pageSize
-     */
-    pageSize: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      pageSize: string | undefined,
-    ) => {
-      const pageSizeNum = Number(pageSize)
-      if (isNaN(pageSizeNum) || pageSizeNum < 1) {
-        return this.sendJSON(
-          res,
-          { error: `invalid page size specified` },
-          HTTP.BAD_REQUEST,
-        )
-      }
-      // enforce max page size
-      if (pageSizeNum > 40) {
-        pageSize = '40'
-      }
-      req.params.pageSize = pageSize
-      next()
-    },
-    /**
-     *
-     * @param req
-     * @param res
-     * @param next
-     * @param instanceId
-     */
-    instanceId: async (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-      instanceId: string | undefined,
-    ) => {
-      const result = this.validate.instanceId(instanceId)
-      if (result.error) {
-        return this.sendJSON(res, { ...result }, result.statusCode)
-      }
-      req.params.instanceId = instanceId
-      next()
-    },
-  }
-  /**
    * GET Method Handlers
    */
-  private get: { [name in Endpoint]?: EndpointHandler } = {
+  private GET: Partial<Record<Endpoint, EndpointHandler>> = {
     /**
      *
      * @param req
@@ -728,20 +712,20 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.profiles'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, HTTP.OK)
+        return sendJSON(res, result, HTTP.OK)
       } catch (e) {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.profiles'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: 'profiles not found', params: req.params },
           HTTP.NOT_FOUND,
@@ -770,18 +754,18 @@ export default class API extends EventEmitter {
           ['profileId', `${profileId}`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, HTTP.OK)
+        return sendJSON(res, result, HTTP.OK)
       } catch (e) {
         // Assume not found but log error to console
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.profile'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: 'profile not found', params: req.params },
           HTTP.NOT_FOUND,
@@ -809,20 +793,20 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.profilePosts'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, HTTP.OK)
+        return sendJSON(res, result, HTTP.OK)
       } catch (e) {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.profilePosts'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: 'profile posts not found', params: req.params },
           HTTP.NOT_FOUND,
@@ -849,21 +833,21 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.post'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, HTTP.OK)
+        return sendJSON(res, result, HTTP.OK)
       } catch (e) {
         // Assume not found but log error to console
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.post'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: 'post not found', params: req.params },
           HTTP.NOT_FOUND,
@@ -909,13 +893,13 @@ export default class API extends EventEmitter {
           const t1 = (performance.now() - t0).toFixed(3)
           log([
             ['api', 'get.charts'],
-            ...this.toLogEntries(req.params),
+            ...toLogEntries(req.params),
             ['elapsed', `${t1}ms`],
           ])
-          return this.sendJSON(res, result, HTTP.OK)
+          return sendJSON(res, result, HTTP.OK)
         }
         default:
-          return this.sendJSON(
+          return sendJSON(
             res,
             { error: `invalid chart type specified` },
             HTTP.BAD_REQUEST,
@@ -936,30 +920,30 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.search'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, [], HTTP.OK)
+        return sendJSON(res, [], HTTP.OK)
       }
       try {
         const result = await this.db.apiSearchProfile(query)
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.search'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, HTTP.OK)
+        return sendJSON(res, result, HTTP.OK)
       } catch (e) {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.search'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: 'search not found', params: req.params },
           HTTP.NOT_FOUND,
@@ -994,20 +978,20 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.stats'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, HTTP.OK)
+        return sendJSON(res, result, HTTP.OK)
       } catch (e) {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.stats'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: 'stats not found', params: req.params },
           HTTP.NOT_FOUND,
@@ -1035,20 +1019,20 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.txs'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, HTTP.OK)
+        return sendJSON(res, result, HTTP.OK)
       } catch (e) {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.txs'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: 'txs not found', params: req.params },
           HTTP.NOT_FOUND,
@@ -1070,17 +1054,17 @@ export default class API extends EventEmitter {
           (req.headers['x-forwarded-for'] as string) ??
             req.socket.remoteAddress,
         ],
-        ...this.toLogEntries(req.params),
+        ...toLogEntries(req.params),
       ] as LogEntry[]
       // validate the scriptPayload GET parameter
-      const { scriptPayload, error } = this.validate.scriptPayload(
+      const { scriptPayload, error } = validate.scriptPayload(
         req.params.scriptPayload,
       )
       if (error) {
         const t1 = (performance.now() - t0).toFixed(3)
         entries.push(['elapsed', `${t1}ms`])
         log(entries)
-        return this.sendJSON(res, { error }, HTTP.BAD_REQUEST)
+        return sendJSON(res, { error }, HTTP.BAD_REQUEST)
       }
       // parse and validate the `Authorization` header
       const [authData, authDataStr, signature] =
@@ -1088,6 +1072,8 @@ export default class API extends EventEmitter {
       // check if the instanceId is already authorized
       // If not authorized, handle the authentication challenge
       if (!this.isRequestAuthorized(authData?.instanceId, authDataStr)) {
+        // If the auth challenge fails, return a 401 Unauthorized response
+        // with the challenge data
         if (
           !this.handleAuthChallenge({
             authData,
@@ -1099,9 +1085,10 @@ export default class API extends EventEmitter {
           const t1 = (performance.now() - t0).toFixed(3)
           entries.push(['elapsed', `${t1}ms`])
           log(entries)
-          return this.sendAuthChallenge(res, this.state.checkpoint)
+          return sendAuthChallenge(res, this.state.checkpoint)
         }
-        // client is now authorized
+        // If the auth challenge succeeds, add the instanceId to the auth cache
+        // with expiration based on the current block height
         this.authCache.set(authData.instanceId, {
           authDataStr,
           expiresAt: this.state.checkpoint.height + API_AUTH_CACHE_ENTRY_TTL,
@@ -1131,7 +1118,7 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         entries.push(['elapsed', `${t1}ms`])
         log(entries)
-        return this.sendJSON(res, data, HTTP.OK)
+        return sendJSON(res, data, HTTP.OK)
       } catch (e) {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
@@ -1140,7 +1127,7 @@ export default class API extends EventEmitter {
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, { error: e.message }, HTTP.BAD_REQUEST)
+        return sendJSON(res, { error: e.message }, HTTP.BAD_REQUEST)
       }
     },
     /**
@@ -1157,20 +1144,20 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.voteActivity'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, HTTP.OK)
+        return sendJSON(res, result, HTTP.OK)
       } catch (e) {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.voteActivity'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: 'vote activity not found', params: req.params },
           HTTP.NOT_FOUND,
@@ -1179,9 +1166,48 @@ export default class API extends EventEmitter {
     },
   }
   /**
+   * PATCH Method Handlers
+   */
+  private PATCH: { [name in Endpoint]?: EndpointHandler } = {
+    post: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      const { platform, profileId, postId } = req.params
+      const content = req.body.content as string
+      try {
+        /* const result = await this.db.apiUpsertPlatformProfilePost(
+          platform as ScriptChunkPlatformUTF8,
+          profileId,
+          postId,
+          content,
+        )
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'patch.post'],
+          ...toLogEntries(req.params),
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, result, HTTP.OK) */
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'patch.post'],
+          ...toLogEntries(req.params),
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          { error: 'post not found', params: req.params },
+          HTTP.NOT_FOUND,
+        )
+      }
+    },
+  }
+  /**
    * POST Method Handlers
    */
-  private post: { [name in Endpoint]?: EndpointHandler } = {
+  private POST: Partial<Record<Endpoint, EndpointHandler>> = {
     /**
      * Retrieves posts for a platform
      * @param req Express Request object containing `platform` and `scriptPayload` parameters
@@ -1190,7 +1216,7 @@ export default class API extends EventEmitter {
     posts: async (req: Request, res: Response) => {
       const t0 = performance.now()
       if (req.headers['content-type'] !== 'application/json') {
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: 'invalid content type' },
           HTTP.BAD_REQUEST,
@@ -1199,7 +1225,7 @@ export default class API extends EventEmitter {
       const { platform, scriptPayload } = req.params
       // if we don't have the scriptPayload, it was not validated
       if (!scriptPayload) {
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: 'scriptPayload invalid or not specified' },
           HTTP.BAD_REQUEST,
@@ -1218,20 +1244,20 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'post.posts'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, result, HTTP.OK)
+        return sendJSON(res, result, HTTP.OK)
       } catch (e) {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'post.posts'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, { error: e.message }, HTTP.BAD_REQUEST)
+        return sendJSON(res, { error: e.message }, HTTP.BAD_REQUEST)
       }
     },
     /**
@@ -1258,11 +1284,11 @@ export default class API extends EventEmitter {
           error?: string
           statusCode?: number
         }
-        validated = this.validate.instanceId(body.instanceId)
+        validated = validate.instanceId(body.instanceId)
         if (!validated.instanceId) {
           throw new Error(validated.error)
         }
-        validated = this.validate.scriptPayload(body.scriptPayload)
+        validated = validate.scriptPayload(body.scriptPayload)
         if (!validated.scriptPayload) {
           throw new Error('scriptPayload must be specified')
         }
@@ -1309,20 +1335,20 @@ export default class API extends EventEmitter {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'post.instance'],
-          ...this.toLogEntries(req.params),
+          ...toLogEntries(req.params),
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(res, req.body, HTTP.OK)
+        return sendJSON(res, req.body, HTTP.OK)
       } catch (e) {
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'post.instance'],
-          ...this.toLogEntries(req.body),
+          ...toLogEntries(req.body),
           ['message', `"${String(e)}"`],
           ['elapsed', `${t1}ms`],
         ])
-        return this.sendJSON(
+        return sendJSON(
           res,
           { error: e.message, params: req.body },
           HTTP.BAD_REQUEST,
@@ -1376,9 +1402,9 @@ export default class API extends EventEmitter {
       })
     },
     /**
-     *
-     * @param param0
-     * @returns
+     * Signal a Temporal workflow, returning a handle to the workflow
+     * @param param0 - Workflow type, taskQueue, workflowId, args, signal, and signalArgs
+     * @returns Workflow handle
      */
     signalWithStart: async ({
       taskQueue,
@@ -1404,10 +1430,11 @@ export default class API extends EventEmitter {
       })
     },
     /**
-     *
-     * @param startTime
-     * @param scriptPayload
-     * @returns
+     * Retrieves the activity for a wallet rank based on the provided script payload and optional time range.
+     * @param scriptPayload - The script payload to get activity for
+     * @param startTime - The start time to get activity for
+     * @param endTime - The end time to get activity for
+     * @returns Wallet rank activity
      */
     getWalletRankActivity: async (
       scriptPayload: string,
@@ -1439,10 +1466,10 @@ export default class API extends EventEmitter {
       }
     },
     /**
-     *
-     * @param startTime
-     * @param endTime
-     * @returns
+     * Retrieves the activity summary for a wallet rank based on the provided script payload and optional time range.
+     * @param startTime - The start time to get activity for
+     * @param endTime - The end time to get activity for
+     * @returns Wallet rank activity summary
      */
     getWalletRankActivitySummary: async (
       startTime: Timespan,
@@ -1454,9 +1481,8 @@ export default class API extends EventEmitter {
       })
     },
     /**
-     *
-     * @param platform
-     * @returns
+     * Retrieves the top ranked profiles of all time.
+     * @returns Top ranked profiles
      */
     getAllTimeTopRankedProfiles: async (): Promise<RankTopProfile[]> => {
       return await this.db.getStatsPlatformRanked({
@@ -1466,9 +1492,9 @@ export default class API extends EventEmitter {
       })
     },
     /**
-     *
-     * @param startTime
-     * @returns
+     * Retrieves the top ranked profiles for a platform based on the provided time range.
+     * @param startTime - The start time to get profiles for
+     * @returns Top ranked profiles
      */
     getTopRankedProfiles: async (
       startTime: Timespan,
@@ -1480,9 +1506,9 @@ export default class API extends EventEmitter {
       })
     },
     /**
-     *
-     * @param startTime
-     * @returns
+     * Retrieves the top ranked posts for a platform based on the provided time range.
+     * @param startTime - The start time to get posts for
+     * @returns Top ranked posts
      */
     getTopRankedPosts: async (startTime: Timespan): Promise<RankTopPost[]> => {
       return await this.db.getStatsPlatformRanked({
@@ -1537,8 +1563,8 @@ export default class API extends EventEmitter {
     scriptPayload: string
     data: string
     signature: string
-  }) {
-    return !!this.validate.signature(payload).signature
+  }): boolean {
+    return !!validate.signature(payload).signature
   }
   /**
    * Validates the authorization of an instanceId
@@ -1623,40 +1649,42 @@ export default class API extends EventEmitter {
     }
     return true
   }
-  /**
-   * Sends an HTTP "401 Unauthorized" response with a `WWW-Authenticate` header
-   * @param res Express Response object to send the response
-   * @param checkpoint The latest indexed block to use for the challenge
-   */
-  private sendAuthChallenge(res: Response, checkpoint: Block) {
-    const { hash, height } = checkpoint
-    res
-      .contentType('text/plain')
-      .status(HTTP.UNAUTHORIZED)
-      .header(
-        'WWW-Authenticate',
-        `BlockDataSig blockhash=${hash} blockheight=${height}`,
-      )
-      .send(`${HTTP.UNAUTHORIZED} Unauthorized`)
-  }
-  /**
-   * Sends a JSON response with the specified data and status code
-   * @param res Express Response object to send the JSON response
-   * @param data Object containing the data to be sent as JSON
-   * @param statusCode Optional HTTP status code (defaults to HTTP.OK if not provided)
-   */
-  private sendJSON(res: Response, data: object, statusCode?: number) {
-    res
-      .contentType('application/json')
-      .status(statusCode ?? HTTP.OK)
-      .json(data)
-  }
-  /**
-   *
-   * @param data
-   * @returns
-   */
-  private toLogEntries(data: Request['params']): [string, string][] {
-    return Object.entries(data).map(([k, v]) => [k, String(v)])
-  }
+}
+/**
+ * Converts a request parameter object to an array of key-value pairs for logging
+ * @param data The request parameter object to convert
+ * @returns An array of key-value pairs for logging
+ */
+function toLogEntries(data: Request['params']): [string, string][] {
+  return Object.entries(data).map(([k, v]) => [k, String(v)])
+}
+
+/**
+ * Sends a JSON response with the specified data and status code
+ * @param res Express Response object to send the JSON response
+ * @param data Object containing the data to be sent as JSON
+ * @param statusCode Optional HTTP status code (defaults to HTTP.OK if not provided)
+ */
+function sendJSON(res: Response, data: object, statusCode?: number) {
+  res
+    .contentType('application/json')
+    .status(statusCode ?? HTTP.OK)
+    .json(data)
+}
+
+/**
+ * Sends an HTTP "401 Unauthorized" response with a `WWW-Authenticate` header
+ * @param res Express Response object to send the response
+ * @param checkpoint The latest indexed block to use for the challenge
+ */
+function sendAuthChallenge(res: Response, checkpoint: Block) {
+  const { hash, height } = checkpoint
+  res
+    .contentType('text/plain')
+    .status(HTTP.UNAUTHORIZED)
+    .header(
+      'WWW-Authenticate',
+      `BlockDataSig blockhash=${hash} blockheight=${height}`,
+    )
+    .send(`${HTTP.UNAUTHORIZED} Unauthorized`)
 }

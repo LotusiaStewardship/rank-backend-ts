@@ -7,17 +7,19 @@ import {
   ERR,
 } from '../util/constants'
 import type { Outpoint } from './indexer'
-import {
-  type Block,
-  type ProfileMap,
-  type RankTarget,
-  type ScriptChunkPlatformUTF8,
-  type ScriptChunkSentimentUTF8,
-  type IndexedProfileRanking,
-  type IndexedTransactionRANK,
-  type IndexedTransactionRNKC,
-  toAsyncIterable,
+import type {
+  RankCommentAPI,
+  IndexedProfileRanking,
+  IndexedPostRanking,
+  ProfileMap,
+  Block,
+  RankTarget,
+  ScriptChunkPlatformUTF8,
+  ScriptChunkSentimentUTF8,
+  IndexedTransactionRANK,
+  IndexedTransactionRNKC,
 } from 'lotus-lib'
+import { toAsyncIterable, toCommentUTF8 } from 'lotus-lib'
 
 type RequestPost = {
   profileId: string
@@ -44,6 +46,7 @@ export type VoterDetails = {
   ranking: string
   votesPositive: number
   votesNegative: number
+  votesNeutral: number
 }
 export type ScriptPayloadActivitySummary = {
   scriptPayload: string
@@ -328,10 +331,18 @@ export default class Database {
    * @returns An array of profiles matching the query
    */
   async apiSearchProfile(query: string): Promise<IndexedProfileRanking[]> {
-    const searchResults: IndexedProfileRanking[] = []
     // execute the transaction, properly structuring the results
     return await this.db.$transaction(async tx => {
       const profiles = await tx.profile.findMany({
+        select: {
+          platform: true,
+          id: true,
+          ranking: true,
+          satsPositive: true,
+          satsNegative: true,
+          votesPositive: true,
+          votesNegative: true,
+        },
         where: {
           id: {
             contains: query,
@@ -340,19 +351,15 @@ export default class Database {
         },
         take: API_SEARCH_RESULT_COUNT,
       })
-      for (const profile of profiles) {
-        const data: IndexedProfileRanking = {
-          platform: profile.platform,
-          profileId: profile.id,
-          ranking: profile.ranking.toString(),
-          satsPositive: profile.satsPositive.toString(),
-          satsNegative: profile.satsNegative.toString(),
-          votesPositive: profile.votesPositive,
-          votesNegative: profile.votesNegative,
-        }
-        searchResults.push(data)
-      }
-      return searchResults
+      return profiles.map(profile => ({
+        platform: profile.platform,
+        profileId: profile.id,
+        ranking: profile.ranking.toString(),
+        satsPositive: profile.satsPositive.toString(),
+        satsNegative: profile.satsNegative.toString(),
+        votesPositive: profile.votesPositive,
+        votesNegative: profile.votesNegative,
+      }))
     })
   }
   /**
@@ -373,14 +380,17 @@ export default class Database {
       satsNegative: '0',
       votesPositive: 0,
       votesNegative: 0,
-      uniqueVoters: 0,
-      voterDetails: {},
+      comments: [] as RankCommentAPI[],
+      voters: [],
     }
     return await this.db.$transaction(async tx => {
       try {
         const profile = await tx.profile.findUniqueOrThrow({
           where: {
             platform_id: { platform, id: profileId },
+          },
+          include: {
+            comments: true,
           },
         })
         // get the voter details for the profile
@@ -394,8 +404,14 @@ export default class Database {
         data.satsNegative = profile.satsNegative.toString()
         data.votesPositive = profile.votesPositive
         data.votesNegative = profile.votesNegative
-        data.uniqueVoters = Object.keys(voterDetails).length ?? 0
-        data.voterDetails = voterDetails
+        data.comments = profile.comments.map(comment => ({
+          ...comment,
+          sats: comment.sats.toString(),
+          firstSeen: comment.firstSeen.toString(),
+          timestamp: comment.timestamp.toString(),
+          data: toCommentUTF8(comment.data),
+        }))
+        data.voters = voterDetails
       } catch (e) {
         // nothing to do here
       } finally {
@@ -428,6 +444,7 @@ export default class Database {
         votesPositive: 0,
         votesNegative: 0,
       },
+      data: null,
       postId,
       postMeta: null,
       ranking: '0',
@@ -470,6 +487,10 @@ export default class Database {
         data.satsNegative = post.satsNegative.toString()
         data.votesPositive = post.votesPositive
         data.votesNegative = post.votesNegative
+        // if the post has a data field, add it to the return data
+        if (post.data) {
+          data.data = toCommentUTF8(post.data)
+        }
         // set up post metadata
         if (post.ranks.length) {
           const postMeta = {
@@ -1604,6 +1625,7 @@ export default class Database {
         voter = {
           votesPositive: 0,
           votesNegative: 0,
+          votesNeutral: 0,
           ranking: '0',
         }
       }
@@ -1618,11 +1640,14 @@ export default class Database {
           voter.votesNegative += details._count.sentiment
           voter.ranking = (ranking - details._sum.sats).toString()
           break
+        case 'neutral':
+          voter.votesNeutral += details._count.sentiment
+          break
       }
 
       voterDetails[details.scriptPayload] = voter
     })
 
-    return voterDetails
+    return Object.entries(voterDetails)
   }
 }
