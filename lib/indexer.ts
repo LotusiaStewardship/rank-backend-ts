@@ -804,21 +804,26 @@ export default class Indexer extends EventEmitter {
           if (!scriptProcessor) {
             break
           }
-          // Try to process as a neutral RANK output and add to results if valid
-          const neutralRank = this.processNeutralRANK(output)
-          if (neutralRank) {
-            result.ranks.push({
-              txid: tx.txid,
-              outIdx: i,
-              firstSeen: firstSeen++,
-              scriptPayload,
-              height: block?.height, // undefined if mempool tx
-              sats: BigInt(output.satoshis),
-              timestamp: block?.timestamp, // undefined until block is connected
-              ...neutralRank,
-            })
-            // continue to the next output
-            continue
+
+          // Only neutral sentiments are allowed to have zero value, any other sentiments
+          // must have a non-zero value
+          if (output.satoshis === 0) {
+            // Try to process as a neutral RANK output and add to results if valid
+            const neutralRank = this.processNeutralRANK(output)
+            if (neutralRank) {
+              result.ranks.push({
+                txid: tx.txid,
+                outIdx: i,
+                firstSeen: firstSeen++,
+                scriptPayload,
+                height: block?.height, // undefined if mempool tx
+                sats: BigInt(output.satoshis),
+                timestamp: block?.timestamp, // undefined until block is connected
+                ...neutralRank,
+              })
+              // continue to the next output
+              continue
+            }
           }
           // TODO: can add more checks for additional RANK scenarios here
           //
@@ -892,15 +897,13 @@ export default class Indexer extends EventEmitter {
   private processNeutralRANK(
     output: Transaction.Output,
   ): TransactionOutputRANK | null {
+    // Create a ScriptProcessor to validate the output script
     const processor = new ScriptProcessor(output.script.toBuffer())
     const rank = processor.processScriptRANK()
     if (!rank) {
       return null
     }
-    // Only neutral sentiments are allowed to have zero value
-    // any other sentiments must have a non-zero value
-    //
-    // We don't need to check the value of the output here, only the sentiment
+    // If the sentiment is not neutral, return null
     if (rank.sentiment !== 'neutral') {
       return null
     }
