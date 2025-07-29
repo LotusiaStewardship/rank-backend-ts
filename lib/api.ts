@@ -22,7 +22,6 @@ import {
   PlatformConfiguration,
   type ScriptChunkPlatformUTF8,
   type InstanceData,
-  type AuthorizationData,
   Util,
   Block,
   toProfileIdBuf,
@@ -66,8 +65,8 @@ export type RankTopProfile = {
   votesTimespan: string[]
   /** Unique identifier for the profile */
   profileId: string
-  /** The social media platform (currently only Twitter) */
-  platform: 'twitter'
+  /** The social media platform */
+  platform: ScriptChunkPlatformUTF8
 }
 /**
  * Represents a post's ranking information, extending RankTopProfile with an optional postId
@@ -77,6 +76,19 @@ export type RankTopProfile = {
  */
 export type RankTopPost = RankTopProfile & {
   postId?: string
+}
+/**
+ * Represents the payload sent by an extension to authenticate with the API.
+ */
+type AuthorizationData = {
+  /** Unique identifier for the extension instance. */
+  instanceId: string
+  /** The script payload used for authentication. */
+  scriptPayload: string
+  /** The block hash used for authentication. */
+  blockhash: string
+  /** The block height used for authentication. */
+  blockheight: string
 }
 /**
  * Represents an entry in the authentication cache for an extension instance
@@ -158,6 +170,14 @@ export enum StatsRoutes {
   'posts/lowest-ranked' = 'getStatsPlatformRanked',
 }
 export type StatsRoute = keyof typeof StatsRoutes
+
+/** Authentication header parameters provided to client for authorization to API */
+export const AuthenticateHeader = {
+  /** The scheme of the authentication header */
+  scheme: 'BlockDataSig' as const,
+  /** The parameters of the authentication header */
+  param: ['blockhash', 'blockheight'] as const,
+}
 
 /**
  * Validates that the provided parameters are valid and sets the request parameters
