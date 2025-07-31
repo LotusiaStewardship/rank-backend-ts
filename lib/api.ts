@@ -12,6 +12,7 @@ import express, {
 import {
   Connection,
   Client as TemporalClient,
+  type WorkflowExecutionInfo,
   type SearchAttributes,
   type SignalDefinition,
 } from '@temporalio/client'
@@ -1360,6 +1361,35 @@ export default class API extends EventEmitter {
    * Temporal Activity definitions (must be arrow functions)
    */
   temporalActivities = {
+    /**
+     * List all workflows matching the query and return the workflow execution info
+     * @param query - The SQL-like query to list workflows
+     * @returns The list of workflow executions
+     */
+    listWorkflows: async ({ query }: { query: string }) => {
+      const queryResult = this.temporalClient.workflow.list({ query })
+      const workflowList: WorkflowExecutionInfo[] = []
+      for await (const workflowInfo of queryResult) {
+        workflowList.push(workflowInfo)
+      }
+      return workflowList
+    },
+    /**
+     * Get the result of a workflow execution
+     * @param workflowId - The ID of the workflow for which to get the result
+     * @returns The result of the workflow execution
+     */
+    resultWorkflow: async ({
+      workflowId,
+      runId,
+    }: {
+      workflowId: string
+      runId?: string
+    }) => {
+      return await this.temporalClient.workflow.result(workflowId, runId, {
+        followRuns: true,
+      })
+    },
     /**
      * Query a Temporal workflow, returning the query result
      * @param workflowId - The ID of the workflow for which to query
