@@ -9,9 +9,9 @@ import Database from './database'
 import type {
   TransactionOutputRANK,
   TransactionOutputRNKC,
-  IndexedTransactionRNKC,
-  IndexedTransactionRANK,
-  IndexedTransaction,
+  TransactionRNKC,
+  TransactionRANK,
+  Transaction as IndexedTransaction,
   Block,
   ProfileMap,
   Profile,
@@ -47,22 +47,22 @@ type MempoolCache = Map<string, MempoolCacheEntry>
  * This is a union of IndexedTransactionRANK and IndexedTransactionRNKC
  * with an additional type field to distinguish between the two.
  */
-type MempoolCacheEntry = (IndexedTransactionRANK | IndexedTransactionRNKC) & {
+type MempoolCacheEntry = (TransactionRANK | TransactionRNKC) & {
   type: ScriptChunkLokadUTF8
 }
 /**
  * Result of processing a transaction
  * */
 type ProcessedTransaction = {
-  ranks?: IndexedTransactionRANK[]
-  rnkc?: IndexedTransactionRNKC
+  ranks?: TransactionRANK[]
+  rnkc?: TransactionRNKC
 }
 /**
  * Result of processing a block or mempool
  * */
 type ProcessedBlockOrMempool = {
-  ranks: IndexedTransactionRANK[]
-  rnkcs: IndexedTransactionRNKC[]
+  ranks: TransactionRANK[]
+  rnkcs: TransactionRNKC[]
 }
 /** Object containing primary key fields connecting saved transactions to blocks */
 export type Outpoint = Pick<IndexedTransaction, 'txid' | 'outIdx'>
@@ -117,7 +117,7 @@ export default class Indexer extends EventEmitter {
    * @param data - The Block or IndexedTransactionRANK object to convert
    * @returns Array of [key, value] tuples representing the object's properties as strings
    */
-  private toLogEntries(data: Block | IndexedTransactionRANK): LogEntry[] {
+  private toLogEntries(data: Block | TransactionRANK): LogEntry[] {
     return Object.entries(data).map(([k, v]) => [k, String(v)])
   }
   /**
@@ -429,8 +429,8 @@ export default class Indexer extends EventEmitter {
     blocksLength: number,
   ): Promise<[Block, number, number]> {
     const blocks: Block[] = []
-    const ranks: IndexedTransactionRANK[] = []
-    const rnkcs: IndexedTransactionRNKC[] = []
+    const ranks: TransactionRANK[] = []
+    const rnkcs: TransactionRNKC[] = []
     for (let i = 0; i < blocksLength; i++) {
       try {
         const block = blockrange.blocks(i)
@@ -586,10 +586,10 @@ export default class Indexer extends EventEmitter {
     txs.forEach(tx => {
       switch (tx.type) {
         case 'RANK':
-          this.addRankTransactionToProfileQueue(tx as IndexedTransactionRANK)
+          this.addRankTransactionToProfileQueue(tx as TransactionRANK)
           break
         case 'RNKC':
-          this.addRankCommentToProfileQueue(tx as IndexedTransactionRNKC)
+          this.addRankCommentToProfileQueue(tx as TransactionRNKC)
           break
       }
     })
@@ -1009,9 +1009,7 @@ export default class Indexer extends EventEmitter {
    * @param rank `IndexedTransactionRANK` object
    * @returns `void`
    */
-  private addRankTransactionToProfileQueue = (
-    rank: IndexedTransactionRANK,
-  ): void => {
+  private addRankTransactionToProfileQueue = (rank: TransactionRANK): void => {
     const profile = this.toProfileFromRANK(rank)
     this.profileQueue.set(profile.id, profile)
   }
@@ -1020,9 +1018,7 @@ export default class Indexer extends EventEmitter {
    * @param rnkc `IndexedTransactionRNKC` object
    * @returns `void`
    */
-  private addRankCommentToProfileQueue = (
-    rnkc: IndexedTransactionRNKC,
-  ): void => {
+  private addRankCommentToProfileQueue = (rnkc: TransactionRNKC): void => {
     // Each RNKC is a Lotusia post from a profile, so we add it to the profile queue
     this.profileQueue.set(
       rnkc.scriptPayload, // scriptPayload is the profileId for Lotusia posts
@@ -1041,7 +1037,7 @@ export default class Indexer extends EventEmitter {
    * @param rank `IndexedTransactionRANK` object
    * @returns `Profile` object
    */
-  private toProfileFromRANK(rank: IndexedTransactionRANK): Profile {
+  private toProfileFromRANK(rank: TransactionRANK): Profile {
     // Determine positive/negative stats per RANK sentiment
     let ranking = 0n
     let satsPositive = 0n
@@ -1125,7 +1121,7 @@ export default class Indexer extends EventEmitter {
    * @param rnkc `IndexedTransactionRNKC` object
    * @returns Lotusia-specific `Profile` object
    */
-  private toLotusiaProfileFromRNKC(rnkc: IndexedTransactionRNKC): Profile {
+  private toLotusiaProfileFromRNKC(rnkc: TransactionRNKC): Profile {
     // pull out the fields we need to create a new profile/post
     const { scriptPayload: profileId, txid: postId, data } = rnkc
     // Check if the profile exists in the queue, otherwise create
@@ -1171,10 +1167,14 @@ export default class Indexer extends EventEmitter {
    * @param rnkc `IndexedTransactionRNKC` object
    * @returns `Profile` object
    */
-  private toProfileFromRNKC(rnkc: IndexedTransactionRNKC): Profile | null {
+  private toProfileFromRNKC(rnkc: TransactionRNKC): Profile | null {
     // pull out the fields we need to create a new profile/post
-    const { platform, inReplyToProfileId, inReplyToPostId, ...partialRNKC } =
-      rnkc
+    const {
+      inReplyToPlatform,
+      inReplyToProfileId,
+      inReplyToPostId,
+      ...partialRNKC
+    } = rnkc
     // if there is no profileId, return undefined
     // This is a valid RNKC transaction, but it doesn't have a profileId
     // so we can't add it to the profile queue
@@ -1186,7 +1186,7 @@ export default class Indexer extends EventEmitter {
     if (!profile) {
       profile = this.toProfile({
         id: inReplyToProfileId,
-        platform,
+        platform: inReplyToPlatform,
       })
     }
     // If there is no postId, add the RNKC to the profile's comments and return
@@ -1204,7 +1204,7 @@ export default class Indexer extends EventEmitter {
     } else {
       post = this.toPost({
         id: inReplyToPostId,
-        platform,
+        platform: inReplyToPlatform,
         profileId: inReplyToProfileId,
         comments: [partialRNKC],
       })

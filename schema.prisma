@@ -143,22 +143,22 @@ model RankComment {
   // RankComment data, including some data not present in the OP_RETURN protocol
   data               Bytes // the comment text (UTF-8)
   feeRate            Int // fee rate in sat/byte at time of comment insertion to the RANK indexer
-  platform           String // The platform of the profile/post that is being replied to (e.g. Lotusia, Twitter, etc.)
+  inReplyToPlatform  String // The platform of the profile/post that is being replied to (e.g. Lotusia, Twitter, etc.)
   inReplyToProfileId String? // id of the Profile that is being replied to (if no profileId, then the comment is a Lotusia post)
   inReplyToPostId    String? // id of the Post that is being replied to (requires profileId)
   // each RNKC tx from the mempool does not yet have a Block
   block              Block?   @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
   post               Post     @relation("LotusiaPost", fields: [txid, scriptPayload, data], references: [id, profileId, data])
   // each RankComment is directly replying to a Profile or Post
-  repliedProfile     Profile? @relation(fields: [platform, inReplyToProfileId], references: [platform, id])
-  repliedPost        Post?    @relation(fields: [platform, inReplyToProfileId, inReplyToPostId], references: [platform, profileId, id])
+  repliedProfile     Profile? @relation(fields: [inReplyToPlatform, inReplyToProfileId], references: [platform, id])
+  repliedPost        Post?    @relation(fields: [inReplyToPlatform, inReplyToProfileId, inReplyToPostId], references: [platform, profileId, id])
 
   // Unique constraints for relation to Post model
   // txid = postId, scriptPayload = profileId, data = comment text
   @@unique([txid, scriptPayload, data])
   @@index([scriptPayload(type: hash)])
-  @@index([platform(type: hash), inReplyToProfileId(type: hash)])
-  @@index([platform(type: hash), inReplyToPostId(type: hash)])
+  @@index([inReplyToPlatform(type: hash), inReplyToProfileId(type: hash)])
+  @@index([inReplyToPlatform(type: hash), inReplyToPostId(type: hash)])
   @@index([height(sort: Desc)])
 }
 

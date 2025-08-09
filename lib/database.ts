@@ -1,5 +1,11 @@
 /* eslint-disable no-unsafe-finally */
-import { PrismaClient } from '../prisma/prisma-client-js'
+import {
+  PrismaClient,
+  type Profile as PrismaProfile,
+  type Post as PrismaPost,
+  type RankComment as PrismaRankComment,
+  type RankTransaction as PrismaRankTransaction,
+} from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
 import {
   API_STATS_RESULT_COUNT,
@@ -8,32 +14,93 @@ import {
 } from '../util/constants'
 import type { Outpoint } from './indexer'
 import type {
-  RankCommentAPI,
-  IndexedProfileRanking,
-  IndexedPostRanking,
   ProfileMap,
   Block,
-  RankTarget,
+  Post,
+  TargetEntity,
   ScriptChunkPlatformUTF8,
   ScriptChunkSentimentUTF8,
-  IndexedTransactionRANK,
-  IndexedTransactionRNKC,
+  Transaction,
+  TransactionRANK,
+  TransactionRNKC,
 } from 'lotus-lib'
 import { toAsyncIterable, toCommentUTF8 } from 'lotus-lib'
 
-type RequestPost = {
+type IndexedTransactionRANK = Transaction & PrismaRankTransaction
+type IndexedTransactionRNKC = Transaction &
+  PrismaRankComment & {
+    post: PrismaPost & {
+      profile: RankStatistics
+    }
+  }
+/** */
+type Voter = {
+  profileId: string
+  ranking: string
+  satsPositive: string
+  satsNegative: string
+  votesPositive: number
+  votesNegative: number
+  votesNeutral: number
+}
+export type PostMeta = {
+  hasWalletUpvoted: boolean
+  hasWalletDownvoted: boolean
+  satsUpvoted: string
+  satsDownvoted: string
+  txidsUpvoted: string[]
+  txidsDownvoted: string[]
+}
+/** Indexed profile data, modified for `application/json` API response */
+type ProfileAPI = RankStatisticsAPI & {
+  id: string
+  platform: ScriptChunkPlatformUTF8
+  /** RANK transactions associated with the profile */
+  ranks?: IndexedTransactionRANK[]
+  /** Comments associated with the profile */
+  comments?: PostAPI[]
+  voters?: [string, Voter][]
+}
+/** Indexed post data, modified for `application/json` API response */
+type PostAPI = RankStatisticsAPI & {
+  id: string
+  platform: ScriptChunkPlatformUTF8
+  profileId: string
+  profile: RankStatisticsAPI
+  data?: string
+  inReplyToPlatform?: ScriptChunkPlatformUTF8
+  inReplyToProfileId?: string
+  inReplyToPostId?: string
+  firstSeen?: string
+  timestamp?: string
+  /** RANK transactions associated with the post */
+  ranks?: IndexedTransactionRANK[]
+  /** Comments associated with the post, modified for `application/json` API response */
+  comments?: PostAPI[]
+  postMeta?: PostMeta
+}
+
+type PostQueryParameters = {
   profileId: string
   postId: string
 }
 
 type RankStatistics = Pick<
-  RankTarget,
+  TargetEntity,
   | 'ranking'
   | 'satsPositive'
   | 'satsNegative'
   | 'votesPositive'
   | 'votesNegative'
 >
+/** Post ranking metrics */
+type RankStatisticsAPI = {
+  ranking: string
+  satsPositive: string
+  satsNegative: string
+  votesPositive: number
+  votesNegative: number
+}
 export type Timespan =
   | 'now'
   | 'today'
@@ -55,6 +122,14 @@ export type ScriptPayloadActivitySummary = {
   totalSats: string
   lastSeen: string
   firstSeen: string
+}
+
+const rankStatisticsSelect = {
+  ranking: true,
+  satsPositive: true,
+  satsNegative: true,
+  votesPositive: true,
+  votesNegative: true,
 }
 /**
  * Get the 00:00 UTC unix timestamp for the previous `Timespan`, in seconds
@@ -330,7 +405,7 @@ export default class Database {
    * @param query - The query string to search for
    * @returns An array of profiles matching the query
    */
-  async apiSearchProfile(query: string): Promise<IndexedProfileRanking[]> {
+  async apiSearchProfile(query: string): Promise<ProfileAPI[]> {
     // execute the transaction, properly structuring the results
     return await this.db.$transaction(async tx => {
       const profiles = await tx.profile.findMany({
@@ -352,8 +427,8 @@ export default class Database {
         take: API_SEARCH_RESULT_COUNT,
       })
       return profiles.map(profile => ({
-        platform: profile.platform,
-        profileId: profile.id,
+        id: profile.id,
+        platform: profile.platform as ScriptChunkPlatformUTF8,
         ranking: profile.ranking.toString(),
         satsPositive: profile.satsPositive.toString(),
         satsNegative: profile.satsNegative.toString(),
@@ -371,17 +446,18 @@ export default class Database {
   async apiGetPlatformProfile(
     platform: ScriptChunkPlatformUTF8,
     profileId: string,
+    includeVoters: boolean = false,
   ) {
-    const data = {
+    const data: ProfileAPI = {
       platform,
-      profileId,
+      id: profileId,
       ranking: '0',
       satsPositive: '0',
       satsNegative: '0',
       votesPositive: 0,
       votesNegative: 0,
-      comments: [] as RankCommentAPI[],
-      voters: [],
+      comments: null,
+      voters: null,
     }
     return await this.db.$transaction(async tx => {
       try {
@@ -390,28 +466,50 @@ export default class Database {
             platform_id: { platform, id: profileId },
           },
           include: {
-            comments: true,
+            comments: {
+              include: {
+                post: {
+                  include: {
+                    profile: {
+                      select: rankStatisticsSelect,
+                    },
+                  },
+                },
+                /* post: {
+                  select: {
+                    ranking: true,
+                    satsPositive: true,
+                    satsNegative: true,
+                    votesPositive: true,
+                    votesNegative: true,
+                  },
+                }, */
+              },
+            },
           },
         })
-        // get the voter details for the profile
-        const voterDetails = await this.getProfileVoterDetails(
-          tx as PrismaClient,
-          profileId,
-        )
         // Add indexed post data to return data
         data.ranking = profile.ranking.toString()
         data.satsPositive = profile.satsPositive.toString()
         data.satsNegative = profile.satsNegative.toString()
         data.votesPositive = profile.votesPositive
         data.votesNegative = profile.votesNegative
-        data.comments = profile.comments.map(comment => ({
-          ...comment,
-          sats: comment.sats.toString(),
-          firstSeen: comment.firstSeen.toString(),
-          timestamp: comment.timestamp.toString(),
-          data: toCommentUTF8(comment.data),
-        }))
-        data.voters = voterDetails
+        // add the comments to the return data, or empty array if no comments
+        if (profile.comments) {
+          data.comments = []
+          const profileCommentsIterable = toAsyncIterable(profile.comments)
+          for await (const comment of profileCommentsIterable) {
+            data.comments.push(this.convertRankCommentToPostAPI(comment))
+          }
+        }
+        // get the voter details for the profile if specified
+        if (includeVoters) {
+          const voterDetails = await this.getProfileVoterDetails(
+            tx as PrismaClient,
+            profileId,
+          )
+          data.voters = voterDetails
+        }
       } catch (e) {
         // nothing to do here
       } finally {
@@ -434,25 +532,59 @@ export default class Database {
     postId: string,
     scriptPayload?: string,
   ) {
-    const data = {
-      platform,
-      profileId,
-      profile: {
-        ranking: '0',
-        satsPositive: '0',
-        satsNegative: '0',
-        votesPositive: 0,
-        votesNegative: 0,
-      },
-      data: null,
-      postId,
-      postMeta: null,
-      ranking: '0',
-      satsPositive: '0',
-      satsNegative: '0',
-      votesPositive: 0,
-      votesNegative: 0,
-    }
+    const data: PostAPI =
+      platform === 'lotusia'
+        ? // Lotusia posts are indexed differently, so we need to handle them differently
+          {
+            id: postId,
+            platform,
+            profileId,
+            data: '',
+            inReplyToPlatform: null,
+            inReplyToProfileId: null,
+            inReplyToPostId: null,
+            timestamp: null,
+            ranking: '0',
+            satsPositive: '0',
+            satsNegative: '0',
+            votesPositive: 0,
+            votesNegative: 0,
+            profile: {
+              ranking: '0',
+              satsPositive: '0',
+              satsNegative: '0',
+              votesPositive: 0,
+              votesNegative: 0,
+            },
+          }
+        : // Other platforms are indexed the same, so we can use the same data structure
+          {
+            id: postId,
+            platform,
+            profileId,
+            ranking: '0',
+            satsPositive: '0',
+            satsNegative: '0',
+            votesPositive: 0,
+            votesNegative: 0,
+            profile: {
+              ranking: '0',
+              satsPositive: '0',
+              satsNegative: '0',
+              votesPositive: 0,
+              votesNegative: 0,
+            },
+          }
+    const includeRanks = !scriptPayload
+      ? undefined
+      : {
+          where: { scriptPayload },
+          select: {
+            txid: true,
+            sats: true,
+            sentiment: true,
+          },
+        }
     return await this.db.$transaction(async tx => {
       try {
         const post = await tx.post.findUniqueOrThrow({
@@ -460,25 +592,49 @@ export default class Database {
             platform_profileId_id: { platform, profileId, id: postId },
           },
           include: {
+            // Get the rank statistics for the post author
             profile: {
+              select: rankStatisticsSelect,
+            },
+            // Get the RANK transactions for the post that were voted on by the wallet,
+            // identified by the script payload
+            ranks: includeRanks,
+            // RNKC data for the post, if it exists
+            comment: {
               select: {
-                ranking: true,
-                satsPositive: true,
-                satsNegative: true,
-                votesPositive: true,
-                votesNegative: true,
+                inReplyToPlatform: true,
+                inReplyToProfileId: true,
+                inReplyToPostId: true,
+                timestamp: true,
+                firstSeen: true,
               },
             },
-            ranks: !scriptPayload
-              ? undefined
-              : {
-                  where: { scriptPayload },
-                  select: {
-                    txid: true,
-                    sats: true,
-                    sentiment: true,
+            // Replies to the post, if any
+            comments: {
+              include: {
+                post: {
+                  include: {
+                    ranks: includeRanks,
+                    profile: {
+                      select: rankStatisticsSelect,
+                    },
+                    // Nested replies to replies of the post
+                    comments: {
+                      include: {
+                        post: {
+                          include: {
+                            ranks: includeRanks,
+                            profile: {
+                              select: rankStatisticsSelect,
+                            },
+                          },
+                        },
+                      },
+                    },
                   },
                 },
+              },
+            },
           },
         })
         // Add indexed post data to return data
@@ -487,12 +643,41 @@ export default class Database {
         data.satsNegative = post.satsNegative.toString()
         data.votesPositive = post.votesPositive
         data.votesNegative = post.votesNegative
-        // if the post has a data field, add it to the return data
+        // if this is a Lotusia post, add the comment data to the return data
+        // All RNKC fields will be avialable if the `data` relation is not null
         if (post.data) {
-          data.data = toCommentUTF8(post.data)
+          const {
+            data: postData,
+            comment: {
+              inReplyToPlatform,
+              inReplyToProfileId,
+              inReplyToPostId,
+              timestamp,
+              firstSeen,
+            },
+          } = post
+          data.data = toCommentUTF8(postData)
+          data.inReplyToPlatform = inReplyToPlatform as ScriptChunkPlatformUTF8
+          data.inReplyToProfileId = inReplyToProfileId
+          data.inReplyToPostId = inReplyToPostId
+          // set the timestamp to the firstSeen if it's before the
+          // block timestamp, otherwise set it to the block timestamp
+          data.timestamp =
+            firstSeen / 1_000n < timestamp
+              ? (firstSeen / 1_000n).toString()
+              : timestamp.toString()
+        }
+        // if this post has replies, add them to the return data
+        if (post.comments) {
+          data.comments = []
+          const postRepliesIterable = toAsyncIterable(post.comments)
+          for await (const reply of postRepliesIterable) {
+            data.comments.push(this.convertRankCommentToPostAPI(reply))
+            // TODO: add nested replies to the return data
+          }
         }
         // set up post metadata
-        if (post.ranks.length) {
+        if (post.ranks?.length) {
           const postMeta = {
             hasWalletUpvoted: false,
             hasWalletDownvoted: false,
@@ -522,6 +707,7 @@ export default class Database {
             satsDownvoted: postMeta.satsDownvoted.toString(),
           }
         }
+        // add the profile data to the return data
         data.profile = {
           ranking: post.profile.ranking.toString(),
           satsPositive: post.profile.satsPositive.toString(),
@@ -565,7 +751,7 @@ export default class Database {
   async apiGetPlatformPosts(
     platform: ScriptChunkPlatformUTF8,
     scriptPayload: string,
-    postRequests: RequestPost[],
+    query: PostQueryParameters[],
   ) {
     const data = {
       platform,
@@ -576,7 +762,7 @@ export default class Database {
         where: {
           platform,
           OR: [
-            ...postRequests.map(post => ({
+            ...query.map(post => ({
               id: post.postId,
               profileId: post.profileId,
             })),
@@ -1084,7 +1270,7 @@ export default class Database {
                   votesPositive: changes.votesPositive,
                   votesNegative: changes.votesNegative,
                 },
-                votesTimespan: item.ranks?.map(rank => rank.txid) ?? [],
+                votesTimespan: item.ranks?.map(rank => rank.txid) ?? null,
               }
             },
           )
@@ -1137,12 +1323,12 @@ export default class Database {
    */
   async getRankTransactionsByHeight(
     height: number,
-  ): Promise<IndexedTransactionRANK[]> {
+  ): Promise<TransactionRANK[]> {
     try {
       const result = await this.db.rankTransaction.findMany({
         where: { height },
       })
-      return result as IndexedTransactionRANK[]
+      return result as TransactionRANK[]
     } catch (e) {
       throw new Error(`getRankTransactionsByHeight: ${e.message}`)
     }
@@ -1153,14 +1339,12 @@ export default class Database {
    * @returns Array of RankComment objects
    * @throws {Error} If the query fails
    */
-  async getRankCommentsByHeight(
-    height: number,
-  ): Promise<IndexedTransactionRNKC[]> {
+  async getRankCommentsByHeight(height: number): Promise<TransactionRNKC[]> {
     try {
       const result = await this.db.rankComment.findMany({
         where: { height },
       })
-      return result as IndexedTransactionRNKC[]
+      return result as TransactionRNKC[]
     } catch (e) {
       throw new Error(`getRankCommentsByHeight: ${e.message}`)
     }
@@ -1618,11 +1802,14 @@ export default class Database {
         sats: true,
       },
     })
-    const voterDetails: Record<string, VoterDetails> = {}
+    const voterDetails: Record<string, Voter> = {}
     voters.forEach(details => {
       let voter = voterDetails[details.scriptPayload]
       if (!voter) {
         voter = {
+          profileId,
+          satsPositive: '0',
+          satsNegative: '0',
           votesPositive: 0,
           votesNegative: 0,
           votesNeutral: 0,
@@ -1650,4 +1837,35 @@ export default class Database {
 
     return Object.entries(voterDetails)
   }
+  /**
+   * Converts a TransactionRNKC to a PostAPI
+   * @param rnkc - The TransactionRNKC to convert
+   * @returns The PostAPI
+   */
+  private convertRankCommentToPostAPI(rnkc: IndexedTransactionRNKC): PostAPI {
+    return {
+      id: rnkc.txid,
+      platform: rnkc.post.platform as ScriptChunkPlatformUTF8,
+      profileId: rnkc.post.profileId,
+      data: toCommentUTF8(rnkc.data),
+      inReplyToPlatform: rnkc.inReplyToPlatform as ScriptChunkPlatformUTF8,
+      inReplyToProfileId: rnkc.inReplyToProfileId,
+      inReplyToPostId: rnkc.inReplyToPostId,
+      firstSeen: (rnkc.firstSeen / 1_000n).toString(),
+      timestamp: rnkc.timestamp.toString(),
+      ranking: rnkc.post.ranking.toString(),
+      satsPositive: rnkc.post.satsPositive.toString(),
+      satsNegative: rnkc.post.satsNegative.toString(),
+      votesPositive: rnkc.post.votesPositive,
+      votesNegative: rnkc.post.votesNegative,
+      profile: {
+        ranking: rnkc.post.profile.ranking.toString(),
+        satsPositive: rnkc.post.profile.satsPositive.toString(),
+        satsNegative: rnkc.post.profile.satsNegative.toString(),
+        votesPositive: rnkc.post.profile.votesPositive,
+        votesNegative: rnkc.post.profile.votesNegative,
+      },
+    }
+  }
+
 }
