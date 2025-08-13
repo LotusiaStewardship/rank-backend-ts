@@ -446,7 +446,7 @@ export default class Database {
   async apiGetPlatformProfile(
     platform: ScriptChunkPlatformUTF8,
     profileId: string,
-    includeVoters: boolean = false,
+    includeVoters: boolean = true,
   ) {
     const data: ProfileAPI = {
       platform,
