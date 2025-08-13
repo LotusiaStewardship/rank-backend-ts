@@ -96,6 +96,8 @@ type AuthorizationData = {
  * @property {number} expiresAt - Block height at which the instance authorization will expire
  */
 export type AuthCacheEntry = {
+  /** The script payload used for authentication. */
+  scriptPayload: string
   /** Stringified `AuthorizationData` object */
   authDataStr: string
   /** Block height at which the instance authorization will expire */
@@ -1090,9 +1092,15 @@ export default class API extends EventEmitter {
       // parse and validate the `Authorization` header
       const [authData, authDataStr, signature] =
         this.processAuthorizationHeader(req.headers['authorization'])
-      // check if the instanceId is already authorized
+      // check if the instanceId/scriptPayload combination is already authorized
       // If not authorized, handle the authentication challenge
-      if (!this.isRequestAuthorized(authData?.instanceId, authDataStr)) {
+      if (
+        !this.isRequestAuthorized(
+          scriptPayload,
+          authData?.instanceId,
+          authDataStr,
+        )
+      ) {
         // If the auth challenge fails, return a 401 Unauthorized response
         // with the challenge data
         if (
@@ -1111,6 +1119,7 @@ export default class API extends EventEmitter {
         // If the auth challenge succeeds, add the instanceId to the auth cache
         // with expiration based on the current block height
         this.authCache.set(authData.instanceId, {
+          scriptPayload,
           authDataStr,
           expiresAt: this.state.checkpoint.height + API_AUTH_CACHE_ENTRY_TTL,
         })
@@ -1618,11 +1627,13 @@ export default class API extends EventEmitter {
   }
   /**
    * Validates the authorization of an instanceId
+   * @param scriptPayload - The GET parameter `scriptPayload`
    * @param instanceId - The instanceId to validate
    * @param authDataStr - The authDataStr to validate
    * @returns true if the instanceId is authorized, false otherwise
    */
   private isRequestAuthorized(
+    scriptPayload: string,
     instanceId: string | undefined,
     authDataStr: string | undefined,
   ) {
@@ -1630,36 +1641,34 @@ export default class API extends EventEmitter {
     if (instanceId === undefined) {
       return false
     }
-    if (this.authCache.has(instanceId)) {
-      if (!this.isValidAuthCacheEntry(instanceId, authDataStr)) {
-        this.authCache.delete(instanceId)
-      }
-    }
     if (!this.authCache.has(instanceId)) {
       // returning false will trigger check for `Authorization: BlockDataSig` header
+      return false
+    }
+    // If the auth cache entry is no longer valid, delete it
+    if (this.isAuthCacheEntryExpired(instanceId)) {
+      this.authCache.delete(instanceId)
+    }
+    // verify the authDataStr and scriptPayload from the request matches the cached entry
+    const authCacheEntry = this.authCache.get(instanceId)
+    if (
+      authDataStr &&
+      authCacheEntry.authDataStr !== authDataStr &&
+      authCacheEntry.scriptPayload !== scriptPayload
+    ) {
       return false
     }
     // return authorized
     return true
   }
   /**
-   * Validates the authorization cache entry for the given instanceId and authDataStr
-   * @param instanceId - The instanceId to validate
-   * @param authDataStr - The authDataStr to validate
-   * @returns true if the authorization cache entry is valid, false otherwise
+   * Checks if the auth cache entry is expired
+   * @param instanceId - The instanceId to check
+   * @returns true if the auth cache entry is expired, false otherwise
    */
-  private isValidAuthCacheEntry(instanceId: string, authDataStr: string) {
-    // verify the authDataStr from the request matches the cached entry
+  private isAuthCacheEntryExpired(instanceId: string) {
     const authCacheEntry = this.authCache.get(instanceId)
-    if (authDataStr && authCacheEntry.authDataStr !== authDataStr) {
-      return false
-    }
-    // if latest indexed block height exceeds the auth cache entry
-    // expiration, delete it
-    else if (authCacheEntry.expiresAt < this.state.checkpoint.height) {
-      return false
-    }
-    return true
+    return authCacheEntry.expiresAt < this.state.checkpoint.height
   }
   /**
    * Handles authentication challenge validation for wallet-specific API requests
