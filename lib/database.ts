@@ -3,8 +3,8 @@ import {
   PrismaClient,
   type Profile as PrismaProfile,
   type Post as PrismaPost,
-  type RankComment as PrismaRankComment,
-  type RankTransaction as PrismaRankTransaction,
+  type RankComment as PrismaRNKC,
+  type RankTransaction as PrismaRANK,
 } from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
 import {
@@ -26,16 +26,17 @@ import type {
 } from 'lotus-lib'
 import { toAsyncIterable, toCommentUTF8 } from 'lotus-lib'
 
-type IndexedTransactionRANK = Transaction & PrismaRankTransaction
+type IndexedTransactionRANK = Transaction & PrismaRANK
 type IndexedTransactionRNKC = Transaction &
-  PrismaRankComment & {
+  PrismaRNKC & {
     post: PrismaPost & {
-      profile: RankStatistics
+      profile: PrismaProfile | TargetEntityMetrics
     }
   }
 /** */
 type Voter = {
-  profileId: string
+  /** ID of the voter is the 20-byte P2PKH */
+  voterId: string
   ranking: string
   satsPositive: string
   satsNegative: string
@@ -43,7 +44,16 @@ type Voter = {
   votesNegative: number
   votesNeutral: number
 }
-export type PostMeta = {
+export type VoterActivitySummary = {
+  scriptPayload: string
+  totalVotes: number
+  /** Total number of sats burned during `Timespan` */
+  totalSats: string
+  lastSeen: string
+  firstSeen: string
+}
+/** Metadata about the post's voter, included in authorized API responses */
+export type PostVoterMetadata = {
   hasWalletUpvoted: boolean
   hasWalletDownvoted: boolean
   satsUpvoted: string
@@ -51,8 +61,13 @@ export type PostMeta = {
   txidsUpvoted: string[]
   txidsDownvoted: string[]
 }
+/** Metadata about the profile's voter, included in authorized API responses */
+export type ProfileVoterMetadata = {
+  hasWalletUpvoted: boolean
+  hasWalletDownvoted: boolean
+}
 /** Indexed profile data, modified for `application/json` API response */
-type ProfileAPI = RankStatisticsAPI & {
+type ProfileAPI = TargetEntityMetricsAPI & {
   id: string
   platform: ScriptChunkPlatformUTF8
   /** RANK transactions associated with the profile */
@@ -60,13 +75,16 @@ type ProfileAPI = RankStatisticsAPI & {
   /** Comments associated with the profile */
   comments?: PostAPI[]
   voters?: [string, Voter][]
+  profileMeta?: ProfileVoterMetadata
 }
 /** Indexed post data, modified for `application/json` API response */
-type PostAPI = RankStatisticsAPI & {
+type PostAPI = TargetEntityMetricsAPI & {
   id: string
   platform: ScriptChunkPlatformUTF8
   profileId: string
-  profile: RankStatisticsAPI
+  profile: TargetEntityMetricsAPI & {
+    profileMeta?: ProfileVoterMetadata
+  }
   data?: string
   inReplyToPlatform?: ScriptChunkPlatformUTF8
   inReplyToProfileId?: string
@@ -77,15 +95,16 @@ type PostAPI = RankStatisticsAPI & {
   ranks?: IndexedTransactionRANK[]
   /** Comments associated with the post, modified for `application/json` API response */
   comments?: PostAPI[]
-  postMeta?: PostMeta
+  /** Metadata about the post's voter, included in authorized API responses */
+  postMeta?: PostVoterMetadata
 }
 
 type PostQueryParameters = {
   profileId: string
   postId: string
 }
-
-type RankStatistics = Pick<
+/** Entity (e.g. profile, post) ranking metrics */
+type TargetEntityMetrics = Pick<
   TargetEntity,
   | 'ranking'
   | 'satsPositive'
@@ -93,8 +112,8 @@ type RankStatistics = Pick<
   | 'votesPositive'
   | 'votesNegative'
 >
-/** Post ranking metrics */
-type RankStatisticsAPI = {
+/** Entity (e.g. profile, post) ranking metrics, modified for `application/json` API response */
+type TargetEntityMetricsAPI = {
   ranking: string
   satsPositive: string
   satsNegative: string
@@ -109,22 +128,7 @@ export type Timespan =
   | 'month'
   | 'quarter'
   | 'all'
-export type VoterDetails = {
-  ranking: string
-  votesPositive: number
-  votesNegative: number
-  votesNeutral: number
-}
-export type ScriptPayloadActivitySummary = {
-  scriptPayload: string
-  totalVotes: number
-  /** Total number of sats burned during `Timespan` */
-  totalSats: string
-  lastSeen: string
-  firstSeen: string
-}
-
-const rankStatisticsSelect = {
+const targetEntityMetricsSelect = {
   ranking: true,
   satsPositive: true,
   satsNegative: true,
@@ -255,7 +259,7 @@ export default class Database {
     scriptPayload?: string
     startTime?: Timespan
     endTime?: Timespan
-  }): Promise<ScriptPayloadActivitySummary[]> {
+  }): Promise<VoterActivitySummary[]> {
     if (!startTime) {
       startTime = 'day'
     }
@@ -293,10 +297,10 @@ export default class Database {
             totalSats: _sum.sats.toString(),
             lastSeen: new Date(Number(_max.timestamp * 1_000n)).toISOString(),
             firstSeen: new Date(Number(_min.timestamp * 1_000n)).toISOString(),
-          }) as ScriptPayloadActivitySummary,
+          }) as VoterActivitySummary,
       )
     } catch (e) {
-      throw new Error(`db.ipcGetScriptPayloadActivity: ${e.message}`)
+      throw new Error(`db.ipcGetScriptPayloadActivitySummary: ${e.message}`)
     }
   }
   /**
@@ -419,10 +423,20 @@ export default class Database {
           votesNegative: true,
         },
         where: {
-          id: {
-            contains: query,
-            mode: 'insensitive',
-          },
+          OR: [
+            {
+              id: {
+                startsWith: query,
+                mode: 'insensitive',
+              },
+            },
+            {
+              id: {
+                contains: query,
+                mode: 'insensitive',
+              },
+            },
+          ],
         },
         take: API_SEARCH_RESULT_COUNT,
       })
@@ -471,7 +485,7 @@ export default class Database {
                 post: {
                   include: {
                     profile: {
-                      select: rankStatisticsSelect,
+                      select: targetEntityMetricsSelect,
                     },
                   },
                 },
@@ -504,11 +518,10 @@ export default class Database {
         }
         // get the voter details for the profile if specified
         if (includeVoters) {
-          const voterDetails = await this.getProfileVoterDetails(
+          data.voters = await this.getProfileVoterDetails(
             tx as PrismaClient,
             profileId,
           )
-          data.voters = voterDetails
         }
       } catch (e) {
         // nothing to do here
@@ -549,7 +562,9 @@ export default class Database {
             satsNegative: '0',
             votesPositive: 0,
             votesNegative: 0,
+            postMeta: null,
             profile: {
+              profileMeta: null,
               ranking: '0',
               satsPositive: '0',
               satsNegative: '0',
@@ -567,7 +582,9 @@ export default class Database {
             satsNegative: '0',
             votesPositive: 0,
             votesNegative: 0,
+            postMeta: null,
             profile: {
+              profileMeta: null,
               ranking: '0',
               satsPositive: '0',
               satsNegative: '0',
@@ -578,7 +595,19 @@ export default class Database {
     const includeRanks = !scriptPayload
       ? undefined
       : {
-          where: { scriptPayload },
+          where: { scriptPayload, sentiment: { not: 'neutral' } },
+          select: {
+            txid: true,
+            sats: true,
+            sentiment: true,
+          },
+        }
+    const checkWalletDownvotedProfile = !scriptPayload
+      ? undefined
+      : {
+          // we only need to check if the wallet has downvoted the profile once
+          take: 1,
+          where: { scriptPayload, sentiment: 'negative' },
           select: {
             txid: true,
             sats: true,
@@ -594,7 +623,14 @@ export default class Database {
           include: {
             // Get the rank statistics for the post author
             profile: {
-              select: rankStatisticsSelect,
+              select: {
+                ranking: true,
+                satsPositive: true,
+                satsNegative: true,
+                votesPositive: true,
+                votesNegative: true,
+                ranks: checkWalletDownvotedProfile,
+              },
             },
             // Get the RANK transactions for the post that were voted on by the wallet,
             // identified by the script payload
@@ -616,7 +652,7 @@ export default class Database {
                   include: {
                     ranks: includeRanks,
                     profile: {
-                      select: rankStatisticsSelect,
+                      select: targetEntityMetricsSelect,
                     },
                     // Nested replies to replies of the post
                     comments: {
@@ -625,7 +661,7 @@ export default class Database {
                           include: {
                             ranks: includeRanks,
                             profile: {
-                              select: rankStatisticsSelect,
+                              select: targetEntityMetricsSelect,
                             },
                           },
                         },
@@ -644,7 +680,7 @@ export default class Database {
         data.votesPositive = post.votesPositive
         data.votesNegative = post.votesNegative
         // if this is a Lotusia post, add the comment data to the return data
-        // All RNKC fields will be avialable if the `data` relation is not null
+        // All RNKC fields will be available if the `data` relation is not null
         if (post.data) {
           const {
             data: postData,
@@ -662,9 +698,10 @@ export default class Database {
           data.inReplyToPostId = inReplyToPostId
           // set the timestamp to the firstSeen if it's before the
           // block timestamp, otherwise set it to the block timestamp
+          const firstSeenSeconds = firstSeen / 1_000n
           data.timestamp =
-            firstSeen / 1_000n < timestamp
-              ? (firstSeen / 1_000n).toString()
+            firstSeenSeconds < timestamp
+              ? firstSeenSeconds.toString()
               : timestamp.toString()
         }
         // if this post has replies, add them to the return data
@@ -678,34 +715,10 @@ export default class Database {
         }
         // set up post metadata
         if (post.ranks?.length) {
-          const postMeta = {
-            hasWalletUpvoted: false,
-            hasWalletDownvoted: false,
-            satsUpvoted: 0n,
-            satsDownvoted: 0n,
-            txidsUpvoted: [],
-            txidsDownvoted: [],
-          }
-          post.ranks.forEach(rank => {
-            switch (rank.sentiment) {
-              case 'positive':
-                postMeta.hasWalletUpvoted = true
-                postMeta.txidsUpvoted.push(rank.txid)
-                postMeta.satsUpvoted += rank.sats
-                break
-              case 'negative':
-                postMeta.hasWalletDownvoted = true
-                postMeta.txidsDownvoted.push(rank.txid)
-                postMeta.satsDownvoted += rank.sats
-                break
-            }
-          })
           // convert the sats to strings for JSON serialization
-          data.postMeta = {
-            ...postMeta,
-            satsUpvoted: postMeta.satsUpvoted.toString(),
-            satsDownvoted: postMeta.satsDownvoted.toString(),
-          }
+          data.postMeta = await this.convertRankTransactionsToPostMeta(
+            post.ranks,
+          )
         }
         // add the profile data to the return data
         data.profile = {
@@ -714,6 +727,24 @@ export default class Database {
           satsNegative: post.profile.satsNegative.toString(),
           votesPositive: post.profile.votesPositive,
           votesNegative: post.profile.votesNegative,
+        }
+        // set up profile metadata
+        if (post.profile.ranks?.length) {
+          const profileMeta = {
+            hasWalletUpvoted: false,
+            hasWalletDownvoted: false,
+          }
+          post.profile.ranks.forEach(rank => {
+            switch (rank.sentiment) {
+              case 'positive':
+                profileMeta.hasWalletUpvoted = true
+                break
+              case 'negative':
+                profileMeta.hasWalletDownvoted = true
+                break
+            }
+          })
+          data.profile.profileMeta = profileMeta
         }
       } catch (e) {
         // fetch the indexed profile if the post doesn't exist
@@ -727,6 +758,7 @@ export default class Database {
             satsNegative: true,
             votesPositive: true,
             votesNegative: true,
+            ranks: checkWalletDownvotedProfile,
           },
         })
         data.profile = {
@@ -735,6 +767,24 @@ export default class Database {
           satsNegative: profile.satsNegative.toString(),
           votesPositive: profile.votesPositive,
           votesNegative: profile.votesNegative,
+        }
+        // set up profile metadata
+        if (profile.ranks?.length) {
+          const profileMeta = {
+            hasWalletUpvoted: false,
+            hasWalletDownvoted: false,
+          }
+          profile.ranks.forEach(rank => {
+            switch (rank.sentiment) {
+              case 'positive':
+                profileMeta.hasWalletUpvoted = true
+                break
+              case 'negative':
+                profileMeta.hasWalletDownvoted = true
+                break
+            }
+          })
+          data.profile.profileMeta = profileMeta
         }
       } finally {
         // always return data, even if default profile data
@@ -875,7 +925,7 @@ export default class Database {
    * @param pageSize The number of transactions per page
    * @returns Array of `RankTransaction`s
    */
-  async apiGetPlatformProfileRankTransactions(
+  async apiGetPlatformProfileVotesTableData(
     platform: ScriptChunkPlatformUTF8,
     profileId: string,
     page?: number,
@@ -1149,7 +1199,7 @@ export default class Database {
         },
       })
       // process the RANK txs and calculate changes over `Timespan`
-      const dataChanges: Map<string, RankStatistics> = new Map()
+      const dataChanges: Map<string, TargetEntityMetrics> = new Map()
       ranksBySentiment.forEach(rank => {
         const { _count, _sum, sentiment } = rank
         if (!dataChanges.has(rank[dataType])) {
@@ -1179,7 +1229,7 @@ export default class Database {
       })
       // sort the calculated rankings according to highest or lowest
       // splice API_STATS_RESULT_COUNT from the front of the array
-      let changesSortedFiltered: Array<[string, RankStatistics]>
+      let changesSortedFiltered: Array<[string, TargetEntityMetrics]>
       switch (rankingType) {
         case 'top': {
           changesSortedFiltered = [...dataChanges.entries()]
@@ -1193,87 +1243,83 @@ export default class Database {
             .splice(0, API_STATS_RESULT_COUNT)
         }
       }
+      const dbTable = dataType == 'profileId' ? 'profile' : 'post'
+      const includeRanksSelect = !includeVotes
+        ? undefined
+        : {
+            select: {
+              txid: true,
+            },
+            orderBy: {
+              timestamp: 'desc' as const,
+            },
+            skip: pageNum ? 10 * pageNum : undefined,
+            take: 10,
+          }
+      type Item = {
+        platform: ScriptChunkPlatformUTF8
+        ranks?: {
+          txid: string
+        }[]
+      }
+      type ProfileItem = Item &
+        Awaited<ReturnType<typeof this.db.profile.findFirst>>
+      type PostItem = Item & Awaited<ReturnType<typeof this.db.post.findFirst>>
       return (
         // Fetch current profile/post ranking data to calculate changes
         // in the API/UI (i.e. +69 upvotes today, 6.9K Lotus increase)
         (
-          await this.db.$transaction(
+          (await this.db.$transaction(
             changesSortedFiltered.map(([id, changes]) =>
               // @ts-expect-error we don't care if the call signatures match because we know that the same input data powers both queries
-              this.db[dataType == 'profileId' ? 'profile' : 'post'].findFirst({
+              this.db[dbTable].findFirst({
                 where: {
                   id,
                 },
                 include: {
-                  ranks: !includeVotes
-                    ? undefined
-                    : {
-                        select: {
-                          txid: true,
-                        },
-                        orderBy: {
-                          timestamp: 'desc' as const,
-                        },
-                        skip: pageNum ? 10 * pageNum : undefined,
-                        take: 10,
-                      },
+                  ranks: includeRanksSelect,
                 },
               }),
             ),
-          )
+          )) as (ProfileItem | PostItem)[]
         )
-          // structure the return data appropriately
-          .map(
-            (
-              item: {
-                ranks: {
-                  txid: string
-                }[]
-              } & {
-                id: string
-                platform: string
-                profileId?: string
-                ranking: bigint
-                satsPositive: bigint
-                satsNegative: bigint
-                votesPositive: number
-                votesNegative: number
+          .map(item => {
+            const changes = dataChanges.get(item.id)
+            const rankingCurrent = Number(item.ranking)
+            const rankingPrevious = Number(item.ranking - changes.ranking)
+            const rankingChangePercentage =
+              ((rankingCurrent - rankingPrevious) / rankingPrevious) * 100
+            const ids: { profileId: string; postId?: string } = {
+              profileId: item.id,
+            }
+            if (dataType == 'postId') {
+              ids.postId = item.id
+              ids.profileId = (item as PostItem).profileId
+            }
+            return {
+              platform: item.platform,
+              ...ids,
+              total: {
+                ranking: item.ranking.toString(),
+                satsPositive: item.satsPositive.toString(),
+                satsNegative: item.satsNegative.toString(),
+                votesPositive: item.votesPositive,
+                votesNegative: item.votesNegative,
               },
-            ) => {
-              const changes = dataChanges.get(item.id)
-              const rankingCurrent = Number(item.ranking)
-              const rankingPrevious = Number(item.ranking - changes.ranking)
-              const rankingChangePercentage =
-                ((rankingCurrent - rankingPrevious) / rankingPrevious) * 100
-              const ids =
-                dataType == 'postId'
-                  ? { profileId: item.profileId, postId: item.id }
-                  : { profileId: item.id }
-              return {
-                platform: item.platform,
-                ...ids,
-                total: {
-                  ranking: item.ranking.toString(),
-                  satsPositive: item.satsPositive.toString(),
-                  satsNegative: item.satsNegative.toString(),
-                  votesPositive: item.votesPositive,
-                  votesNegative: item.votesNegative,
-                },
-                changed: {
-                  ranking: changes.ranking.toString(),
-                  rate: rankingChangePercentage.toLocaleString(undefined, {
-                    minimumFractionDigits: 1,
-                    maximumFractionDigits: 1,
-                  }),
-                  satsPositive: changes.satsPositive.toString(),
-                  satsNegative: changes.satsNegative.toString(),
-                  votesPositive: changes.votesPositive,
-                  votesNegative: changes.votesNegative,
-                },
-                votesTimespan: item.ranks?.map(rank => rank.txid) ?? null,
-              }
-            },
-          )
+              changed: {
+                ranking: changes.ranking.toString(),
+                rate: rankingChangePercentage.toLocaleString(undefined, {
+                  minimumFractionDigits: 1,
+                  maximumFractionDigits: 1,
+                }),
+                satsPositive: changes.satsPositive.toString(),
+                satsNegative: changes.satsNegative.toString(),
+                votesPositive: changes.votesPositive,
+                votesNegative: changes.votesNegative,
+              },
+              votesTimespan: item.ranks?.map(rank => rank.txid) ?? null,
+            }
+          })
           .filter(item => {
             switch (rankingType) {
               case 'top': {
@@ -1807,7 +1853,7 @@ export default class Database {
       let voter = voterDetails[details.scriptPayload]
       if (!voter) {
         voter = {
-          profileId,
+          voterId: details.scriptPayload,
           satsPositive: '0',
           satsNegative: '0',
           votesPositive: 0,
@@ -1867,5 +1913,42 @@ export default class Database {
       },
     }
   }
-
+  /**
+   * Converts a list of rank transactions to a PostMeta
+   * @param ranks - The list of rank transactions to convert
+   * @returns The `PostVoterMetadata` object
+   */
+  private async convertRankTransactionsToPostMeta(
+    ranks: Partial<PrismaRANK>[],
+  ): Promise<PostVoterMetadata> {
+    let hasWalletUpvoted = false
+    let hasWalletDownvoted = false
+    let satsUpvoted = 0n
+    let satsDownvoted = 0n
+    const txidsUpvoted: string[] = []
+    const txidsDownvoted: string[] = []
+    const ranksIterable = toAsyncIterable(ranks)
+    for await (const rank of ranksIterable) {
+      switch (rank.sentiment) {
+        case 'positive':
+          hasWalletUpvoted = true
+          txidsUpvoted.push(rank.txid)
+          satsUpvoted += rank.sats
+          break
+        case 'negative':
+          hasWalletDownvoted = true
+          txidsDownvoted.push(rank.txid)
+          satsDownvoted += rank.sats
+          break
+      }
+    }
+    return {
+      hasWalletUpvoted,
+      hasWalletDownvoted,
+      satsUpvoted: satsUpvoted.toString(),
+      satsDownvoted: satsDownvoted.toString(),
+      txidsUpvoted,
+      txidsDownvoted,
+    }
+  }
 }

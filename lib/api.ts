@@ -349,6 +349,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     scriptPayload: string | undefined,
   ) => {
     const result = validate.scriptPayload(scriptPayload)
+    // TODO: handle signature validation here
     req.params.scriptPayload = result?.scriptPayload
     next()
   },
@@ -626,19 +627,19 @@ export default class API extends EventEmitter {
       '/wallet/:scriptPayload/:startTime?/:endTime?',
       this.GET.wallet,
     )
+    this.router.get('/votes/:page?/:pageSize?', this.GET.voteActivity)
+    this.router.get('/txs/:platform/:profileId/:page?/:pageSize?', this.GET.txs)
     this.router.get('/charts/:chartType/:dataType/:timespan?', this.GET.charts)
+    this.router.get('/profiles/:page?/:pageSize?', this.GET.profiles)
+    this.router.get('/search/:searchType/:query', this.GET.search)
     this.router.get(
       '/stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
       this.GET.stats,
     )
-    this.router.get('/search/:searchType/:query', this.GET.search)
     this.router.get(
       '/:platform/:profileId/:postId/:scriptPayload',
       this.GET.post,
     )
-    this.router.get('/votes/:page?/:pageSize?', this.GET.voteActivity)
-    this.router.get('/txs/:platform/:profileId/:page?/:pageSize?', this.GET.txs)
-    this.router.get('/profiles/:page?/:pageSize?', this.GET.profiles)
     this.router.get(
       '/:platform/:profileId/posts/:page?/:pageSize?',
       this.GET.profilePosts,
@@ -647,7 +648,7 @@ export default class API extends EventEmitter {
     this.router.get('/:platform/:profileId', this.GET.profile)
     // Router POST endpoint configuration (DEEPEST ROUTES FIRST!)
     // TODO: implement referral codes rather than mining instanceId
-    //this.router.post('/instance/register', this.post.instance)
+    //this.router.post('/instance/register', this.POST.instance)
     // Get posts for a platform, up to 50 maximum per request
     this.router.post('/posts/:platform/:scriptPayload', this.POST.posts)
     // Router PATCH endpoint configuration (DEEPEST ROUTES FIRST!)
@@ -853,22 +854,20 @@ export default class API extends EventEmitter {
           postId,
           scriptPayload,
         )
-        const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.post'],
           ...toLogEntries(req.params),
-          ['elapsed', `${t1}ms`],
+          ['elapsed', `${(performance.now() - t0).toFixed(3)}ms`],
         ])
         return sendJSON(res, result, HTTP.OK)
       } catch (e) {
         // Assume not found but log error to console
-        const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'error'],
           ['action', 'get.post'],
           ...toLogEntries(req.params),
           ['message', `"${String(e)}"`],
-          ['elapsed', `${t1}ms`],
+          ['elapsed', `${(performance.now() - t0).toFixed(3)}ms`],
         ])
         return sendJSON(
           res,
@@ -1033,7 +1032,7 @@ export default class API extends EventEmitter {
       const page = Number(req.params.page)
       const pageSize = Number(req.params.pageSize)
       try {
-        const result = await this.db.apiGetPlatformProfileRankTransactions(
+        const result = await this.db.apiGetPlatformProfileVotesTableData(
           platform as ScriptChunkPlatformUTF8,
           profileId,
           page,

@@ -20,11 +20,25 @@ export async function isValidInstanceId({
   startTime: string
   nonce: number
 }) {
-  const data = Buffer.from(`${runtimeId}:${startTime}:${nonce}`)
-  const computed = await crypto.subtle.digest('SHA-256', data)
-  return (
-    instanceId === Buffer.from(computed).toString('hex') &&
-    instanceId.substring(0, EXT_INSTANCE_ID_DIFFICULTY) ===
-      String().padStart(EXT_INSTANCE_ID_DIFFICULTY, '0')
-  )
+  try {
+    if (!new Date(startTime)?.getTime()) {
+      throw new Error('invalid startTime')
+    }
+    if (!Number.isInteger(nonce)) {
+      throw new Error('invalid nonce')
+    }
+    const data = Buffer.from(`${runtimeId}:${startTime}:${nonce}`)
+    const computed = await crypto.subtle.digest('SHA-256', data)
+    return (
+      instanceId === Buffer.from(computed).toString('hex') &&
+      instanceId.substring(0, EXT_INSTANCE_ID_DIFFICULTY) ===
+        ''.padStart(EXT_INSTANCE_ID_DIFFICULTY, '0')
+    )
+  } catch (e) {
+    log([
+      ['api.error', 'isValidInstanceId'],
+      ['error', e.message],
+    ])
+    return false
+  }
 }
