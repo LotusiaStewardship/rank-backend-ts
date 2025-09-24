@@ -206,20 +206,27 @@ export default class Database {
   }
   /**
    * Retrieves detailed activity data for a specific script payload within a given time range
-   * @param scriptPayload - The script payload to query activity for
-   * @param startTime - Optional start time for the query period
-   * @param endTime - Optional end time for the query period
-   * @returns Promise resolving to an array of rank transactions with timestamps
+  /**
+   * Retrieves detailed activity data for a specific script payload within a given time range.
+   * @param {object} params - The parameters for the query.
+   * @param {string} params.scriptPayload - The script payload to filter activity by.
+   * @param {Timespan} [params.startTime] - The start time for the activity range (optional).
+   * @param {Timespan} [params.endTime] - The end time for the activity range (optional).
+   * @param {'ipc' | 'api'} [requestType='ipc'] - The type of request, determines the response format.
+   * @returns {Promise<Array<object>>} Promise resolving to an array of rank transactions with timestamps.
    */
-  async ipcGetScriptPayloadActivity({
-    scriptPayload,
-    startTime,
-    endTime,
-  }: {
-    scriptPayload: string
-    startTime?: Timespan
-    endTime?: Timespan
-  }) {
+  async ipcGetScriptPayloadActivity(
+    {
+      scriptPayload,
+      startTime,
+      endTime,
+    }: {
+      scriptPayload: string
+      startTime?: Timespan
+      endTime?: Timespan
+    },
+    requestType: 'ipc' | 'api' = 'ipc',
+  ): Promise<Array<object>> {
     if (!startTime) {
       startTime = 'day'
     }
@@ -239,10 +246,20 @@ export default class Database {
           timestamp: 'desc',
         },
       })
-      return results.map(result => ({
-        date: new Date(Number(result.timestamp * 1_000n)).toISOString(),
-        ...result,
-      }))
+      switch (requestType) {
+        case 'api':
+          return results.map(result => ({
+            ...result,
+            date: new Date(Number(result.timestamp * 1_000n)).toISOString(),
+            sats: result.sats.toString(),
+            timestamp: result.timestamp.toString(),
+          }))
+        case 'ipc':
+          return results.map(result => ({
+            date: new Date(Number(result.timestamp * 1_000n)).toISOString(),
+            ...result,
+          }))
+      }
     })
   }
   /**
@@ -322,7 +339,6 @@ export default class Database {
     }
   }
   /**
-      data.totalVotes = data.totalUpvotes + data.totalDownvotes
    * Retrieves wallet activity summary for the specified timespan
    * @param timespan - The timespan to retrieve data for
    * @returns Object containing total votes of both types, total unique wallets

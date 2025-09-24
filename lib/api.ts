@@ -1091,6 +1091,10 @@ export default class API extends EventEmitter {
       // parse and validate the `Authorization` header
       const [authData, authDataStr, signature] =
         this.processAuthorizationHeader(req.headers['authorization'])
+      // If the auth cache entry is no longer valid, delete it
+      if (this.isAuthCacheEntryExpired(authData?.instanceId)) {
+        this.authCache.delete(authData?.instanceId)
+      }
       // check if the instanceId/scriptPayload combination is already authorized
       // If not authorized, handle the authentication challenge
       if (
@@ -1126,24 +1130,20 @@ export default class API extends EventEmitter {
       const startTime = (req.params.startTime ?? 'today') as Timespan
       const endTime = (req.params.endTime ?? 'now') as Timespan
       try {
-        const isSummaryRequest = req.path.startsWith('/wallet/summary')
-        const data = isSummaryRequest
+        const data = req.path.startsWith('/wallet/summary')
           ? await this.db.ipcGetScriptPayloadActivitySummary({
               scriptPayload,
               startTime,
               endTime,
             })
-          : (
-              await this.db.ipcGetScriptPayloadActivity({
+          : await this.db.ipcGetScriptPayloadActivity(
+              {
                 scriptPayload,
                 startTime,
                 endTime,
-              })
-            ).map(item => ({
-              ...item,
-              timestamp: item.timestamp.toString(),
-              sats: item.sats.toString(),
-            }))
+              },
+              'api',
+            )
         const t1 = (performance.now() - t0).toFixed(3)
         entries.push(['elapsed', `${t1}ms`])
         log(entries)
@@ -1643,10 +1643,6 @@ export default class API extends EventEmitter {
     if (!this.authCache.has(instanceId)) {
       // returning false will trigger check for `Authorization: BlockDataSig` header
       return false
-    }
-    // If the auth cache entry is no longer valid, delete it
-    if (this.isAuthCacheEntryExpired(instanceId)) {
-      this.authCache.delete(instanceId)
     }
     // verify the authDataStr and scriptPayload from the request matches the cached entry
     const authCacheEntry = this.authCache.get(instanceId)
