@@ -33,6 +33,7 @@ model Account {
 model Profile {
   id            String // Platform-unique ID (e.g. per API)
   accountId     String
+  instanceId    String?
   platform      String // e.g. Twitter/X.com
   ranking       BigInt // overall ranking, in satoshis
   satsPositive  BigInt // Total amount of sats burned for positive sentiment
@@ -43,7 +44,8 @@ model Profile {
   ranks         RankTransaction[]
   comments      RankComment[]
   posts         Post[]
-  account       Account?          @relation(fields: [accountId], references: [id])
+  account       Account?           @relation(fields: [accountId], references: [id])
+  instance      ExtensionInstance? @relation(fields: [instanceId], references: [id])
 
   @@id([platform, id])
   @@index([id(type: hash)])
@@ -88,7 +90,7 @@ model Post {
 model RankTransaction {
   // RankTransaction data
   txid          String // 32-byte hex
-  outIdx        Int                @default(0) // index of the output that contains the RANK data
+  outIdx        Int     @default(0) // index of the output that contains the RANK data
   sats          BigInt // amount of sats burned
   firstSeen     BigInt // Time first seen by indexer, only for new mempool transactions
   scriptPayload String // the p2pkh script payload that spent a UTXO for this transaction
@@ -101,12 +103,12 @@ model RankTransaction {
   profileId     String // references id field on Profile model
   postId        String? // optional reference to platform post ID (e.g. x.com/:profileId/status/:postId)
   // each RANK tx is associated with a Profile, else it is invalid
-  profile       Profile            @relation(fields: [platform, profileId], references: [platform, id])
+  profile       Profile @relation(fields: [platform, profileId], references: [platform, id])
   // each RANK tx MAY be associated with a Post
-  post          Post?              @relation(fields: [platform, profileId, postId], references: [platform, profileId, id])
+  post          Post?   @relation(fields: [platform, profileId, postId], references: [platform, profileId, id])
   // each RANK tx from the mempool does not yet have a Block
-  block         Block?             @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
-  instance      ExtensionInstance? @relation(fields: [instanceId, scriptPayload], references: [id, scriptPayload])
+  block         Block?  @relation(fields: [height, timestamp], references: [height, timestamp], onDelete: Cascade)
+  //instance      ExtensionInstance? @relation(fields: [instanceId, scriptPayload], references: [id, scriptPayload])
 
   @@id([txid, outIdx])
   // Poll RANK txs for raw SQL queries
@@ -179,21 +181,60 @@ model Block {
 
 // This should be a separate registration database (e.g. like Cashweb Registry)
 model ExtensionInstance {
-  id            String            @unique
-  scriptPayload String            @unique
+  id             String   @unique
+  scriptPayload  String   @unique
   /**
    * Transaction ID of the payment for API access
    */
   //paymentProof  String?           @unique
-  authToken     String?           @unique
-  createdAt     DateTime
-  lastSeen      DateTime
-  optin         Boolean           @default(false)
-  votesPositive Int               @default(0)
-  votesNegative Int               @default(0)
-  ranks         RankTransaction[]
+  authPayloadStr String?  @unique
+  createdAt      DateTime @default(now())
+  lastSeen       DateTime @default(now())
+
+  // subscriptions to push notifications
+  subscriptionId String?
+
+  // relations
+  subscription       ExtensionPushSubscription?
+  topicSubscriptions ExtensionTopicSubscription[]
+  profiles           Profile[]
 
   @@id([id, scriptPayload])
   @@index([scriptPayload(type: hash)])
-  @@index([id(type: hash), scriptPayload(type: hash), optin(type: hash)])
+  @@index([id(type: hash), scriptPayload(type: hash)])
+}
+
+model ExtensionPushSubscription {
+  id         String @unique
+  instanceId String @unique
+
+  // subscription endpoint data provided by the browser's Push API
+  endpoint  String @unique
+  p256dhKey String @unique
+  authKey   String @unique
+
+  // subscription metadata
+  isActive  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  lastUsed  DateTime @default(now())
+
+  // relations
+  instance ExtensionInstance @relation(fields: [instanceId], references: [id])
+
+  // primary keys and indexes
+  @@id([instanceId, id])
+  @@index([instanceId(type: hash)])
+  @@index([instanceId(type: hash), isActive(type: hash)])
+}
+
+model ExtensionTopicSubscription {
+  instanceId String
+  topic      String
+  isActive   Boolean           @default(false)
+  createdAt  DateTime          @default(now())
+  lastUsed   DateTime          @default(now())
+  // relations
+  instance   ExtensionInstance @relation(fields: [instanceId], references: [id])
+
+  @@id([instanceId, topic])
 }

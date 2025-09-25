@@ -21,21 +21,23 @@ import { Address, Message, Networks } from 'bitcore-lib-xpi'
 import {
   PlatformConfiguration,
   type ScriptChunkPlatformUTF8,
-  type InstanceData,
-  Util,
-  Block,
   toProfileIdBuf,
 } from 'lotus-lib'
-import RuntimeState from './state'
-import Database, { getTimestampUTC, type Timespan } from './database'
+import type { RuntimeState } from './state'
+import { Database, getTimestampUTC } from './database'
 import config from '../config'
+import { API_SERVER_PORT, ERR, HTTP } from '../util/constants'
 import {
-  API_AUTH_CACHE_ENTRY_TTL,
-  API_SERVER_PORT,
-  ERR,
-  HTTP,
-} from '../util/constants'
-import { isValidInstanceId, log, type LogEntry } from '../util/functions'
+  sendJSON,
+  sendAuthChallenge,
+  toLogEntries,
+  isValidInstanceId,
+  log,
+  Validate,
+  type LogEntry,
+} from '../util/functions'
+import type { AuthorizationCache } from './api/authCache'
+import type { Timespan } from './database'
 
 /**
  * Represents a profile's ranking information including total and change metrics
@@ -70,41 +72,10 @@ export type RankTopProfile = {
 }
 /**
  * Represents a post's ranking information, extending RankTopProfile with an optional postId
- * @typedef {Object} RankTopPost
- * @extends {RankTopProfile}
- * @property {string} [postId] - Optional unique identifier for the post
  */
 export type RankTopPost = RankTopProfile & {
   postId?: string
 }
-/**
- * Represents the payload sent by an extension to authenticate with the API.
- */
-type AuthorizationData = {
-  /** Unique identifier for the extension instance. */
-  instanceId: string
-  /** The script payload used for authentication. */
-  scriptPayload: string
-  /** The block hash used for authentication. */
-  blockhash: string
-  /** The block height used for authentication. */
-  blockheight: string
-}
-/**
- * Represents an entry in the authentication cache for an extension instance
- * @property {string} authDataStr - Stringified `AuthorizationData` object
- * @property {number} expiresAt - Block height at which the instance authorization will expire
- */
-export type AuthCacheEntry = {
-  /** The script payload used for authentication. */
-  scriptPayload: string
-  /** Stringified `AuthorizationData` object */
-  authDataStr: string
-  /** Block height at which the instance authorization will expire */
-  expiresAt: number
-}
-/** Runtime cache of authenticated instances, where string is the `instanceId` */
-export type AuthCache = Map<string, AuthCacheEntry>
 export type Endpoint =
   | 'profiles'
   | 'profile'
@@ -133,6 +104,13 @@ export type EndpointParameter =
   | 'dataType'
   | 'searchType'
   | 'txid'
+export type EndpointParameterHandler = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  param: string | undefined,
+) => void
+
 /** This type is data returned from the database, not Temporal */
 export type ChartWalletSummary = {
   /** Total number of votes cast */
@@ -157,13 +135,6 @@ export type WalletRankActivityWorkflowResult = {
 }
 export type ChartType = 'wallet'
 export type ChartDataType = 'summary' | 'activity'
-export type SearchType = 'profile' | 'post'
-export type EndpointParameterHandler = (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-  param: string | undefined,
-) => void
 
 export enum StatsRoutes {
   'profiles/top-ranked' = 'getStatsPlatformRanked',
@@ -329,9 +300,9 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req: Request,
     res: Response,
     next: NextFunction,
-    searchType: SearchType,
+    searchType: 'profile' | 'post',
   ) => {
-    const validated = validate.searchType(searchType)
+    const validated = Validate.searchType(searchType)
     if (validated.error) {
       return sendJSON(res, { error: validated.error }, validated.statusCode)
     }
@@ -348,7 +319,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     next: NextFunction,
     scriptPayload: string | undefined,
   ) => {
-    const result = validate.scriptPayload(scriptPayload)
+    const result = Validate.scriptPayload(scriptPayload)
     // TODO: handle signature validation here
     req.params.scriptPayload = result?.scriptPayload
     next()
@@ -430,7 +401,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     next: NextFunction,
     instanceId: string | undefined,
   ) => {
-    const result = validate.instanceId(instanceId)
+    const result = Validate.instanceId(instanceId)
     if (result.error) {
       return sendJSON(res, { ...result }, result.statusCode)
     }
@@ -460,131 +431,15 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
 }
 
 /**
- * Validator functions for API parameters
- */
-const validate = {
-  /**
-   * Validates that the provided `instanceId` is a 64-character hexadecimal string.
-   * If invalid, responds with HTTP 400 and an error message.
-   * @param instanceId - The instance ID to validate
-   * @returns The validated instance ID
-   */
-  instanceId: (instanceId: string | undefined) => {
-    if (instanceId === undefined) {
-      return {
-        error: 'instanceId must be specified',
-        statusCode: HTTP.BAD_REQUEST,
-      }
-    }
-    if (!instanceId.match(/^[a-f0-9]{64}$/)) {
-      return {
-        error: 'instanceId is invalid format',
-        statusCode: HTTP.BAD_REQUEST,
-      }
-    }
-    return { instanceId }
-  },
-  /**
-   * Validates that the provided `scriptPayload` is a valid script payload.
-   * If invalid, responds with HTTP 400 and an error message.
-   * @param scriptPayload - The script payload to validate
-   * @returns The validated script payload
-   */
-  scriptPayload: (scriptPayload: string | undefined) => {
-    if (scriptPayload === undefined) {
-      return {
-        error: 'scriptPayload must be specified',
-        statusCode: HTTP.BAD_REQUEST,
-      }
-    }
-    return Buffer.from(scriptPayload, 'hex').byteLength === 20
-      ? { scriptPayload }
-      : {
-          error: 'scriptPayload is invalid',
-          statusCode: HTTP.BAD_REQUEST,
-        }
-  },
-  /**
-   * Validates a message signature
-   * @param scriptPayload - PKH used to generate `Address` for signature validation
-   * @param data - The data payload to verify against the signature
-   * @param signature - The signature of the data payload to validate
-   * @returns The validated signature
-   */
-  signature: ({
-    scriptPayload,
-    data,
-    signature,
-  }: {
-    scriptPayload: string | undefined
-    data: string | undefined
-    signature: string | undefined
-  }) => {
-    if (scriptPayload === undefined) {
-      return {
-        error: 'scriptPayload must be specified',
-        statusCode: HTTP.BAD_REQUEST,
-      }
-    }
-    if (signature === undefined) {
-      return {
-        error: 'signature must be specified',
-        statusCode: HTTP.BAD_REQUEST,
-      }
-    }
-    if (data === undefined) {
-      return {
-        error: 'data must be specified',
-        statusCode: HTTP.BAD_REQUEST,
-      }
-    }
-    // convert scriptPayload to Address
-    const address = Address.fromPublicKeyHash(
-      Buffer.from(scriptPayload, 'hex'),
-      Networks.livenet,
-    )
-    // verify message signature
-    const message = new Message(data)
-    if (!message.verify(address, signature)) {
-      return {
-        error: 'message signature is invalid',
-        statusCode: HTTP.BAD_REQUEST,
-      }
-    }
-    return { signature }
-  },
-  /**
-   * Validates a search type
-   * @param searchType - The search type to validate
-   * @returns The validated search type
-   */
-  searchType: (searchType: SearchType | undefined) => {
-    if (searchType === undefined) {
-      return {
-        error: 'search type must be specified',
-        statusCode: HTTP.BAD_REQUEST,
-      }
-    }
-    if (!['profile', 'post'].includes(searchType)) {
-      return {
-        error: 'invalid search type specified',
-        statusCode: HTTP.BAD_REQUEST,
-      }
-    }
-    return { searchType }
-  },
-}
-
-/**
  * API class for handling HTTP requests and responses
  * @extends {EventEmitter}
  */
-export default class API extends EventEmitter {
+export class API extends EventEmitter {
   private db: Database
   private app: Express
+  private authCache: AuthorizationCache
   private router: Router
   private server: Server
-  private authCache: AuthCache
   private state: RuntimeState
   private temporalClient!: TemporalClient
   private temporalWorker!: TemporalWorker
@@ -595,12 +450,22 @@ export default class API extends EventEmitter {
    * @param db Database instance for handling data operations
    * @extends {EventEmitter} Inherits event handling capabilities
    */
-  constructor(state: RuntimeState, db: Database) {
+  constructor({
+    authCache,
+    routers,
+    state,
+    db,
+  }: {
+    authCache: AuthorizationCache
+    routers: [string, Router][]
+    state: RuntimeState
+    db: Database
+  }) {
     super()
     this.state = state
     this.db = db
-    this.authCache = new Map()
     //this.app = express()
+    this.authCache = authCache
     this.router = Router({
       caseSensitive: false,
       mergeParams: true,
@@ -620,11 +485,11 @@ export default class API extends EventEmitter {
     this.router.param('txid', Parameters.txid)
     // Router GET endpoint configuration (DEEPEST ROUTES FIRST!)
     this.router.get(
-      '/wallet/summary/:scriptPayload/:startTime?/:endTime?',
+      '/wallet/summary/:instanceId/:scriptPayload/:startTime?/:endTime?',
       this.GET.wallet,
     )
     this.router.get(
-      '/wallet/:scriptPayload/:startTime?/:endTime?',
+      '/wallet/:instanceId/:scriptPayload/:startTime?/:endTime?',
       this.GET.wallet,
     )
     this.router.get('/votes/:page?/:pageSize?', this.GET.voteActivity)
@@ -1078,8 +943,23 @@ export default class API extends EventEmitter {
         ],
         ...toLogEntries(req.params),
       ] as LogEntry[]
+
+      // check if the instanceId is authorized
+      if (
+        !this.authCache.isRequestAuthorized(
+          req.params.instanceId,
+          req.headers['authorization'],
+        )
+      ) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        entries.push(['elapsed', `${t1}ms`])
+        log(entries)
+        return sendAuthChallenge(res, this.state.checkpoint)
+      }
+      // REQUEST IS NOW AUTHORIZED
+
       // validate the scriptPayload GET parameter
-      const { scriptPayload, error } = validate.scriptPayload(
+      const { scriptPayload, error } = Validate.scriptPayload(
         req.params.scriptPayload,
       )
       if (error) {
@@ -1088,45 +968,8 @@ export default class API extends EventEmitter {
         log(entries)
         return sendJSON(res, { error }, HTTP.BAD_REQUEST)
       }
-      // parse and validate the `Authorization` header
-      const [authData, authDataStr, signature] =
-        this.processAuthorizationHeader(req.headers['authorization'])
-      // If the auth cache entry is no longer valid, delete it
-      if (this.isAuthCacheEntryExpired(authData?.instanceId)) {
-        this.authCache.delete(authData?.instanceId)
-      }
-      // check if the instanceId/scriptPayload combination is already authorized
-      // If not authorized, handle the authentication challenge
-      if (
-        !this.isRequestAuthorized(
-          scriptPayload,
-          authData?.instanceId,
-          authDataStr,
-        )
-      ) {
-        // If the auth challenge fails, return a 401 Unauthorized response
-        // with the challenge data
-        if (
-          !this.handleAuthChallenge({
-            authData,
-            authDataStr,
-            signature,
-            scriptPayload,
-          })
-        ) {
-          const t1 = (performance.now() - t0).toFixed(3)
-          entries.push(['elapsed', `${t1}ms`])
-          log(entries)
-          return sendAuthChallenge(res, this.state.checkpoint)
-        }
-        // If the auth challenge succeeds, add the instanceId to the auth cache
-        // with expiration based on the current block height
-        this.authCache.set(authData.instanceId, {
-          scriptPayload,
-          authDataStr,
-          expiresAt: this.state.checkpoint.height + API_AUTH_CACHE_ENTRY_TTL,
-        })
-      }
+
+      // proceed with request
       const startTime = (req.params.startTime ?? 'today') as Timespan
       const endTime = (req.params.endTime ?? 'now') as Timespan
       try {
@@ -1313,11 +1156,11 @@ export default class API extends EventEmitter {
           error?: string
           statusCode?: number
         }
-        validated = validate.instanceId(body.instanceId)
+        validated = Validate.instanceId(body.instanceId)
         if (!validated.instanceId) {
           throw new Error(validated.error)
         }
-        validated = validate.scriptPayload(body.scriptPayload)
+        validated = Validate.scriptPayload(body.scriptPayload)
         if (!validated.scriptPayload) {
           throw new Error('scriptPayload must be specified')
         }
@@ -1509,18 +1352,17 @@ export default class API extends EventEmitter {
         Buffer.from(scriptPayload, 'hex'),
         Networks.mainnet,
       )
-      const activity = await this.db.ipcGetScriptPayloadActivity({
-        startTime,
-        endTime,
-        scriptPayload,
-      })
+      const activity = await this.db.ipcGetScriptPayloadActivity(
+        {
+          startTime,
+          endTime,
+          scriptPayload,
+        },
+        'api',
+      )
       return {
         address: address.toXAddress(),
-        activity: activity.map(item => ({
-          ...item,
-          timestamp: item.timestamp.toString(),
-          sats: item.sats.toString(),
-        })),
+        activity,
       }
     },
     /**
@@ -1586,159 +1428,4 @@ export default class API extends EventEmitter {
       return getTimestampUTC(timespan)
     },
   }
-  /**
-   * Processes an authorization header string to extract authorization data, data string and signature
-   * @param {string} header - The authorization header string to process, expected in base64 format
-   * @returns {[AuthorizationData | null, string | null, string | null]} Tuple containing:
-   *   - AuthorizationData object or null if invalid
-   *   - Raw authorization data string or null if invalid
-   *   - Signature string or null if invalid
-   */
-  private processAuthorizationHeader(
-    header: string | undefined,
-  ): [AuthorizationData, string, string] {
-    if (header === undefined) {
-      return [null, null, null]
-    }
-    const [authDataStr, signature] = Util.base64.decode(header).split(':::')
-    if (!authDataStr || !signature) {
-      return [null, null, null]
-    }
-    const authData = JSON.parse(authDataStr ?? '{}') as AuthorizationData
-    return [authData, authDataStr, signature]
-  }
-  /**
-   * Validates the authorization using blockchain data and signature.
-   * The validation combines the blockhash and blockheight as a message and verifies
-   * that the signature was created using the private key of the `scriptPayload`.
-   * @param {Object} payload - The authorization data object
-   * @param {string} payload.scriptPayload - The script payload to validate against
-   * @param {string} payload.data - The JSON-encoded payload to validate
-   * @param {string} payload.signature - The cryptographic signature created by signing the data with the private key
-   * @returns {boolean} True if the signature is valid for the given scriptPayload and block data, false otherwise
-   */
-  private authBlockDataSig(payload: {
-    scriptPayload: string
-    data: string
-    signature: string
-  }): boolean {
-    return !!validate.signature(payload).signature
-  }
-  /**
-   * Validates the authorization of an instanceId
-   * @param scriptPayload - The GET parameter `scriptPayload`
-   * @param instanceId - The instanceId to validate
-   * @param authDataStr - The authDataStr to validate
-   * @returns true if the instanceId is authorized, false otherwise
-   */
-  private isRequestAuthorized(
-    scriptPayload: string,
-    instanceId: string | undefined,
-    authDataStr: string | undefined,
-  ) {
-    // make sure the instanceId is provided
-    if (instanceId === undefined) {
-      return false
-    }
-    if (!this.authCache.has(instanceId)) {
-      // returning false will trigger check for `Authorization: BlockDataSig` header
-      return false
-    }
-    // verify the authDataStr and scriptPayload from the request matches the cached entry
-    const authCacheEntry = this.authCache.get(instanceId)
-    if (
-      authDataStr &&
-      authCacheEntry.authDataStr !== authDataStr &&
-      authCacheEntry.scriptPayload !== scriptPayload
-    ) {
-      return false
-    }
-    // return authorized
-    return true
-  }
-  /**
-   * Checks if the auth cache entry is expired
-   * @param instanceId - The instanceId to check
-   * @returns true if the auth cache entry is expired, false otherwise
-   */
-  private isAuthCacheEntryExpired(instanceId: string) {
-    const authCacheEntry = this.authCache.get(instanceId)
-    return authCacheEntry.expiresAt < this.state.checkpoint.height
-  }
-  /**
-   * Handles authentication challenge validation for wallet-specific API requests
-   * Verifies the provided authentication data against the current blockchain checkpoint
-   * and authorizes the instance if validation is successful
-   * @returns true if the authentication is valid, false otherwise
-   */
-  private handleAuthChallenge({
-    authData,
-    authDataStr,
-    signature,
-    scriptPayload,
-  }: {
-    authData: AuthorizationData
-    authDataStr: string
-    signature: string
-    scriptPayload: string
-  }) {
-    if (!authData?.blockhash || !authData?.blockheight || !signature) {
-      return false
-    }
-    // validate provided blockhash and blockheight against checkpoint
-    if (
-      authData.blockhash !== this.state.checkpoint.hash ||
-      authData.blockheight !== this.state.checkpoint.height.toString()
-    ) {
-      return false
-    }
-    // Make sure the scriptPayload authData matches the GET parameter
-    if (authData?.scriptPayload !== scriptPayload) {
-      return false
-    }
-    // validate the signature using the scriptPayload in the request path
-    const payload = { scriptPayload, data: authDataStr, signature }
-    if (!this.authBlockDataSig(payload)) {
-      return false
-    }
-    return true
-  }
-}
-/**
- * Converts a request parameter object to an array of key-value pairs for logging
- * @param data The request parameter object to convert
- * @returns An array of key-value pairs for logging
- */
-function toLogEntries(data: Request['params']): [string, string][] {
-  return Object.entries(data).map(([k, v]) => [k, String(v)])
-}
-
-/**
- * Sends a JSON response with the specified data and status code
- * @param res Express Response object to send the JSON response
- * @param data Object containing the data to be sent as JSON
- * @param statusCode Optional HTTP status code (defaults to HTTP.OK if not provided)
- */
-function sendJSON(res: Response, data: object, statusCode?: number) {
-  res
-    .contentType('application/json')
-    .status(statusCode ?? HTTP.OK)
-    .json(data)
-}
-
-/**
- * Sends an HTTP "401 Unauthorized" response with a `WWW-Authenticate` header
- * @param res Express Response object to send the response
- * @param checkpoint The latest indexed block to use for the challenge
- */
-function sendAuthChallenge(res: Response, checkpoint: Block) {
-  const { hash, height } = checkpoint
-  res
-    .contentType('text/plain')
-    .status(HTTP.UNAUTHORIZED)
-    .header(
-      'WWW-Authenticate',
-      `BlockDataSig blockhash=${hash} blockheight=${height}`,
-    )
-    .send(`${HTTP.UNAUTHORIZED} Unauthorized`)
 }
