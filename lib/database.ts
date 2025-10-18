@@ -7,9 +7,16 @@ import {
   type RankTransaction as PrismaRANK,
 } from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
+import { toAsyncIterable, toCommentUTF8 } from 'lotus-lib'
+import {
+  PushSubscription,
+  PushSubscriptionPayload,
+  TopicSubscription,
+} from './push'
 import {
   API_STATS_RESULT_COUNT,
   API_SEARCH_RESULT_COUNT,
+  API_WALLET_RESULT_COUNT,
   ERR,
 } from '../util/constants'
 import type { Outpoint } from './indexer'
@@ -24,7 +31,6 @@ import type {
   TransactionRANK,
   TransactionRNKC,
 } from 'lotus-lib'
-import { toAsyncIterable, toCommentUTF8 } from 'lotus-lib'
 
 type IndexedTransactionRANK = Transaction & PrismaRANK
 type IndexedTransactionRNKC = Transaction &
@@ -53,7 +59,7 @@ export type VoterActivitySummary = {
   firstSeen: string
 }
 /** Metadata about the post's voter, included in authorized API responses */
-export type PostVoterMetadata = {
+export type VoterPostMetadata = {
   hasWalletUpvoted: boolean
   hasWalletDownvoted: boolean
   satsUpvoted: string
@@ -62,7 +68,7 @@ export type PostVoterMetadata = {
   txidsDownvoted: string[]
 }
 /** Metadata about the profile's voter, included in authorized API responses */
-export type ProfileVoterMetadata = {
+export type VoterProfileMetadata = {
   hasWalletUpvoted: boolean
   hasWalletDownvoted: boolean
 }
@@ -75,7 +81,7 @@ type ProfileAPI = TargetEntityMetricsAPI & {
   /** Comments associated with the profile */
   comments?: PostAPI[]
   voters?: [string, Voter][]
-  profileMeta?: ProfileVoterMetadata
+  profileMeta?: VoterProfileMetadata
 }
 /** Indexed post data, modified for `application/json` API response */
 type PostAPI = TargetEntityMetricsAPI & {
@@ -83,7 +89,7 @@ type PostAPI = TargetEntityMetricsAPI & {
   platform: ScriptChunkPlatformUTF8
   profileId: string
   profile: TargetEntityMetricsAPI & {
-    profileMeta?: ProfileVoterMetadata
+    profileMeta?: VoterProfileMetadata
   }
   data?: string
   inReplyToPlatform?: ScriptChunkPlatformUTF8
@@ -96,9 +102,9 @@ type PostAPI = TargetEntityMetricsAPI & {
   /** Comments associated with the post, modified for `application/json` API response */
   comments?: PostAPI[]
   /** Metadata about the post's voter, included in authorized API responses */
-  postMeta?: PostVoterMetadata
+  postMeta?: VoterPostMetadata
 }
-
+/** Parameters for querying a post from API */
 type PostQueryParameters = {
   profileId: string
   postId: string
@@ -172,7 +178,7 @@ export const getTimestampUTC = (timespan: Timespan): number => {
   }
 }
 
-export default class Database {
+export class Database {
   private db: PrismaClient
 
   /**
@@ -205,7 +211,122 @@ export default class Database {
     await this.db.$disconnect()
   }
   /**
-   * Retrieves detailed activity data for a specific script payload within a given time range
+   * Saves a push subscription for an extension instance in the database.
+   * Marks the instance as subscribed and creates a new subscription record.
+   *
+   * Some scalar fields, such as `createdAt`, have default values set, so they
+   * are not included in the upsert operation.
+   *
+   * @param {PushSubscription} subscription - The push subscription object to save.
+   *   - id: The unique identifier for the subscription.
+   *   - instanceId: The ID of the extension instance.
+   *   - endpoint: The push endpoint details (url, keys).
+   *   - isActive: Whether the subscription is currently active.
+   */
+  async upsertPushSubscription(subscription: PushSubscription) {
+    try {
+      return await this.db.extensionPushSubscription.upsert({
+        where: {
+          instanceId: subscription.instanceId,
+        },
+        create: {
+          id: subscription.id,
+          //instanceId: subscription.instanceId,
+          endpoint: subscription.endpoint.url,
+          p256dhKey: subscription.endpoint.keys.p256dh,
+          authKey: subscription.endpoint.keys.auth,
+          isActive: subscription.isActive,
+          instance: {
+            connect: {
+              id: subscription.instanceId,
+            },
+          },
+        },
+        update: {
+          id: subscription.id,
+          endpoint: subscription.endpoint.url,
+          p256dhKey: subscription.endpoint.keys.p256dh,
+          authKey: subscription.endpoint.keys.auth,
+          isActive: subscription.isActive,
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.upsertPushSubscription: ${e.message}`)
+    }
+  }
+  /**
+   * Saves a topic subscription for an extension instance in the database.
+   * Updates the topic subscription record with the provided subscription details.
+   *
+   * @param {TopicSubscription} subscription - The topic subscription object to save.
+   *   - id: The unique identifier for the topic subscription.
+   *   - instanceId: The ID of the extension instance.
+   *   - topic: The topic to which the instance is subscribing.
+   */
+  async upsertTopicSubscription(subscription: TopicSubscription) {
+    try {
+      await this.db.extensionTopicSubscription.upsert({
+        where: {
+          instanceId_topic: {
+            instanceId: subscription.instanceId,
+            topic: subscription.topic,
+          },
+        },
+        create: {
+          instanceId: subscription.instanceId,
+          topic: subscription.topic,
+          isActive: subscription.isActive,
+          createdAt: subscription.createdAt,
+          lastUsed: subscription.lastUsed,
+        },
+        update: {
+          isActive: subscription.isActive,
+          lastUsed: subscription.lastUsed,
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.upsertTopicSubscription: ${e.message}`)
+    }
+  }
+  /**
+   * Retrieves all active push subscriptions from the database, including their
+   * associated topic subscriptions.
+   *
+   * @returns A promise that resolves to an array of active push subscription records,
+   * each including the related instance's topic subscriptions.
+   */
+  async getPushSubscriptions() {
+    try {
+      return await this.db.extensionPushSubscription.findMany({
+        where: {
+          isActive: true,
+        },
+        include: {
+          instance: {
+            select: {
+              topicSubscriptions: true,
+            },
+          },
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.getPushSubscriptions: ${e.message}`)
+    }
+  }
+  /**
+   * Deletes a push subscription from the database.
+   * @param subscriptionId The ID of the subscription to delete.
+   * @returns A promise that resolves to the deleted subscription.
+   */
+  async deletePushSubscription(subscriptionId: string) {
+    try {
+      return await this.db.extensionPushSubscription.delete({
+        where: { id: subscriptionId },
+      })
+    } catch (e) {
+      throw new Error(`db.deletePushSubscription: ${e.message}`)
+    }
+  }
   /**
    * Retrieves detailed activity data for a specific script payload within a given time range.
    * @param {object} params - The parameters for the query.
@@ -332,7 +453,26 @@ export default class Database {
     lastSeen: Date
   }) {
     try {
-      await this.db.extensionInstance.create({ data })
+      await this.db.extensionInstance.upsert({
+        where: {
+          id_scriptPayload: {
+            id: data.id,
+            scriptPayload: data.scriptPayload,
+          },
+        },
+        create: {
+          id: data.id,
+          scriptPayload: data.scriptPayload,
+          createdAt: data.createdAt,
+          lastSeen: data.lastSeen,
+        },
+        update: {
+          lastSeen: new Date(),
+          // update scriptPayload as the auth header may be updated as well
+          scriptPayload: data.scriptPayload,
+          //createdAt: data.createdAt,
+        },
+      })
       return { error: null }
     } catch (e) {
       return { error: JSON.stringify(e.message) }
@@ -1533,6 +1673,40 @@ export default class Database {
     }
   }
   /**
+   * Generates database statements for upserting push subscriptions
+   * @param subscriptions Map of push subscriptions to generate upsert statements for
+   * @returns Array of database upsert statements
+   */
+  async toSubscriptionUpsertStatements(
+    subscriptions: Map<string, PushSubscription>,
+  ) {
+    const upserts: ReturnType<
+      typeof this.db.extensionPushSubscription.upsert
+    >[] = []
+    for await (const [id, subscription] of toAsyncIterable(subscriptions)) {
+      upserts.push(
+        this.db.extensionPushSubscription.upsert({
+          where: { instanceId: subscription.instanceId },
+          create: {
+            id: subscription.id,
+            instanceId: subscription.instanceId,
+            endpoint: subscription.endpoint.url,
+            p256dhKey: subscription.endpoint.keys.p256dh,
+            authKey: subscription.endpoint.keys.auth,
+            isActive: subscription.isActive,
+          },
+          update: {
+            endpoint: subscription.endpoint.url,
+            p256dhKey: subscription.endpoint.keys.p256dh,
+            authKey: subscription.endpoint.keys.auth,
+            isActive: subscription.isActive,
+          },
+        }),
+      )
+    }
+    return upserts
+  }
+  /**
    * Generates database statements for upserting profiles and their associated posts
    * @param profiles - Map of profiles to generate upsert statements for
    * @returns Array of database upsert statements
@@ -1932,11 +2106,11 @@ export default class Database {
   /**
    * Converts a list of rank transactions to a PostMeta
    * @param ranks - The list of rank transactions to convert
-   * @returns The `PostVoterMetadata` object
+   * @returns The `VoterPostMetadata` object
    */
   private async convertRankTransactionsToPostMeta(
     ranks: Partial<PrismaRANK>[],
-  ): Promise<PostVoterMetadata> {
+  ): Promise<VoterPostMetadata> {
     let hasWalletUpvoted = false
     let hasWalletDownvoted = false
     let satsUpvoted = 0n

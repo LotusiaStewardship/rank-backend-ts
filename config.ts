@@ -5,6 +5,16 @@ type TemporalWorkflowQuery = {
 }
 type ParsedConfig = {
   datasourceUrl: string
+  push: {
+    vapid: {
+      subject: string
+      publicKey: string
+      privateKey: string
+    }
+    gcm: {
+      apiKey: string
+    }
+  }
   temporal: {
     host: string
     namespace: string
@@ -33,6 +43,16 @@ class Config {
   private parseConfig(): ParsedConfig {
     return {
       datasourceUrl: this.env.parsed?.DATABASE_URL,
+      push: {
+        vapid: {
+          subject: this.env.parsed?.VAPID_SUBJECT,
+          publicKey: this.env.parsed?.VAPID_PUBLIC_KEY,
+          privateKey: this.env.parsed?.VAPID_PRIVATE_KEY,
+        },
+        gcm: {
+          apiKey: this.env.parsed?.GCM_API_KEY,
+        },
+      },
       temporal: {
         host: this.env.parsed?.TEMPORAL_HOST,
         namespace: this.env.parsed?.TEMPORAL_NAMESPACE,

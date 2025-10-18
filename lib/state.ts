@@ -1,9 +1,17 @@
 import type { Block } from 'lotus-lib'
 
-export default class RuntimeState {
-  public checkpoint: Block
+export class RuntimeState {
+  private _checkpoint: Block | null
 
   constructor() {
-    this.checkpoint = null
+    this._checkpoint = null
+  }
+
+  get checkpoint() {
+    return this._checkpoint
+  }
+
+  set checkpoint(checkpoint: Block) {
+    this._checkpoint = checkpoint
   }
 }

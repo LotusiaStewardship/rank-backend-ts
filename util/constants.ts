@@ -27,6 +27,7 @@ export const NNG_MESSAGE_BATCH_SIZE = 10 // number of messages to process in eac
 export enum HTTP {
   /** Success */
   OK = 200,
+  CREATED = 201,
   ACCEPTED = 202,
   /** Redirection */
   MOVED_PERMANENTLY = 301,
@@ -36,6 +37,9 @@ export enum HTTP {
   PAYMENT_REQUIRED = 402,
   FORBIDDEN = 403,
   NOT_FOUND = 404,
+  NOT_IMPLEMENTED = 501,
+  /** Server errors */
+  INTERNAL_SERVER_ERROR = 500,
 }
 /**
  * Error codes

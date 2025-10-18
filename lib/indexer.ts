@@ -4,8 +4,17 @@ import { Builder, ByteBuffer } from 'flatbuffers'
 //import { resolve } from 'node:path/posix'
 //import { Worker } from 'node:worker_threads'
 import { EventEmitter } from 'events'
-import RuntimeState from './state'
-import Database from './database'
+import { RuntimeState } from './state'
+import {
+  SubscriptionManager,
+  Topic,
+  TopicCategoryWallet,
+  TopicCategoryStewardship,
+  TopicCategorySystem,
+  TopicCategorySocial,
+  PushNotification,
+} from './push'
+import { Database } from './database'
 import type {
   TransactionOutputRANK,
   TransactionOutputRNKC,
@@ -39,7 +48,7 @@ import { log, type LogEntry } from '../util/functions'
  * Runtime cache for quickly reconciling missing LOKAD txs with blocks
  *
  * Key is `txid_outIdx`
- * */
+ */
 type MempoolCache = Map<string, MempoolCacheEntry>
 /**
  * Mempool cache entry
@@ -74,7 +83,7 @@ export type Outpoint = Pick<IndexedTransaction, 'txid' | 'outIdx'>
  * to the appropriate lotusd publishing endpoints and reacts to new messages
  * accordingly.
  */
-export default class Indexer extends EventEmitter {
+export class Indexer extends EventEmitter {
   /** Database instance for storing indexed data */
   private db: Database
   /** NNG instance for communicating with lotusd */
@@ -83,6 +92,8 @@ export default class Indexer extends EventEmitter {
   private pubUri: string
   /** URI for the RPC socket connection */
   private rpcUri: string
+  /** Utilized during NNG events to notify subscribed instances of new activity */
+  private subscriptionManager: SubscriptionManager
   /** Cache of unconfirmed RANK transactions */
   private mempool: MempoolCache
   /** Queue for upserting/rewinding profiles */
@@ -95,12 +106,19 @@ export default class Indexer extends EventEmitter {
    * @param pubUri Optional path to the NNG pub/sub socket (defaults to ~/.lotus/pub.pipe)
    * @param rpcUri Optional path to the NNG RPC socket (defaults to ~/.lotus/rpc.pipe)
    */
-  constructor(
-    state: RuntimeState,
-    db: Database,
-    pubUri?: string,
-    rpcUri?: string,
-  ) {
+  constructor({
+    state,
+    db,
+    subscriptionManager,
+    pubUri,
+    rpcUri,
+  }: {
+    state: RuntimeState
+    db: Database
+    subscriptionManager: SubscriptionManager
+    pubUri?: string
+    rpcUri?: string
+  }) {
     super()
     // Validate NNG parameters
     this.pubUri = pubUri
@@ -108,6 +126,7 @@ export default class Indexer extends EventEmitter {
     // Module setup
     this.db = db
     this.state = state
+    this.subscriptionManager = subscriptionManager
     // Runtime state setup
     this.mempool = new Map()
     this.profileQueue = new Map()
@@ -536,6 +555,18 @@ export default class Indexer extends EventEmitter {
       try {
         // Upsert profiles to database and clear profile queue
         await this.db.upsertProfiles(this.profileQueue)
+        // TODO: move this to the RANK/RNKC processing
+        // Or, add more metadata to the `Profile`/`Post` objects so
+        // that we can send informational notifications
+        //for (const [profileId, profile] of this.profileQueue) {
+        //  this.subscriptionManager.queueNotification({
+        //    topics: [],
+        //    message: {
+        //      title: 'New RANK transaction',
+        //      body: `New RANK transaction: ${tx.txid}`,
+        //    },
+        //  })
+        //}
         this.profileQueue.clear()
         const t1 = (performance.now() - t0).toFixed(3)
         log([
@@ -1250,5 +1281,49 @@ export default class Indexer extends EventEmitter {
       votesNegative: profile?.votesNegative ?? 0,
       posts: profile?.posts ?? new Map(),
     }
+  }
+  /**
+   * Convert `MempoolCacheEntry` to a `PushNotification` object
+   * @param tx `MempoolCacheEntry` object
+   * @returns `PushNotification` object
+   */
+  // TODO: need to complete this function
+  private toNotification(tx: MempoolCacheEntry): PushNotification {
+    const notification = {
+      title: 'New Activity',
+    } as PushNotification
+    let topic: Topic
+    switch (tx.type) {
+      // RANK transaction
+      case 'RANK': {
+        const rank = tx as TransactionRANK
+        switch (rank.sentiment) {
+          case 'positive':
+            notification.title = 'You received an upvote'
+            break
+          case 'negative':
+            notification.title = 'You received a downvote'
+            break
+          case 'neutral':
+            notification.title = 'Someone viewed your post'
+            break
+        }
+        notification.timestamp = Date.now()
+
+        notification.body = rank.postId
+          ? `on post ${rank.postId}`
+          : `on your profile`
+        break
+      }
+      // RNKC transaction
+      case 'RNKC': {
+        const rnkc = tx as TransactionRNKC
+        notification.title = 'New RNKC transaction'
+        notification.body = `New RNKC transaction: ${rnkc.txid}`
+        break
+      }
+    }
+
+    return notification
   }
 }
