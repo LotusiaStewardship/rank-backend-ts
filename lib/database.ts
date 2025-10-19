@@ -32,15 +32,27 @@ import type {
   TransactionRNKC,
 } from 'lotus-lib'
 
-type IndexedTransactionRANK = Transaction & PrismaRANK
-type IndexedTransactionRNKC = Transaction &
+export type IndexedTransactionRANK = Transaction & PrismaRANK
+export type IndexedTransactionRNKC = Transaction &
   PrismaRNKC & {
     post: PrismaPost & {
       profile: PrismaProfile | TargetEntityMetrics
     }
   }
+/** Indexed transaction RANK, modified for `application/json` API response */
+export type IndexedTransactionRANKAPI = IndexedTransactionRANK & {
+  sats: string
+  firstSeen: string
+  timestamp: string | null
+}
+/** Indexed transaction RNKC, modified for `application/json` API response */
+export type IndexedTransactionRNKCAPI = IndexedTransactionRNKC & {
+  sats: string
+  firstSeen: string
+  timestamp: string | null
+}
 /** */
-type Voter = {
+export type Voter = {
   /** ID of the voter is the 20-byte P2PKH */
   voterId: string
   ranking: string
@@ -50,6 +62,16 @@ type Voter = {
   votesNegative: number
   votesNeutral: number
 }
+/** Voter activity, modified for `application/json` API response */
+export type VoterActivityAPI = {
+  timestamp: string
+  sats: string
+  sentiment: ScriptChunkSentimentUTF8
+  scriptPayload: string
+  profileId: string
+  postId: string
+}
+/** Voter activity summary, used in Temporal workflow execution */
 export type VoterActivitySummary = {
   scriptPayload: string
   totalVotes: number
@@ -334,7 +356,6 @@ export class Database {
    * @param {Timespan} [params.startTime] - The start time for the activity range (optional).
    * @param {Timespan} [params.endTime] - The end time for the activity range (optional).
    * @param {'ipc' | 'api'} [requestType='ipc'] - The type of request, determines the response format.
-   * @returns {Promise<Array<object>>} Promise resolving to an array of rank transactions with timestamps.
    */
   async ipcGetScriptPayloadActivity(
     {
@@ -347,7 +368,7 @@ export class Database {
       endTime?: Timespan
     },
     requestType: 'ipc' | 'api' = 'ipc',
-  ): Promise<Array<object>> {
+  ): Promise<IndexedTransactionRANKAPI[] | IndexedTransactionRANK[]> {
     if (!startTime) {
       startTime = 'day'
     }
@@ -371,15 +392,19 @@ export class Database {
         case 'api':
           return results.map(result => ({
             ...result,
-            date: new Date(Number(result.timestamp * 1_000n)).toISOString(),
+            firstSeen: new Date(
+              Number(result.timestamp * 1_000n),
+            ).toISOString(),
             sats: result.sats.toString(),
             timestamp: result.timestamp.toString(),
-          }))
+          })) as IndexedTransactionRANKAPI[]
         case 'ipc':
           return results.map(result => ({
-            date: new Date(Number(result.timestamp * 1_000n)).toISOString(),
+            firstSeen: new Date(
+              Number(result.timestamp * 1_000n),
+            ).toISOString(),
             ...result,
-          }))
+          })) as IndexedTransactionRANK[]
       }
     })
   }
