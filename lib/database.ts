@@ -392,19 +392,20 @@ export class Database {
         case 'api':
           return results.map(result => ({
             ...result,
+            date: new Date(Number(result.timestamp * 1_000n)).toISOString(),
             firstSeen: new Date(
-              Number(result.timestamp * 1_000n),
+              Number(result.firstSeen * 1_000n),
             ).toISOString(),
             sats: result.sats.toString(),
             timestamp: result.timestamp.toString(),
           })) as IndexedTransactionRANKAPI[]
         case 'ipc':
-          return results.map(result => ({
-            firstSeen: new Date(
-              Number(result.timestamp * 1_000n),
-            ).toISOString(),
-            ...result,
-          })) as IndexedTransactionRANK[]
+          return results.map(result => {
+            return {
+              ...result,
+              date: new Date(Number(result.timestamp * 1_000n)).toISOString(),
+            } as IndexedTransactionRANK
+          })
       }
     })
   }
