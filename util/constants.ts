@@ -1,3 +1,4 @@
+import type { Block } from 'lotus-nng-client'
 import os from 'node:os'
 /**
  * Extension configuration

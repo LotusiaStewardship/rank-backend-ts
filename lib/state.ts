@@ -1,4 +1,4 @@
-import type { Block } from 'lotus-lib'
+import type { Block } from 'lotus-nng-client'
 
 export class RuntimeState {
   private _checkpoint: Block | null

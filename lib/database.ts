@@ -8,6 +8,7 @@ import {
 } from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
 import { toAsyncIterable, toCommentUTF8 } from 'lotus-lib'
+import { type Block } from 'lotus-nng-client'
 import {
   PushSubscription,
   PushSubscriptionPayload,
@@ -22,7 +23,6 @@ import {
 import type { Outpoint } from './indexer'
 import type {
   ProfileMap,
-  Block,
   Post,
   TargetEntity,
   ScriptChunkPlatformUTF8,

@@ -1,7 +1,8 @@
 {
   "exclude": [
     "submodules",
-    "node_modules"
+    "node_modules",
+    "test.ts"
   ],
   "compilerOptions": {
     "rootDirs": [
@@ -13,8 +14,11 @@
       "lotus-lib": [
         "./submodules/lotus-lib"
       ],
-      "lotus-lib/lib/nng-interface": [
-        "./submodules/lotus-lib/lib/nng-interface"
+      "lotus-nng-client": [
+        "./submodules/lotus-nng-client"
+      ],
+      "lotus-nng-client/lib/nng-interface": [
+        "./submodules/lotus-nng-client/lib/nng-interface"
       ]
     },
     "declaration": false,
