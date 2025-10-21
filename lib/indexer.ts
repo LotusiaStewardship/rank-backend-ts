@@ -21,28 +21,27 @@ import type {
   TransactionRNKC,
   TransactionRANK,
   Transaction as IndexedTransaction,
-  Block,
   ProfileMap,
   Profile,
   Post,
   ScriptChunkLokadUTF8,
 } from 'lotus-lib'
 import {
-  NNG,
-  NNG_RPC_BLOCKRANGE_SIZE,
-  type NNGMessageType,
-  type NNGMessageProcessor,
-} from 'lotus-lib'
-import * as NNGInterface from 'lotus-lib/lib/nng-interface'
-import {
   ScriptProcessor,
-  RANK_BLOCK_GENESIS_V1,
   RANK_OUTPUT_MIN_VALID_SATS,
   MAX_OP_RETURN_OUTPUTS,
   toAsyncIterable,
   isOpReturn,
 } from 'lotus-lib'
-import { ERR } from '../util/constants'
+import {
+  NNG,
+  NNG_RPC_BLOCKRANGE_SIZE,
+  type Block,
+  type NNGMessageType,
+  type NNGMessageProcessor,
+} from 'lotus-nng-client'
+import * as NNGInterface from 'lotus-nng-client/lib/nng-interface'
+import { ERR, RANK_BLOCK_GENESIS_V1 } from '../util/constants'
 import { log, type LogEntry } from '../util/functions'
 /**
  * Runtime cache for quickly reconciling missing LOKAD txs with blocks

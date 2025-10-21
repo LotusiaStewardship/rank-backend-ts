@@ -1,5 +1,6 @@
 import { EXT_INSTANCE_ID_DIFFICULTY, HTTP } from './constants'
-import { Block, ScriptChunkPlatformUTF8, Util } from 'lotus-lib'
+import { ScriptChunkPlatformUTF8, Util } from 'lotus-lib'
+import { Block } from 'lotus-nng-client'
 import { Address, Message, Networks } from 'bitcore-lib-xpi'
 import type { Request, Response } from 'express'
 import type { TopicCategory, Topic } from '../lib/push'

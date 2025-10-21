@@ -8,6 +8,7 @@ import {
 } from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
 import { toAsyncIterable, toCommentUTF8 } from 'lotus-lib'
+import { type Block } from 'lotus-nng-client'
 import {
   PushSubscription,
   PushSubscriptionPayload,
@@ -22,7 +23,6 @@ import {
 import type { Outpoint } from './indexer'
 import type {
   ProfileMap,
-  Block,
   Post,
   TargetEntity,
   ScriptChunkPlatformUTF8,
@@ -44,12 +44,14 @@ export type IndexedTransactionRANKAPI = IndexedTransactionRANK & {
   sats: string
   firstSeen: string
   timestamp: string | null
+  date: string // ISO-formatted timestampe
 }
 /** Indexed transaction RNKC, modified for `application/json` API response */
 export type IndexedTransactionRNKCAPI = IndexedTransactionRNKC & {
   sats: string
   firstSeen: string
   timestamp: string | null
+  date: string // ISO-formatted timestampe
 }
 /** */
 export type Voter = {
