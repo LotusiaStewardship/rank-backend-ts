@@ -484,8 +484,13 @@ export class API extends EventEmitter {
     this.router.param('searchType', Parameters.searchType)
     this.router.param('txid', Parameters.txid)
     // Router GET endpoint configuration (DEEPEST ROUTES FIRST!)
-    this.router.get(
+    // TODO: implement the instanceId in the rank-extension-ts API calls
+    /* this.router.get(
       '/wallet/summary/:instanceId/:scriptPayload/:startTime?/:endTime?',
+      this.GET.wallet,
+    ) */
+    this.router.get(
+      '/wallet/summary/:scriptPayload/:startTime?/:endTime?',
       this.GET.wallet,
     )
     this.router.get(
