@@ -27,6 +27,10 @@ export const NNG_MESSAGE_BATCH_SIZE = 10 // number of messages to process in eac
  * RANK configuration
  */
 /** First block with a RANK transaction */
+// 12/4/25: This is no longer used; height/hash are pulled from .env
+// e.g.
+// RANK_GENESIS_HEIGHT=952169
+// RANK_GENESIS_HASH=0000000000c974cb635064bec0db8cc64a75526871f581ea5dbeca7a98551546
 export const RANK_BLOCK_GENESIS_V1: Partial<Block> = {
   hash: '0000000000c974cb635064bec0db8cc64a75526871f581ea5dbeca7a98551546',
   height: 952169,

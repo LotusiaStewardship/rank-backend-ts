@@ -5,6 +5,10 @@ type TemporalWorkflowQuery = {
 }
 type ParsedConfig = {
   datasourceUrl: string
+  genesis: {
+    height: number
+    hash: string
+  }
   push: {
     vapid: {
       subject: string
@@ -43,6 +47,10 @@ class Config {
   private parseConfig(): ParsedConfig {
     return {
       datasourceUrl: this.env.parsed?.DATABASE_URL,
+      genesis: {
+        height: parseInt(this.env.parsed?.RANK_GENESIS_HEIGHT),
+        hash: this.env.parsed?.RANK_GENESIS_HASH,
+      },
       push: {
         vapid: {
           subject: this.env.parsed?.VAPID_SUBJECT,

@@ -41,8 +41,9 @@ import {
   type NNGMessageProcessor,
 } from 'lotus-nng-client'
 import * as NNGInterface from 'lotus-nng-client/lib/nng-interface'
-import { ERR, RANK_BLOCK_GENESIS_V1 } from '../util/constants'
+import { ERR } from '../util/constants'
 import { log, type LogEntry } from '../util/functions'
+import config from '../config'
 /**
  * Runtime cache for quickly reconciling missing LOKAD txs with blocks
  *
@@ -212,9 +213,9 @@ export class Indexer extends EventEmitter {
       // Get current checkpoint from DB
       const dbCheckpoint = await this.db.getCheckpoint()
       // reconcile our checkpoint with the blockchain state
-      // if we don't have a checkpoint, use the RANK genesis block
+      // if we don't have a checkpoint, use the configured RANK genesis block
       checkpoint = await this.initReconcileBlockState(
-        dbCheckpoint ?? (RANK_BLOCK_GENESIS_V1 as Block),
+        dbCheckpoint ?? (config.genesis as Block),
       )
     } catch (e) {
       throw [ERR.IDX_BLOCKS_REWIND, e.message]
