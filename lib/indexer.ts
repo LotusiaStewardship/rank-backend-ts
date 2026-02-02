@@ -994,7 +994,7 @@ export class Indexer extends EventEmitter {
   }
   /**
    * Parse raw `NNGInterface.BlockHeader` flatbuffer for the nHeight
-   * (https://docs.givelotus.org/specs/blockheader)
+   * (https://lotusia.org/docs/specs/blockheader)
    * @param header Raw `NNGInterface.BlockHeader`
    * @returns {number} Block height as a number
    */
