@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-duplicate-enum-values */
 import { Server } from 'node:http'
 import { EventEmitter } from 'node:events'
 import express, {
@@ -76,6 +75,7 @@ export type RankTopProfile = {
 export type RankTopPost = RankTopProfile & {
   postId?: string
 }
+/** Available API endpoint names for routing */
 export type Endpoint =
   | 'profiles'
   | 'profile'
@@ -90,7 +90,9 @@ export type Endpoint =
   | 'tx'
   | 'txs'
   | 'voteActivity'
+/** Handler function type for processing API endpoint requests */
 export type EndpointHandler = (req: Request, res: Response) => void
+/** Available parameter names that can be validated in API endpoints */
 export type EndpointParameter =
   | 'platform'
   | 'profileId'
@@ -104,6 +106,7 @@ export type EndpointParameter =
   | 'dataType'
   | 'searchType'
   | 'txid'
+/** Handler function type for validating and processing endpoint parameters */
 export type EndpointParameterHandler = (
   req: Request,
   res: Response,
@@ -133,15 +136,19 @@ export type WalletRankActivityWorkflowResult = {
   /** Total amount of sats sent */
   totalPayoutAmount: number
 }
+/** Available chart types for data visualization endpoints */
 export type ChartType = 'wallet'
+/** Types of chart data that can be requested */
 export type ChartDataType = 'summary' | 'activity'
 
+/** Mapping of stats route paths to their corresponding database method names */
 export enum StatsRoutes {
   'profiles/top-ranked' = 'getStatsPlatformRanked',
   'profiles/lowest-ranked' = 'getStatsPlatformRanked',
   'posts/top-ranked' = 'getStatsPlatformRanked',
   'posts/lowest-ranked' = 'getStatsPlatformRanked',
 }
+/** Valid stats route path strings */
 export type StatsRoute = keyof typeof StatsRoutes
 
 /** Authentication header parameters provided to client for authorization to API */
@@ -182,6 +189,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.platform = platform
     next()
   },
+
   /**
    * Validates that the provided `profileId` is a valid profile ID for the specified platform.
    * If invalid, responds with HTTP 400 and an error message.
@@ -205,6 +213,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.profileId = profileId
     next()
   },
+
   /**
    * Validates that the provided `postId` is a valid post ID for the specified platform.
    * If invalid, responds with HTTP 400 and an error message.
@@ -244,6 +253,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.postId = postId
     next()
   },
+
   /**
    * Validates that the provided `chartType` is a valid chart type.
    * If invalid, responds with HTTP 400 and an error message.
@@ -267,6 +277,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.chartType = chartType
     next()
   },
+
   /**
    * Validates that the provided `dataType` is a valid chart data type.
    * If invalid, responds with HTTP 400 and an error message.
@@ -292,6 +303,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.dataType = dataType
     next()
   },
+
   /**
    * Validates that the provided `searchType` is a valid search type.
    * If invalid, responds with HTTP 400 and an error message.
@@ -309,6 +321,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.searchType = validated.searchType
     next()
   },
+
   /**
    * Validates that the provided `scriptPayload` is a valid script payload.
    * If invalid, responds with HTTP 400 and an error message.
@@ -324,6 +337,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.scriptPayload = result?.scriptPayload
     next()
   },
+
   /**
    * Validates that the provided `statsRoute` is a valid stats route.
    * If invalid, responds with HTTP 400 and an error message.
@@ -346,6 +360,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.statsRoute = statsRoute
     next()
   },
+
   /**
    * Validates that the provided `pageNum` is a positive integer.
    * If invalid, responds with HTTP 400 and an error message.
@@ -366,6 +381,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.pageNum = pageNum
     next()
   },
+
   /**
    * Validates that the provided `pageSize` is a positive integer.
    * If invalid, responds with HTTP 400 and an error message.
@@ -391,6 +407,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.pageSize = pageSize
     next()
   },
+
   /**
    * Validates that the provided `instanceId` is a 64-character hexadecimal string.
    * If invalid, responds with HTTP 400 and an error message.
@@ -408,6 +425,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req.params.instanceId = instanceId
     next()
   },
+
   /**
    * Validates that the provided `txid` is a 64-character hexadecimal string.
    * If invalid, responds with HTTP 400 and an error message.
@@ -435,20 +453,26 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
  * @extends {EventEmitter}
  */
 export class API extends EventEmitter {
+  /** Database instance for data persistence */
   private db: Database
+  /** Express application instance */
   private app: Express
+  /** Cache for storing authorization tokens and session data */
   private authCache: AuthorizationCache
+  /** Express router for handling API routes */
   private router: Router
+  /** HTTP server instance */
   private server: Server
+  /** Runtime state containing application configuration */
   private state: RuntimeState
+  /** Temporal client for workflow orchestration */
   private temporalClient!: TemporalClient
+  /** Temporal worker for executing workflow activities */
   private temporalWorker!: TemporalWorker
+
   /**
-   * Initializes Express router with endpoints for profiles, posts, stats, and wallet operations
-   * Sets up parameter handlers and configures routes for both GET and POST requests
-   * @param state Runtime state for managing indexer state
-   * @param db Database instance for handling data operations
-   * @extends {EventEmitter} Inherits event handling capabilities
+   * Initializes Express router with endpoints for profiles, posts, stats, and wallet operations.
+   * Sets up parameter handlers and configures routes for both GET and POST requests.
    */
   constructor({
     authCache,
@@ -471,6 +495,7 @@ export class API extends EventEmitter {
       mergeParams: true,
       strict: true,
     })
+
     // Router parameter configuration
     this.router.param('platform', Parameters.platform)
     this.router.param('profileId', Parameters.profileId)
@@ -483,6 +508,7 @@ export class API extends EventEmitter {
     this.router.param('dataType', Parameters.dataType)
     this.router.param('searchType', Parameters.searchType)
     this.router.param('txid', Parameters.txid)
+
     // Router GET endpoint configuration (DEEPEST ROUTES FIRST!)
     this.router.get(
       '/wallet/summary/:instanceId/:scriptPayload/:startTime?/:endTime?',
@@ -511,11 +537,13 @@ export class API extends EventEmitter {
     )
     this.router.get('/:platform/:profileId/:postId', this.GET.post)
     this.router.get('/:platform/:profileId', this.GET.profile)
+
     // Router POST endpoint configuration (DEEPEST ROUTES FIRST!)
     // TODO: implement referral codes rather than mining instanceId
     //this.router.post('/instance/register', this.POST.instance)
     // Get posts for a platform, up to 50 maximum per request
     this.router.post('/posts/:platform/:scriptPayload', this.POST.posts)
+
     // Router PATCH endpoint configuration (DEEPEST ROUTES FIRST!)
     //this.router.patch('/:platform/:profileId/:postId', this.PATCH.post)
 
@@ -524,6 +552,7 @@ export class API extends EventEmitter {
     this.app.use(json())
     this.app.use('/api/v1', this.router)
   }
+
   /**
    * Initialze database HTTP server and Temporal client/worker
    */
@@ -573,6 +602,7 @@ export class API extends EventEmitter {
       }
     }
   }
+
   /**
    * Shutdown the API server and Temporal interfaces
    */
@@ -582,15 +612,16 @@ export class API extends EventEmitter {
     await this.temporalClient?.connection?.close()
     this.temporalWorker?.shutdown()
   }
+
   /**
    * GET Method Handlers
    */
   private GET: Partial<Record<Endpoint, EndpointHandler>> = {
     /**
-     *
-     * @param req
-     * @param res
-     * @returns
+     * Retrieves a paginated list of ranked profiles
+     * @param req Express Request object containing `page` and `pageSize` parameters
+     * @param res Express Response object to send back profiles data
+     * @returns JSON response with profiles data or error message
      */
     profiles: async (req: Request, res: Response) => {
       const t0 = performance.now()
@@ -621,11 +652,12 @@ export class API extends EventEmitter {
         )
       }
     },
+
     /**
-     *
-     * @param req
-     * @param res
-     * @returns
+     * Retrieves profile information for a specific platform and profile ID
+     * @param req Express Request object containing `platform` and `profileId` parameters
+     * @param res Express Response object to send back profile data
+     * @returns JSON response with profile data or error message
      */
     profile: async (req: Request, res: Response) => {
       const t0 = performance.now()
@@ -661,6 +693,7 @@ export class API extends EventEmitter {
         )
       }
     },
+
     /**
      * Retrieves posts for a platform profile
      * @param req Express Request object containing `platform` and `profileId` parameters
@@ -702,11 +735,12 @@ export class API extends EventEmitter {
         )
       }
     },
+
     /**
-     *
-     * @param req
-     * @param res
-     * @returns
+     * Retrieves a single post for a platform profile
+     * @param req Express Request object containing `platform`, `profileId`, `postId`, and `scriptPayload` parameters
+     * @param res Express Response object to send back post data
+     * @returns JSON response with post data or error message
      */
     post: async (req: Request, res: Response) => {
       const t0 = performance.now()
@@ -741,6 +775,7 @@ export class API extends EventEmitter {
         )
       }
     },
+
     /**
      * Charts API endpoint that provides different chart data based on chart type and timespan
      * @remarks
@@ -793,11 +828,12 @@ export class API extends EventEmitter {
           )
       }
     },
+
     /**
-     *
-     * @param req
-     * @param res
-     * @returns
+     * Searches for profiles based on a query string
+     * @param req Express Request object containing `query` parameter
+     * @param res Express Response object to send back search results
+     * @returns JSON response with matching profiles or empty array
      */
     search: async (req: Request, res: Response) => {
       const t0 = performance.now()
@@ -837,10 +873,12 @@ export class API extends EventEmitter {
         )
       }
     },
+
     /**
-     *
-     * @param req
-     * @param res
+     * Retrieves statistics for profiles or posts based on ranking type and timespan
+     * @param req Express Request object containing `platform`, `statsRoute`, `timespan`, `votes`, and `pageNum` parameters
+     * @param res Express Response object to send back statistics data
+     * @returns JSON response with statistics data or error message
      */
     stats: async (req: Request, res: Response) => {
       const t0 = performance.now()
@@ -885,11 +923,12 @@ export class API extends EventEmitter {
         )
       }
     },
+
     /**
-     *
-     * @param req
-     * @param res
-     * @returns
+     * Retrieves transaction data for a platform profile with pagination
+     * @param req Express Request object containing `platform`, `profileId`, `page`, and `pageSize` parameters
+     * @param res Express Response object to send back transaction data
+     * @returns JSON response with transaction data or error message
      */
     txs: async (req: Request, res: Response) => {
       const t0 = performance.now()
@@ -926,10 +965,12 @@ export class API extends EventEmitter {
         )
       }
     },
+
     /**
      * Handles wallet activity requests by retrieving `scriptPayload` activity data
      * @param req Express Request object containing `scriptPayload` and optional `timespan` parameters
      * @param res Express Response object to send back wallet activity data
+     * @returns JSON response with wallet activity data or authentication challenge
      */
     wallet: async (req: Request, res: Response) => {
       const t0 = performance.now()
@@ -1002,10 +1043,12 @@ export class API extends EventEmitter {
         return sendJSON(res, { error: e.message }, HTTP.BAD_REQUEST)
       }
     },
+
     /**
-     * Handles vote activity requests by retrieving vote activity data
+     * Retrieves paginated vote activity data
      * @param req Express Request object containing `page` and `pageSize` parameters
      * @param res Express Response object to send back vote activity data
+     * @returns JSON response with vote activity data or error message
      */
     voteActivity: async (req: Request, res: Response) => {
       const t0 = performance.now()
@@ -1041,6 +1084,12 @@ export class API extends EventEmitter {
    * PATCH Method Handlers
    */
   private PATCH: { [name in Endpoint]?: EndpointHandler } = {
+    /**
+     * Updates or creates a post for a platform profile
+     * @param req Express Request object containing `platform`, `profileId`, `postId` parameters and `content` in body
+     * @param res Express Response object to send back post data
+     * @returns JSON response with post data or error message
+     */
     post: async (req: Request, res: Response) => {
       const t0 = performance.now()
       const { platform, profileId, postId } = req.params
@@ -1084,6 +1133,7 @@ export class API extends EventEmitter {
      * Retrieves posts for a platform
      * @param req Express Request object containing `platform` and `scriptPayload` parameters
      * @param res Express Response object to send back posts data
+     * @returns JSON response with posts data or error message
      */
     posts: async (req: Request, res: Response) => {
       const t0 = performance.now()
@@ -1132,10 +1182,12 @@ export class API extends EventEmitter {
         return sendJSON(res, { error: e.message }, HTTP.BAD_REQUEST)
       }
     },
+
     /**
-     *
-     * @param req
-     * @param res
+     * Retrieves an instance ID for client authentication
+     * @param req Express Request object containing instance registration data
+     * @param res Express Response object to send back instance data
+     * @returns JSON response with instance data or error message
      */
     instance: async (req: Request, res: Response) => {
       const t0 = performance.now()
@@ -1245,6 +1297,7 @@ export class API extends EventEmitter {
       }
       return workflowList
     },
+
     /**
      * Get the result of a workflow execution
      * @param workflowId - The ID of the workflow for which to get the result
@@ -1261,6 +1314,7 @@ export class API extends EventEmitter {
         followRuns: true,
       })
     },
+
     /**
      * Query a Temporal workflow, returning the query result
      * @param workflowId - The ID of the workflow for which to query
@@ -1277,6 +1331,7 @@ export class API extends EventEmitter {
       const handle = this.temporalClient.workflow.getHandle(workflowId)
       return await handle.query(queryType)
     },
+
     /**
      * Start a Temporal workflow, returning a handle to the workflow
      * @param param0 - Workflow type, taskQueue, workflowId, searchAttributes, and args
@@ -1302,6 +1357,7 @@ export class API extends EventEmitter {
         args,
       })
     },
+
     /**
      * Signal a Temporal workflow, returning a handle to the workflow
      * @param param0 - Workflow type, taskQueue, workflowId, args, signal, and signalArgs
@@ -1330,6 +1386,7 @@ export class API extends EventEmitter {
         signalArgs,
       })
     },
+
     /**
      * Retrieves the activity for a wallet rank based on the provided script payload and optional time range.
      * @param scriptPayload - The script payload to get activity for
@@ -1365,6 +1422,7 @@ export class API extends EventEmitter {
         activity,
       }
     },
+
     /**
      * Retrieves the activity summary for a wallet rank based on the provided script payload and optional time range.
      * @param startTime - The start time to get activity for
@@ -1380,6 +1438,7 @@ export class API extends EventEmitter {
         endTime,
       })
     },
+
     /**
      * Retrieves the top ranked profiles of all time.
      * @returns Top ranked profiles
@@ -1391,6 +1450,7 @@ export class API extends EventEmitter {
         startTime: 'all',
       })
     },
+
     /**
      * Retrieves the top ranked profiles for a platform based on the provided time range.
      * @param startTime - The start time to get profiles for
@@ -1405,6 +1465,7 @@ export class API extends EventEmitter {
         startTime,
       })
     },
+
     /**
      * Retrieves the top ranked posts for a platform based on the provided time range.
      * @param startTime - The start time to get posts for
