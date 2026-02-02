@@ -46,14 +46,13 @@
     "@temporalio/client": "1.11.7",
     "@temporalio/worker": "1.11.7",
     "@temporalio/workflow": "1.11.7",
-    "bitcore-lib-xpi": "file:submodules/bitcore-lib-xpi",
     "dotenv": "16.5.0",
     "dotenv-cli": "8.0.0",
     "express": "4.21.2",
     "flatbuffers": "25.2.10",
-    "lotus-lib": "file:submodules/lotus-lib",
     "lotus-nng-client": "file:submodules/lotus-nng-client",
     "nanomsg": "file:submodules/lotus-nng-client/submodules/nanomsg",
-    "web-push": "3.6.7"
+    "web-push": "3.6.7",
+    "xpi-ts": "0.2.13"
   }
 }
