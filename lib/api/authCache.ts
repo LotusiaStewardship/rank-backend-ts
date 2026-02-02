@@ -1,5 +1,5 @@
 import { Util } from 'lotus-lib'
-import { processAuthorizationHeader, Validate } from '../../util/functions'
+import { log, processAuthorizationHeader, Validate } from '../../util/functions'
 import { API_AUTH_CACHE_ENTRY_TTL } from '../../util/constants'
 import type { RuntimeState } from '../state'
 
@@ -123,6 +123,11 @@ export class AuthorizationCache {
       // return authorized
       return true
     } catch (e) {
+      // log the error
+      log([
+        ['error', 'AuthorizationCache.isRequestAuthorized'],
+        ['message', e.message],
+      ])
       return false
     }
   }
