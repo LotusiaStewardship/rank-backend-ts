@@ -169,6 +169,9 @@ export function processAuthorizationHeader(
   if (header === undefined) {
     return [null, null, null]
   }
+  if (!isBase64(header)) {
+    return [null, null, null]
+  }
   const [authPayloadStr, signature] = Util.base64.decode(header).split(':::')
   if (!authPayloadStr || !signature) {
     return [null, null, null]

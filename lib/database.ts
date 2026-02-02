@@ -104,7 +104,7 @@ type ProfileAPI = TargetEntityMetricsAPI & {
   ranks?: IndexedTransactionRANK[]
   /** Comments associated with the profile */
   comments?: PostAPI[]
-  voters?: [string, Voter][]
+  voters?: Voter[]
   profileMeta?: VoterProfileMetadata
 }
 /** Indexed post data, modified for `application/json` API response */
@@ -644,7 +644,7 @@ export class Database {
   async apiGetPlatformProfile(
     platform: ScriptChunkPlatformUTF8,
     profileId: string,
-    includeVoters: boolean = true,
+    includeVoters: boolean = false,
   ) {
     const data: ProfileAPI = {
       platform,
@@ -655,7 +655,6 @@ export class Database {
       votesPositive: 0,
       votesNegative: 0,
       comments: null,
-      voters: null,
     }
     return await this.db.$transaction(async tx => {
       try {
@@ -2099,7 +2098,7 @@ export class Database {
       voterDetails[details.scriptPayload] = voter
     })
 
-    return Object.entries(voterDetails)
+    return Object.values(voterDetails)
   }
   /**
    * Converts a TransactionRNKC to a PostAPI
