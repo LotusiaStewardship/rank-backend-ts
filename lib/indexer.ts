@@ -49,6 +49,8 @@ import config from '../config'
  * Key is `txid_outIdx`
  */
 type MempoolCache = Map<string, MempoolCacheEntry>
+/** Runtime index of mempool txids with their associated outpoints */
+type MempoolTxidIndex = Map<string, string[]>
 /**
  * Mempool cache entry
  *
@@ -58,9 +60,7 @@ type MempoolCache = Map<string, MempoolCacheEntry>
 type MempoolCacheEntry = (TransactionRANK | TransactionRNKC) & {
   type: ScriptChunkLokadUTF8
 }
-/**
- * Result of processing a transaction
- * */
+/** Result of processing a single transaction */
 type ProcessedTransaction = {
   ranks?: TransactionRANK[]
   rnkc?: TransactionRNKC
@@ -95,6 +95,8 @@ export class Indexer extends EventEmitter {
   private subscriptionManager: SubscriptionManager
   /** Cache of unconfirmed RANK transactions */
   private mempool: MempoolCache
+  /** Runtime index of mempool txids with their associated outpoints */
+  private mempoolTxidIndex: MempoolTxidIndex
   /** Queue for upserting/rewinding profiles */
   private profileQueue: ProfileMap
   /** Runtime state used across modules */
@@ -128,6 +130,7 @@ export class Indexer extends EventEmitter {
     this.subscriptionManager = subscriptionManager
     // Runtime state setup
     this.mempool = new Map()
+    this.mempoolTxidIndex = new Map()
     this.profileQueue = new Map()
   }
   /**
@@ -227,22 +230,38 @@ export class Indexer extends EventEmitter {
     } catch (e) {
       throw [ERR.IDX_BLOCKS_SYNC, e.message]
     }
+
     // Sync mempool
     try {
       const results = await this.initSyncMempool()
-      // Initialize the mempool cache with these RANK txs
-      results.ranks.forEach(rank =>
-        this.mempool.set(`${rank.txid}_${rank.outIdx}`, {
+      // Initialize the mempool cache and index with these RANK txs
+      results.ranks.forEach(rank => {
+        const key = `${rank.txid}_${rank.outIdx}`
+        const outpoints = this.mempoolTxidIndex.get(rank.txid)
+        if (outpoints) {
+          outpoints.push(key)
+        } else {
+          this.mempoolTxidIndex.set(rank.txid, [key])
+        }
+        this.mempool.set(key, {
           ...rank,
           type: 'RANK',
-        }),
-      )
-      results.rnkcs.forEach(rnkc =>
-        this.mempool.set(`${rnkc.txid}_${rnkc.outIdx}`, {
+        })
+      })
+      // Initialize the mempool cache and index with these RNKC txs
+      results.rnkcs.forEach(rnkc => {
+        const key = `${rnkc.txid}_${rnkc.outIdx}`
+        const outpoints = this.mempoolTxidIndex.get(rnkc.txid)
+        if (outpoints) {
+          outpoints.push(key)
+        } else {
+          this.mempoolTxidIndex.set(rnkc.txid, [key])
+        }
+        this.mempool.set(key, {
           ...rnkc,
           type: 'RNKC',
-        }),
-      )
+        })
+      })
     } catch (e) {
       throw [ERR.IDX_MEMPOOL_SYNC, e.message]
     }
@@ -533,6 +552,12 @@ export class Indexer extends EventEmitter {
     // Also add profiles to queue for upserting
     if (processed.ranks) {
       processed.ranks.forEach(rank => {
+        const outpoints = this.mempoolTxidIndex.get(rank.txid)
+        if (outpoints) {
+          outpoints.push(`${rank.txid}_${rank.outIdx}`)
+        } else {
+          this.mempoolTxidIndex.set(rank.txid, [`${rank.txid}_${rank.outIdx}`])
+        }
         this.mempool.set(`${rank.txid}_${rank.outIdx}`, {
           ...rank,
           type: 'RANK',
@@ -543,6 +568,14 @@ export class Indexer extends EventEmitter {
     // Add RNKC tx to mempool cache for reconciliation
     // Also add profiles to queue for upserting
     if (processed.rnkc) {
+      const outpoints = this.mempoolTxidIndex.get(processed.rnkc.txid)
+      if (outpoints) {
+        outpoints.push(`${processed.rnkc.txid}_${processed.rnkc.outIdx}`)
+      } else {
+        this.mempoolTxidIndex.set(processed.rnkc.txid, [
+          `${processed.rnkc.txid}_${processed.rnkc.outIdx}`,
+        ])
+      }
       this.mempool.set(`${processed.rnkc.txid}_${processed.rnkc.outIdx}`, {
         ...processed.rnkc,
         type: 'RNKC',
@@ -598,16 +631,21 @@ export class Indexer extends EventEmitter {
       )
     const txid = this.toBlockhashOrTxid(tx.txid().hash())
 
-    // Find all LOKAD txs from in-memory mempool cache for this transaction
+    // O(1) lookup using mempoolTxidIndex instead of O(n) scan
+    const keysToDelete = this.mempoolTxidIndex.get(txid) ?? []
     const txs: MempoolCacheEntry[] = []
-    const keysToDelete: string[] = []
-    for (const [key, tx] of this.mempool.entries()) {
-      if (key.startsWith(`${txid}_`)) {
-        // Add the key to the list of keys to delete from mempool cache
-        keysToDelete.push(key)
-        txs.push(tx)
+
+    // Fetch entries and delete from main cache
+    for (const key of keysToDelete) {
+      const entry = this.mempool.get(key)
+      if (entry) {
+        txs.push(entry)
+        this.mempool.delete(key)
       }
     }
+
+    // Clean up the index entry
+    this.mempoolTxidIndex.delete(txid)
 
     // Convert RANK txs to profiles and add to queue for rewind
     txs.forEach(tx => {
@@ -757,7 +795,9 @@ export class Indexer extends EventEmitter {
           results.rnkcs.push(processed.rnkc)
         }
       } catch (e) {
-        throw new Error(`processBlockOrMempool(${typeof data}): ${e.message}`)
+        throw new Error(
+          `processBlockOrMempool(${block?.height ?? 'mempool'}): ${e.message}`,
+        )
       }
     }
     return results
