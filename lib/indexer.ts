@@ -1,4 +1,4 @@
-import { Transaction } from 'bitcore-lib-xpi'
+import { Output, Transaction } from 'xpi-ts/lib/bitcore'
 import { Builder, ByteBuffer } from 'flatbuffers'
 //import { isIP } from 'validator'
 //import { resolve } from 'node:path/posix'
@@ -25,14 +25,13 @@ import type {
   Profile,
   Post,
   ScriptChunkLokadUTF8,
-} from 'lotus-lib'
+} from 'xpi-ts/lib/rank'
+import { ScriptProcessor } from 'xpi-ts/lib/rank'
+import { isOpReturn } from 'xpi-ts/lib/rank/script'
 import {
-  ScriptProcessor,
   RANK_OUTPUT_MIN_VALID_SATS,
   MAX_OP_RETURN_OUTPUTS,
-  toAsyncIterable,
-  isOpReturn,
-} from 'lotus-lib'
+} from 'xpi-ts/utils/constants'
 import {
   NNG,
   NNG_RPC_BLOCKRANGE_SIZE,
@@ -602,10 +601,7 @@ export class Indexer extends EventEmitter {
     // Find all LOKAD txs from in-memory mempool cache for this transaction
     const txs: MempoolCacheEntry[] = []
     const keysToDelete: string[] = []
-
-    // Iterate through mempool cache to find all entries for this txid
-    const mempoolEntries = toAsyncIterable(this.mempool.entries())
-    for await (const [key, tx] of mempoolEntries) {
+    for (const [key, tx] of this.mempool.entries()) {
       if (key.startsWith(`${txid}_`)) {
         // Add the key to the list of keys to delete from mempool cache
         keysToDelete.push(key)
@@ -925,9 +921,7 @@ export class Indexer extends EventEmitter {
    * @param output `Transaction.Output` object
    * @returns `TransactionOutputRANK` object or `null` if invalid
    */
-  private processNeutralRANK(
-    output: Transaction.Output,
-  ): TransactionOutputRANK | null {
+  private processNeutralRANK(output: Output): TransactionOutputRANK | null {
     // Create a ScriptProcessor to validate the output script
     const processor = new ScriptProcessor(output.script.toBuffer())
     const rank = processor.processScriptRANK()
@@ -951,7 +945,7 @@ export class Indexer extends EventEmitter {
   ): Promise<{ outpoints: Outpoint[]; missing: IndexedTransaction[] }> {
     const outpoints: Outpoint[] = []
     const missing: IndexedTransaction[] = []
-    for await (const tx of toAsyncIterable(blockTxs)) {
+    for (const tx of blockTxs) {
       if (this.mempool.has(`${tx.txid}_${tx.outIdx}`)) {
         // Mempool contains this block tx, so delete it from cache
         this.mempool.delete(`${tx.txid}_${tx.outIdx}`)
@@ -966,10 +960,22 @@ export class Indexer extends EventEmitter {
   /**
    * Process `Transaction.Input` objects to get the `scriptPayload`
    * Only return the `scriptPayload` if all inputs are from the same address
+   *
+   * NOTE: P2TR inputs do not contain the requisite data for constructing the
+   * hashBuffer of the address, so this method returns `null` for P2TR inputs.
    * @param tx `Transaction` object
    * @returns `scriptPayload` as a hex string or `null` if inputs are invalid
    */
   private getScriptPayload(tx: Transaction): string | null {
+    // TODO: Add proper P2TR input support. This will require fetching the
+    // previous transaction(s) and extracting the scriptPubKey. For now, just
+    // return null, as this will require changes to lotus-nng-client to support
+    // transaction fetching, then a significant refactor of the scriptPayload
+    // fetching logic here
+    if (tx.inputs[0].script.isTaprootIn()) {
+      return null
+    }
+
     const scriptPayloadBuffer = tx.inputs[0].script.toAddress().hashBuffer
     if (
       tx.inputs.every(

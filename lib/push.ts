@@ -10,10 +10,14 @@ import {
   SendResult,
 } from 'web-push'
 import { URL } from 'url'
-import { ScriptChunkPlatformUTF8, toAsyncIterable } from 'lotus-lib'
 import config from '../config'
 import { Database } from './database'
-import { isBase64, log, type LogEntry } from '../util/functions'
+import {
+  isBase64,
+  log,
+  type LogEntry,
+  toAsyncIterable,
+} from '../util/functions'
 
 /**
  * The endpoint URL and keys of the subscribed client (e.g. Chrome extension instance)
