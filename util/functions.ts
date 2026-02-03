@@ -1,7 +1,7 @@
 import { EXT_INSTANCE_ID_DIFFICULTY, HTTP } from './constants'
-import { ScriptChunkPlatformUTF8, Util } from 'lotus-lib'
+import { ScriptChunkPlatformUTF8 } from 'xpi-ts/lib/rank'
 import { Block } from 'lotus-nng-client'
-import { Address, Message, Networks } from 'bitcore-lib-xpi'
+import { Address, Message, Networks } from 'xpi-ts/lib/bitcore'
 import type { Request, Response } from 'express'
 import type { TopicCategory, Topic } from '../lib/push'
 import { AuthorizationPayload } from '../lib/api/authCache'
@@ -14,6 +14,18 @@ export const log = function (entries: LogEntry[]) {
       .join(' ')}`,
   )
 }
+
+/**
+ * Converts a synchronous iterable to a generator that can be used with `for await...of`
+ * @param iterable The synchronous iterable to convert
+ * @yields Each item from the iterable
+ */
+export function* toAsyncIterable<T>(iterable: Iterable<T>) {
+  for (const item of iterable) {
+    yield item
+  }
+}
+
 /**
  * Validates that the provided `instanceId` is a valid instance ID.
  * If invalid, returns false.
@@ -189,6 +201,55 @@ export function isBase64(base64: string): boolean {
   if (typeof base64 !== 'string' || base64.length === 0) return false
   // Check for valid base64 characters, must be length divisible by 4
   return /^[A-Za-z0-9=+/_-]+$/.test(base64) && base64.length % 4 === 0
+}
+
+/**
+ * Utility functions
+ */
+export const Util = {
+  /** Sha256 operations */
+  sha256: {
+    /**
+     * Validate a sha256 hash
+     * @param str - The sha256 hash to validate
+     * @returns Whether the sha256 hash is valid
+     */
+    validate(str: string) {
+      return str.match(/^[a-f0-9]{64}$/)
+    },
+  },
+  /** Base64 operations */
+  base64: {
+    /**
+     * Encodes a string to a base64 encoded string
+     * @param str The string to encode
+     * @returns The base64 encoded string
+     */
+    encode(str: string) {
+      return Buffer.from(str).toString('base64')
+    },
+    /**
+     * Decodes a base64 encoded string
+     * @param str The base64 encoded string to decode
+     * @returns The decoded string
+     */
+    decode(str: string) {
+      if (!isBase64(str)) {
+        throw new Error('Invalid base64 string')
+      }
+      return Buffer.from(str, 'base64').toString('utf8')
+    },
+  },
+  /** Crypto operations */
+  crypto: {
+    /**
+     * Generates a random UUID
+     * @returns The random UUID
+     */
+    randomUUID(): string {
+      return crypto.randomUUID()
+    },
+  },
 }
 
 /**

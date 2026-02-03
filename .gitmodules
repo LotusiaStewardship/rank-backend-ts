@@ -1,9 +1,3 @@
-[submodule "submodules/bitcore-lib-xpi"]
-	path = submodules/bitcore-lib-xpi
-	url = https://github.com/LotusiaStewardship/bitcore-lib-xpi.git
-[submodule "submodules/lotus-lib"]
-	path = submodules/lotus-lib
-	url = git@github.com:LotusiaStewardship/lotus-lib.git
 [submodule "submodules/lotus-nng-client"]
 	path = submodules/lotus-nng-client
 	url = git@github.com:LotusiaStewardship/lotus-nng-client.git

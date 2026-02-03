@@ -7,7 +7,7 @@ import {
   type RankTransaction as PrismaRANK,
 } from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
-import { toAsyncIterable, toCommentUTF8 } from 'lotus-lib'
+import { toCommentUTF8 } from 'xpi-ts/lib/rank'
 import { type Block } from 'lotus-nng-client'
 import {
   PushSubscription,
@@ -30,7 +30,8 @@ import type {
   Transaction,
   TransactionRANK,
   TransactionRNKC,
-} from 'lotus-lib'
+} from 'xpi-ts/lib/rank'
+import { toAsyncIterable } from '../util/functions'
 
 export type IndexedTransactionRANK = Transaction & PrismaRANK
 export type IndexedTransactionRNKC = Transaction &

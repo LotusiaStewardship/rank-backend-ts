@@ -16,12 +16,12 @@ import {
   type SignalDefinition,
 } from '@temporalio/client'
 import { Worker as TemporalWorker, NativeConnection } from '@temporalio/worker'
-import { Address, Message, Networks } from 'bitcore-lib-xpi'
+import { Address, Message, Networks } from 'xpi-ts/lib/bitcore'
 import {
   PlatformConfiguration,
   type ScriptChunkPlatformUTF8,
   toProfileIdBuf,
-} from 'lotus-lib'
+} from 'xpi-ts/lib/rank'
 import type { RuntimeState } from './state'
 import { Database, getTimestampUTC } from './database'
 import config from '../config'
