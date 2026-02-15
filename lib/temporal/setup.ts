@@ -17,9 +17,9 @@ import { RankTopPost, RankTopProfile } from '../api'
  */
 export class Temporal {
   /** Temporal client for managing workflow executions */
-  client!: Client
+  client: Client
   /** Temporal worker for executing activities and workflows */
-  worker!: Worker
+  worker: Worker
   /** Database instance for data persistence */
   db: Database
 
@@ -63,7 +63,7 @@ export class Temporal {
           taskQueue: config.temporal.taskQueue,
           activities,
           workflowBundle: {
-            codePath: require.resolve('./workflows'),
+            codePath: require.resolve('./temporal/workflows'),
           },
         })
         this.worker.run()

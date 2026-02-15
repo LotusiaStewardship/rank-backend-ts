@@ -19,7 +19,7 @@ type Exception = [number | string, string]
  * SETUP
  */
 // Instantiate all required modules
-const db = new Database(config.datasourceUrl)
+const db = new Database(process.env.DATABASE_URL)
 const temporal = new Temporal(db)
 const subscriptionManager = new SubscriptionManager(db)
 const state = new RuntimeState()
