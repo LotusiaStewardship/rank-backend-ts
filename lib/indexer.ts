@@ -15,7 +15,6 @@ import {
   PushNotification,
 } from './push'
 import { Database } from './database'
-import { Temporal } from './temporal'
 import { FAUCET_MILESTONE_VOTES, FAUCET_DRIP_AMOUNTS } from '../util/constants'
 import type {
   TransactionOutputRANK,
@@ -1442,7 +1441,17 @@ export class Indexer extends EventEmitter {
 
       // Signal Temporal to process the faucet drip
       try {
-        await this.temporal.client.workflow.signalWithStart(
+        // Import the API's temporal client via the runtime state
+        // The Temporal signal is fire-and-forget from the indexer's perspective
+        const { Connection, Client } = await import('@temporalio/client')
+        const connection = await Connection.connect({
+          address: config.temporal.host,
+        })
+        const client = new Client({
+          connection,
+          namespace: config.temporal.namespace,
+        })
+        await client.workflow.signalWithStart(
           config.temporal.command.workflowType,
           {
             signal: config.temporal.command.signal,
@@ -1460,6 +1469,7 @@ export class Indexer extends EventEmitter {
             ],
           },
         )
+        await connection.close()
       } catch (e) {
         // Log but don't throw — the drip can be retried manually
         log([

@@ -17,7 +17,7 @@ import {
   toProfileIdBuf,
 } from 'xpi-ts/lib/rank'
 import type { RuntimeState } from './state'
-import { Database } from './database'
+import { Database, getTimestampUTC } from './database'
 import {
   computeFullEngagement,
   getTierName,
@@ -106,9 +106,6 @@ export type Endpoint =
   | 'tx'
   | 'txs'
   | 'voteActivity'
-  | 'feedPosts'
-  | 'feedTrending'
-  | 'leaderboard'
   | 'referralGenerate'
   | 'referralRedeem'
   | 'referralGenesis'
@@ -594,9 +591,7 @@ export class API extends EventEmitter {
     this.router.post('/admin/referral/genesis', this.POST.referralGenesis)
     this.router.post('/referral/generate', this.POST.referralGenerate)
     this.router.post('/referral/redeem', this.POST.referralRedeem)
-    // Router POST endpoint for retrieving multiple posts by platform.
-    // Used by the extension when a user is scrolling their feed
-    // and needs to load their vote history for all posts in the feed
+    // Get posts for a platform, up to 50 maximum per request
     this.router.post('/posts/:platform/:scriptPayload', this.POST.posts)
 
     // Router PATCH endpoint configuration (DEEPEST ROUTES FIRST!)
@@ -1116,147 +1111,7 @@ export class API extends EventEmitter {
     },
 
     /**
-     * Retrieves a paginated feed of posts with profile data, rankings, and comments.
-     * Supports filtering by platform, sorting by ranking/recency/controversy,
-     * time-based filtering, and optional wallet-specific vote metadata.
-     * @param req Express Request object with query params (platform, sortBy, startTime, page, pageSize, scriptPayload)
-     * @param res Express Response object to send back post feed data
-     * @returns JSON response with PostAPI[] and pagination metadata
-     */
-    feedPosts: async (req: Request, res: Response) => {
-      const t0 = performance.now()
-      try {
-        const filters = {
-          platform: req.query.platform as ScriptChunkPlatformUTF8,
-          sortBy:
-            (req.query.sortBy as 'ranking' | 'recent' | 'controversial') ??
-            undefined,
-          startTime: req.query.startTime as Timespan,
-          page: req.query.page ? Number(req.query.page) : undefined,
-          pageSize: req.query.pageSize ? Number(req.query.pageSize) : undefined,
-          scriptPayload: req.query.scriptPayload as string,
-        }
-
-        const result = await this.db.apiGetFeedPosts(filters)
-        const t1 = (performance.now() - t0).toFixed(3)
-        log([
-          ['api', 'get.feedPosts'],
-          ['filters', JSON.stringify(filters)],
-          ['results', `${result.posts.length}`],
-          ['elapsed', `${t1}ms`],
-        ])
-        return sendJSON(res, result, HTTP.OK)
-      } catch (e) {
-        const t1 = (performance.now() - t0).toFixed(3)
-        log([
-          ['api', 'error'],
-          ['action', 'get.feedPosts'],
-          ['message', `"${String(e)}"`],
-          ['elapsed', `${t1}ms`],
-        ])
-        return sendJSON(
-          res,
-          { error: 'feed posts not found', message: e.message },
-          HTTP.NOT_FOUND,
-        )
-      }
-    },
-
-    /**
-     * Retrieves trending posts based on recent vote activity volume.
-     * Returns full PostAPI objects ordered by activity count in the time window.
-     * @param req Express Request object with windowHours and limit path params, optional scriptPayload query param
-     * @param res Express Response object to send back trending post data
-     * @returns JSON response with PostAPI[]
-     */
-    feedTrending: async (req: Request, res: Response) => {
-      const t0 = performance.now()
-      try {
-        const windowHours = req.params.windowHours
-          ? Number(req.params.windowHours)
-          : 24
-        const limit = req.params.limit ? Number(req.params.limit) : 20
-        const scriptPayload = req.query.scriptPayload as string
-
-        const result = await this.db.apiGetTrendingPosts(
-          windowHours,
-          limit,
-          scriptPayload,
-        )
-        const t1 = (performance.now() - t0).toFixed(3)
-        log([
-          ['api', 'get.feedTrending'],
-          ['windowHours', `${windowHours}`],
-          ['limit', `${limit}`],
-          ['results', `${result.length}`],
-          ['elapsed', `${t1}ms`],
-        ])
-        return sendJSON(res, result, HTTP.OK)
-      } catch (e) {
-        const t1 = (performance.now() - t0).toFixed(3)
-        log([
-          ['api', 'error'],
-          ['action', 'get.feedTrending'],
-          ['message', `"${String(e)}"`],
-          ['elapsed', `${t1}ms`],
-        ])
-        return sendJSON(
-          res,
-          { error: 'trending posts not found', message: e.message },
-          HTTP.NOT_FOUND,
-        )
-      }
-    },
-
-    /**
-     * Retrieves a leaderboard of top voters ranked by total sats burned.
-     * Enriched with WalletEngagement data (tier, streak, EP) when available.
-     * @param req Express Request object with period ('daily'|'weekly') and optional limit path params
-     * @param res Express Response object to send back leaderboard data
-     * @returns JSON response with leaderboard entries
-     */
-    leaderboard: async (req: Request, res: Response) => {
-      const t0 = performance.now()
-      try {
-        const period = req.params.period as 'daily' | 'weekly'
-        const limit = req.params.limit ? Number(req.params.limit) : 20
-
-        if (period !== 'daily' && period !== 'weekly') {
-          return sendJSON(
-            res,
-            { error: 'period must be "daily" or "weekly"' },
-            HTTP.BAD_REQUEST,
-          )
-        }
-
-        const result = await this.db.apiGetLeaderboard(period, limit)
-        const t1 = (performance.now() - t0).toFixed(3)
-        log([
-          ['api', 'get.leaderboard'],
-          ['period', period],
-          ['limit', `${limit}`],
-          ['results', `${result.length}`],
-          ['elapsed', `${t1}ms`],
-        ])
-        return sendJSON(res, result, HTTP.OK)
-      } catch (e) {
-        const t1 = (performance.now() - t0).toFixed(3)
-        log([
-          ['api', 'error'],
-          ['action', 'get.leaderboard'],
-          ['message', `"${String(e)}"`],
-          ['elapsed', `${t1}ms`],
-        ])
-        return sendJSON(
-          res,
-          { error: 'leaderboard not found', message: e.message },
-          HTTP.NOT_FOUND,
-        )
-      }
-    },
-
-    /**
-     * Retrieves engagement profile for a wallet
+     * Retrieves the engagement profile for a wallet
      * @param req Express Request object containing `scriptPayload` parameter
      * @param res Express Response object to send back engagement data
      * @returns JSON response with engagement data or error message
@@ -1527,6 +1382,397 @@ export class API extends EventEmitter {
           HTTP.BAD_REQUEST,
         )
       }
+    },
+
+    /**
+     * Generates a referral code for an authenticated user.
+     * Requires BlockDataSig authentication.
+     * Eligibility: user must have ≥ REFERRAL_MIN_VOTES votes and
+     * fewer than REFERRAL_MAX_OUTSTANDING outstanding codes.
+     *
+     * @param req Express Request with body: { scriptPayload, signature }
+     * @param res Express Response
+     * @returns JSON response with the generated referral code
+     */
+    referralGenerate: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        const body = req.body as {
+          scriptPayload: string
+          signature: string
+        }
+        // Validate scriptPayload
+        const validated = Validate.scriptPayload(body.scriptPayload)
+        if (!validated.scriptPayload) {
+          return sendJSON(res, { error: validated.error }, validated.statusCode)
+        }
+        // Verify wallet ownership via Message.verify
+        const message = `generate-referral:${validated.scriptPayload}`
+        try {
+          const address = Address.fromPublicKeyHash(
+            Buffer.from(validated.scriptPayload, 'hex'),
+            Networks.livenet,
+          )
+          if (!new Message(message).verify(address, body.signature)) {
+            return sendJSON(
+              res,
+              { error: 'invalid signature' },
+              HTTP.UNAUTHORIZED,
+            )
+          }
+        } catch {
+          return sendJSON(
+            res,
+            { error: 'invalid signature' },
+            HTTP.UNAUTHORIZED,
+          )
+        }
+        // Check eligibility: minimum votes
+        const voteCount = await this.db.countRankTxsByScriptPayload(
+          validated.scriptPayload,
+        )
+        if (voteCount < REFERRAL_MIN_VOTES) {
+          return sendJSON(
+            res,
+            {
+              error: `must have at least ${REFERRAL_MIN_VOTES} vote(s) to generate referral codes`,
+              currentVotes: voteCount,
+            },
+            HTTP.FORBIDDEN,
+          )
+        }
+        // Check eligibility: outstanding code limit
+        const outstanding = await this.db.countOutstandingReferralCodes(
+          validated.scriptPayload,
+        )
+        if (outstanding >= REFERRAL_MAX_OUTSTANDING) {
+          return sendJSON(
+            res,
+            {
+              error: `maximum of ${REFERRAL_MAX_OUTSTANDING} outstanding referral codes reached`,
+              outstanding,
+            },
+            HTTP.TOO_MANY_REQUESTS,
+          )
+        }
+        // Generate HMAC-based referral code
+        const nonce = randomBytes(16).toString('hex')
+        const hmac = createHmac('sha256', config.referral.secret)
+        hmac.update(`${validated.scriptPayload}:${nonce}:${Date.now()}`)
+        const code = hmac.digest('hex').slice(0, REFERRAL_CODE_LENGTH)
+        // Set expiration
+        const expiresAt = new Date(
+          Date.now() + REFERRAL_CODE_EXPIRY_HOURS * 3_600_000,
+        )
+        // Create the referral code in the database
+        const record = await this.db.createReferralCode(
+          code,
+          validated.scriptPayload,
+          expiresAt,
+        )
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'post.referralGenerate'],
+          ['referrer', validated.scriptPayload],
+          ['code', code],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          {
+            code: record.code,
+            expiresAt: record.expiresAt.toISOString(),
+            outstanding: outstanding + 1,
+          },
+          HTTP.CREATED,
+        )
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'post.referralGenerate'],
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, { error: e.message }, HTTP.INTERNAL_SERVER_ERROR)
+      }
+    },
+
+    /**
+     * Redeems a referral code for a new user.
+     * Creates a FaucetClaim and triggers the first faucet drip via Temporal.
+     *
+     * @param req Express Request with body: { code, scriptPayload, signature }
+     * @param res Express Response
+     * @returns JSON response with redemption result
+     */
+    referralRedeem: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        const body = req.body as {
+          code: string
+          scriptPayload: string
+          signature: string
+        }
+        // Validate referral code format
+        const validatedCode = Validate.referralCode(body.code)
+        if (!validatedCode.code) {
+          return sendJSON(
+            res,
+            { error: validatedCode.error },
+            validatedCode.statusCode,
+          )
+        }
+        // Validate scriptPayload
+        const validated = Validate.scriptPayload(body.scriptPayload)
+        if (!validated.scriptPayload) {
+          return sendJSON(res, { error: validated.error }, validated.statusCode)
+        }
+        // Verify wallet ownership via Message.verify
+        const message = `redeem-referral:${validatedCode.code}:${validated.scriptPayload}`
+        try {
+          const address = Address.fromPublicKeyHash(
+            Buffer.from(validated.scriptPayload, 'hex'),
+            Networks.livenet,
+          )
+          if (!new Message(message).verify(address, body.signature)) {
+            return sendJSON(
+              res,
+              { error: 'invalid signature' },
+              HTTP.UNAUTHORIZED,
+            )
+          }
+        } catch {
+          return sendJSON(
+            res,
+            { error: 'invalid signature' },
+            HTTP.UNAUTHORIZED,
+          )
+        }
+        // Check IP rate limit
+        const clientIp =
+          (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+          req.socket.remoteAddress ||
+          'unknown'
+        const recentRedemptions =
+          await this.db.countRecentRedemptionsByIp(clientIp)
+        if (recentRedemptions >= REFERRAL_REDEEM_IP_LIMIT) {
+          return sendJSON(
+            res,
+            { error: 'too many redemptions from this IP address' },
+            HTTP.TOO_MANY_REQUESTS,
+          )
+        }
+        // Look up the referral code
+        const referral = await this.db.getReferralCode(validatedCode.code)
+        if (!referral) {
+          return sendJSON(
+            res,
+            { error: 'referral code not found' },
+            HTTP.NOT_FOUND,
+          )
+        }
+        // Check if already redeemed
+        if (referral.redeemedAt) {
+          return sendJSON(
+            res,
+            { error: 'referral code has already been redeemed' },
+            HTTP.CONFLICT,
+          )
+        }
+        // Check if expired
+        if (referral.expiresAt < new Date()) {
+          return sendJSON(
+            res,
+            { error: 'referral code has expired' },
+            HTTP.GONE,
+          )
+        }
+        // Prevent self-referral
+        if (referral.referrerPayload === validated.scriptPayload) {
+          return sendJSON(
+            res,
+            { error: 'cannot redeem your own referral code' },
+            HTTP.FORBIDDEN,
+          )
+        }
+        // Check if this wallet already has a faucet claim
+        const existingClaim = await this.db.getFaucetClaim(
+          validated.scriptPayload,
+        )
+        if (existingClaim) {
+          return sendJSON(
+            res,
+            { error: 'wallet has already redeemed a referral code' },
+            HTTP.CONFLICT,
+          )
+        }
+        // Atomically redeem the code
+        await this.db.redeemReferralCode(
+          validatedCode.code,
+          validated.scriptPayload,
+          clientIp,
+        )
+        // Create the faucet claim record
+        await this.db.createFaucetClaim(
+          validated.scriptPayload,
+          validatedCode.code,
+        )
+        // Signal Temporal to process the first faucet drip (milestone 1)
+        try {
+          await this.temporalClient.workflow.signalWithStart(
+            config.temporal.command.workflowType,
+            {
+              signal: config.temporal.command.signal,
+              taskQueue: config.temporal.taskQueue,
+              workflowId: config.temporal.command.workflowId,
+              signalArgs: [
+                {
+                  action: 'faucetDrip',
+                  data: {
+                    scriptPayload: validated.scriptPayload,
+                    milestone: 1,
+                    amount: FAUCET_DRIP_AMOUNTS[0].toString(),
+                    referrerPayload: referral.referrerPayload,
+                  },
+                },
+              ],
+            },
+          )
+        } catch (temporalError) {
+          // Log but don't fail the redemption — the drip can be retried
+          log([
+            ['api', 'warn'],
+            ['action', 'post.referralRedeem.temporal'],
+            ['message', `"${String(temporalError)}"`],
+          ])
+        }
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'post.referralRedeem'],
+          ['redeemer', validated.scriptPayload],
+          ['referrer', referral.referrerPayload],
+          ['code', validatedCode.code],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          {
+            redeemed: true,
+            referrerPayload: referral.referrerPayload,
+            milestone: 1,
+            dripAmount: FAUCET_DRIP_AMOUNTS[0].toString(),
+          },
+          HTTP.OK,
+        )
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'post.referralRedeem'],
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, { error: e.message }, HTTP.INTERNAL_SERVER_ERROR)
+      }
+    },
+
+    /**
+     * Admin endpoint to generate genesis referral codes (batch).
+     * Requires ADMIN_SECRET header authentication.
+     * Used for initial onboarding before organic referral generation is possible.
+     *
+     * @param req Express Request with body: { count } and header: x-admin-secret
+     * @param res Express Response
+     * @returns JSON response with generated codes
+     */
+    referralGenesis: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        // Validate admin secret
+        const adminHeader = req.headers['x-admin-secret'] as string | undefined
+        const adminValidated = Validate.adminSecret(
+          adminHeader,
+          config.admin.secret,
+        )
+        if (!adminValidated.valid) {
+          return sendJSON(
+            res,
+            { error: adminValidated.error },
+            adminValidated.statusCode,
+          )
+        }
+        const body = req.body as { count?: number }
+        const count = Math.min(Math.max(body.count || 1, 1), 50)
+        // Generate batch of codes
+        const codes: Array<{
+          code: string
+          referrerPayload: string
+          expiresAt: Date
+        }> = []
+        const expiresAt = new Date(
+          Date.now() + REFERRAL_GENESIS_EXPIRY_HOURS * 3_600_000,
+        )
+        for (let i = 0; i < count; i++) {
+          const nonce = randomBytes(16).toString('hex')
+          const hmac = createHmac('sha256', config.referral.secret)
+          hmac.update(
+            `${REFERRAL_GENESIS_REFERRER}:${nonce}:${Date.now()}:${i}`,
+          )
+          const code = hmac.digest('hex').slice(0, REFERRAL_CODE_LENGTH)
+          codes.push({
+            code,
+            referrerPayload: REFERRAL_GENESIS_REFERRER,
+            expiresAt,
+          })
+        }
+        // Batch insert
+        const result = await this.db.createReferralCodeBatch(codes)
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'post.referralGenesis'],
+          ['count', `${result.count}`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          {
+            created: result.count,
+            codes: codes.map(c => ({
+              code: c.code,
+              expiresAt: c.expiresAt.toISOString(),
+            })),
+          },
+          HTTP.CREATED,
+        )
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'post.referralGenesis'],
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, { error: e.message }, HTTP.INTERNAL_SERVER_ERROR)
+      }
+    },
+  }
+  /**
+   * Temporal Activity definitions (must be arrow functions)
+   */
+  temporalActivities = {
+    /**
+     * List all workflows matching the query and return the workflow execution info
+     * @param query - The SQL-like query to list workflows
+     * @returns The list of workflow executions
+     */
+    listWorkflows: async ({ query }: { query: string }) => {
+      const queryResult = this.temporalClient.workflow.list({ query })
+      const workflowList: WorkflowExecutionInfo[] = []
+      for await (const workflowInfo of queryResult) {
+        workflowList.push(workflowInfo)
+      }
+      return workflowList
     },
 
     /**
