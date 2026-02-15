@@ -15,6 +15,7 @@ import {
   PushNotification,
 } from './push'
 import { Database } from './database'
+import { FAUCET_MILESTONE_VOTES, FAUCET_DRIP_AMOUNTS } from '../util/constants'
 import type {
   TransactionOutputRANK,
   TransactionOutputRNKC,
@@ -600,6 +601,20 @@ export class Indexer extends EventEmitter {
         //  })
         //}
         this.profileQueue.clear()
+        // Check faucet milestones for each distinct voter in this tx
+        if (processed.ranks?.length > 0) {
+          const voterPayloads = processed.ranks.map(r => r.scriptPayload)
+          for (const scriptPayload of voterPayloads) {
+            this.checkFaucetMilestone(scriptPayload).catch(e => {
+              log([
+                ['nng', 'warn'],
+                ['action', 'checkFaucetMilestone'],
+                ['scriptPayload', scriptPayload],
+                ['message', `"${String(e)}"`],
+              ])
+            })
+          }
+        }
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['nng', 'mempooltxadd'],
@@ -1371,5 +1386,97 @@ export class Indexer extends EventEmitter {
     }
 
     return notification
+  }
+
+  /**
+   * Checks if a voter's scriptPayload has a FaucetClaim that needs advancing
+   * to the next milestone. Called after each RANK tx is processed.
+   *
+   * Milestones are defined in FAUCET_MILESTONE_VOTES:
+   *   - Milestone 1: 0 votes (on redemption — already handled by referralRedeem)
+   *   - Milestone 2: 1 vote
+   *   - Milestone 3: 5 votes
+   *   - Milestone 4: 10 votes
+   *
+   * @param scriptPayload - The voter's scriptPayload
+   */
+  private async checkFaucetMilestone(scriptPayload: string): Promise<void> {
+    // Look up the faucet claim for this wallet
+    const claim = await this.db.getFaucetClaim(scriptPayload)
+    if (!claim) return // No faucet claim — not a referred user
+
+    // Check if all milestones are already completed
+    const currentMilestone = claim.milestone
+    if (currentMilestone > FAUCET_MILESTONE_VOTES.length) return
+
+    // Get the vote threshold for the next milestone
+    const nextMilestoneIndex = currentMilestone // 0-indexed into FAUCET_MILESTONE_VOTES
+    if (nextMilestoneIndex >= FAUCET_MILESTONE_VOTES.length) return
+
+    const requiredVotes = FAUCET_MILESTONE_VOTES[nextMilestoneIndex]
+    const dripAmount = FAUCET_DRIP_AMOUNTS[nextMilestoneIndex]
+
+    // Count the user's total RANK votes
+    const totalVotes = await this.db.countRankTxsByScriptPayload(scriptPayload)
+
+    // Check if the user has reached the next milestone
+    if (totalVotes >= requiredVotes) {
+      // Advance the milestone in the database
+      await this.db.advanceFaucetMilestone(
+        scriptPayload,
+        currentMilestone + 1,
+        dripAmount,
+      )
+
+      // Signal Temporal to process the faucet drip
+      try {
+        // Import the API's temporal client via the runtime state
+        // The Temporal signal is fire-and-forget from the indexer's perspective
+        const { Connection, Client } = await import('@temporalio/client')
+        const connection = await Connection.connect({
+          address: config.temporal.host,
+        })
+        const client = new Client({
+          connection,
+          namespace: config.temporal.namespace,
+        })
+        await client.workflow.signalWithStart(
+          config.temporal.command.workflowType,
+          {
+            signal: config.temporal.command.signal,
+            taskQueue: config.temporal.taskQueue,
+            workflowId: config.temporal.command.workflowId,
+            signalArgs: [
+              {
+                action: 'faucetDrip',
+                data: {
+                  scriptPayload,
+                  milestone: currentMilestone + 1,
+                  amount: dripAmount.toString(),
+                },
+              },
+            ],
+          },
+        )
+        await connection.close()
+      } catch (e) {
+        // Log but don't throw — the drip can be retried manually
+        log([
+          ['indexer', 'warn'],
+          ['action', 'checkFaucetMilestone.temporal'],
+          ['scriptPayload', scriptPayload],
+          ['milestone', `${currentMilestone + 1}`],
+          ['message', `"${String(e)}"`],
+        ])
+      }
+
+      log([
+        ['indexer', 'checkFaucetMilestone'],
+        ['scriptPayload', scriptPayload],
+        ['milestone', `${currentMilestone + 1}`],
+        ['totalVotes', `${totalVotes}`],
+        ['dripAmount', dripAmount.toString()],
+      ])
+    }
   }
 }

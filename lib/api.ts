@@ -1,5 +1,6 @@
 import { Server } from 'node:http'
 import { EventEmitter } from 'node:events'
+import { createHmac, randomBytes } from 'node:crypto'
 import express, {
   Express,
   Router,
@@ -24,8 +25,27 @@ import {
 } from 'xpi-ts/lib/rank'
 import type { RuntimeState } from './state'
 import { Database, getTimestampUTC } from './database'
+import {
+  computeFullEngagement,
+  getTierName,
+  getTierBonus,
+  computeStreakBonus,
+} from './engagement'
 import config from '../config'
-import { API_SERVER_PORT, ERR, HTTP } from '../util/constants'
+import {
+  API_SERVER_PORT,
+  ERR,
+  HTTP,
+  REFERRAL_CODE_LENGTH,
+  REFERRAL_CODE_EXPIRY_HOURS,
+  REFERRAL_GENESIS_EXPIRY_HOURS,
+  REFERRAL_MAX_OUTSTANDING,
+  REFERRAL_MIN_VOTES,
+  REFERRAL_REDEEM_IP_LIMIT,
+  REFERRAL_GENESIS_REFERRER,
+  FAUCET_MILESTONE_VOTES,
+  FAUCET_DRIP_AMOUNTS,
+} from '../util/constants'
 import {
   sendJSON,
   sendAuthChallenge,
@@ -90,6 +110,10 @@ export type Endpoint =
   | 'tx'
   | 'txs'
   | 'voteActivity'
+  | 'referralGenerate'
+  | 'referralRedeem'
+  | 'referralGenesis'
+  | 'engagement'
 /** Handler function type for processing API endpoint requests */
 export type EndpointHandler = (req: Request, res: Response) => void
 /** Available parameter names that can be validated in API endpoints */
@@ -538,9 +562,13 @@ export class API extends EventEmitter {
     this.router.get('/:platform/:profileId/:postId', this.GET.post)
     this.router.get('/:platform/:profileId', this.GET.profile)
 
+    // Router GET endpoint configuration (engagement)
+    this.router.get('/wallet/engagement/:scriptPayload', this.GET.engagement)
+
     // Router POST endpoint configuration (DEEPEST ROUTES FIRST!)
-    // TODO: implement referral codes rather than mining instanceId
-    //this.router.post('/instance/register', this.POST.instance)
+    this.router.post('/admin/referral/genesis', this.POST.referralGenesis)
+    this.router.post('/referral/generate', this.POST.referralGenerate)
+    this.router.post('/referral/redeem', this.POST.referralRedeem)
     // Get posts for a platform, up to 50 maximum per request
     this.router.post('/posts/:platform/:scriptPayload', this.POST.posts)
 
@@ -1079,6 +1107,80 @@ export class API extends EventEmitter {
         )
       }
     },
+
+    /**
+     * Retrieves the engagement profile for a wallet
+     * @param req Express Request object containing `scriptPayload` parameter
+     * @param res Express Response object to send back engagement data
+     * @returns JSON response with engagement data or error message
+     */
+    engagement: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      const { scriptPayload } = req.params
+      const validated = Validate.scriptPayload(scriptPayload)
+      if (!validated.scriptPayload) {
+        return sendJSON(res, { error: validated.error }, validated.statusCode)
+      }
+      try {
+        // Compute the full engagement profile (gathers all metrics from DB)
+        const engagement = await computeFullEngagement(
+          this.db,
+          validated.scriptPayload,
+        )
+        // Persist the computed engagement data
+        const record = await this.db.upsertWalletEngagement(
+          validated.scriptPayload,
+          {
+            ...engagement,
+            lifetimeRewards:
+              (
+                await this.db.getOrCreateWalletEngagement(
+                  validated.scriptPayload,
+                )
+              ).lifetimeRewards ?? 0n,
+          },
+        )
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.engagement'],
+          ['scriptPayload', validated.scriptPayload],
+          ['tier', `${engagement.tier}`],
+          ['ep', `${engagement.engagementPoints}`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          {
+            scriptPayload: validated.scriptPayload,
+            tier: engagement.tier,
+            tierName: getTierName(engagement.tier),
+            tierBonus: getTierBonus(engagement.tier),
+            engagementPoints: engagement.engagementPoints,
+            epBreakdown: engagement.epBreakdown,
+            streakBonus: computeStreakBonus(engagement.currentStreak),
+            lifetimeVotes: engagement.lifetimeVotes,
+            lifetimeReferrals: engagement.lifetimeReferrals,
+            lifetimeComments: engagement.lifetimeComments,
+            currentStreak: engagement.currentStreak,
+            longestStreak: engagement.longestStreak,
+            lastVoteDate: engagement.lastVoteDate?.toISOString() ?? null,
+            lifetimeRewards: record.lifetimeRewards.toString(),
+            updatedAt: record.updatedAt.toISOString(),
+          },
+          HTTP.OK,
+        )
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'get.engagement'],
+          ['scriptPayload', validated.scriptPayload],
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, { error: e.message }, HTTP.INTERNAL_SERVER_ERROR)
+      }
+    },
   }
   /**
    * PATCH Method Handlers
@@ -1277,6 +1379,379 @@ export class API extends EventEmitter {
           { error: e.message, params: req.body },
           HTTP.BAD_REQUEST,
         )
+      }
+    },
+
+    /**
+     * Generates a referral code for an authenticated user.
+     * Requires BlockDataSig authentication.
+     * Eligibility: user must have ≥ REFERRAL_MIN_VOTES votes and
+     * fewer than REFERRAL_MAX_OUTSTANDING outstanding codes.
+     *
+     * @param req Express Request with body: { scriptPayload, signature }
+     * @param res Express Response
+     * @returns JSON response with the generated referral code
+     */
+    referralGenerate: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        const body = req.body as {
+          scriptPayload: string
+          signature: string
+        }
+        // Validate scriptPayload
+        const validated = Validate.scriptPayload(body.scriptPayload)
+        if (!validated.scriptPayload) {
+          return sendJSON(res, { error: validated.error }, validated.statusCode)
+        }
+        // Verify wallet ownership via Message.verify
+        const message = `generate-referral:${validated.scriptPayload}`
+        try {
+          const address = Address.fromPublicKeyHash(
+            Buffer.from(validated.scriptPayload, 'hex'),
+            Networks.livenet,
+          )
+          if (!new Message(message).verify(address, body.signature)) {
+            return sendJSON(
+              res,
+              { error: 'invalid signature' },
+              HTTP.UNAUTHORIZED,
+            )
+          }
+        } catch {
+          return sendJSON(
+            res,
+            { error: 'invalid signature' },
+            HTTP.UNAUTHORIZED,
+          )
+        }
+        // Check eligibility: minimum votes
+        const voteCount = await this.db.countRankTxsByScriptPayload(
+          validated.scriptPayload,
+        )
+        if (voteCount < REFERRAL_MIN_VOTES) {
+          return sendJSON(
+            res,
+            {
+              error: `must have at least ${REFERRAL_MIN_VOTES} vote(s) to generate referral codes`,
+              currentVotes: voteCount,
+            },
+            HTTP.FORBIDDEN,
+          )
+        }
+        // Check eligibility: outstanding code limit
+        const outstanding = await this.db.countOutstandingReferralCodes(
+          validated.scriptPayload,
+        )
+        if (outstanding >= REFERRAL_MAX_OUTSTANDING) {
+          return sendJSON(
+            res,
+            {
+              error: `maximum of ${REFERRAL_MAX_OUTSTANDING} outstanding referral codes reached`,
+              outstanding,
+            },
+            HTTP.TOO_MANY_REQUESTS,
+          )
+        }
+        // Generate HMAC-based referral code
+        const nonce = randomBytes(16).toString('hex')
+        const hmac = createHmac('sha256', config.referral.secret)
+        hmac.update(`${validated.scriptPayload}:${nonce}:${Date.now()}`)
+        const code = hmac.digest('hex').slice(0, REFERRAL_CODE_LENGTH)
+        // Set expiration
+        const expiresAt = new Date(
+          Date.now() + REFERRAL_CODE_EXPIRY_HOURS * 3_600_000,
+        )
+        // Create the referral code in the database
+        const record = await this.db.createReferralCode(
+          code,
+          validated.scriptPayload,
+          expiresAt,
+        )
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'post.referralGenerate'],
+          ['referrer', validated.scriptPayload],
+          ['code', code],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          {
+            code: record.code,
+            expiresAt: record.expiresAt.toISOString(),
+            outstanding: outstanding + 1,
+          },
+          HTTP.CREATED,
+        )
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'post.referralGenerate'],
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, { error: e.message }, HTTP.INTERNAL_SERVER_ERROR)
+      }
+    },
+
+    /**
+     * Redeems a referral code for a new user.
+     * Creates a FaucetClaim and triggers the first faucet drip via Temporal.
+     *
+     * @param req Express Request with body: { code, scriptPayload, signature }
+     * @param res Express Response
+     * @returns JSON response with redemption result
+     */
+    referralRedeem: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        const body = req.body as {
+          code: string
+          scriptPayload: string
+          signature: string
+        }
+        // Validate referral code format
+        const validatedCode = Validate.referralCode(body.code)
+        if (!validatedCode.code) {
+          return sendJSON(
+            res,
+            { error: validatedCode.error },
+            validatedCode.statusCode,
+          )
+        }
+        // Validate scriptPayload
+        const validated = Validate.scriptPayload(body.scriptPayload)
+        if (!validated.scriptPayload) {
+          return sendJSON(res, { error: validated.error }, validated.statusCode)
+        }
+        // Verify wallet ownership via Message.verify
+        const message = `redeem-referral:${validatedCode.code}:${validated.scriptPayload}`
+        try {
+          const address = Address.fromPublicKeyHash(
+            Buffer.from(validated.scriptPayload, 'hex'),
+            Networks.livenet,
+          )
+          if (!new Message(message).verify(address, body.signature)) {
+            return sendJSON(
+              res,
+              { error: 'invalid signature' },
+              HTTP.UNAUTHORIZED,
+            )
+          }
+        } catch {
+          return sendJSON(
+            res,
+            { error: 'invalid signature' },
+            HTTP.UNAUTHORIZED,
+          )
+        }
+        // Check IP rate limit
+        const clientIp =
+          (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+          req.socket.remoteAddress ||
+          'unknown'
+        const recentRedemptions =
+          await this.db.countRecentRedemptionsByIp(clientIp)
+        if (recentRedemptions >= REFERRAL_REDEEM_IP_LIMIT) {
+          return sendJSON(
+            res,
+            { error: 'too many redemptions from this IP address' },
+            HTTP.TOO_MANY_REQUESTS,
+          )
+        }
+        // Look up the referral code
+        const referral = await this.db.getReferralCode(validatedCode.code)
+        if (!referral) {
+          return sendJSON(
+            res,
+            { error: 'referral code not found' },
+            HTTP.NOT_FOUND,
+          )
+        }
+        // Check if already redeemed
+        if (referral.redeemedAt) {
+          return sendJSON(
+            res,
+            { error: 'referral code has already been redeemed' },
+            HTTP.CONFLICT,
+          )
+        }
+        // Check if expired
+        if (referral.expiresAt < new Date()) {
+          return sendJSON(
+            res,
+            { error: 'referral code has expired' },
+            HTTP.GONE,
+          )
+        }
+        // Prevent self-referral
+        if (referral.referrerPayload === validated.scriptPayload) {
+          return sendJSON(
+            res,
+            { error: 'cannot redeem your own referral code' },
+            HTTP.FORBIDDEN,
+          )
+        }
+        // Check if this wallet already has a faucet claim
+        const existingClaim = await this.db.getFaucetClaim(
+          validated.scriptPayload,
+        )
+        if (existingClaim) {
+          return sendJSON(
+            res,
+            { error: 'wallet has already redeemed a referral code' },
+            HTTP.CONFLICT,
+          )
+        }
+        // Atomically redeem the code
+        await this.db.redeemReferralCode(
+          validatedCode.code,
+          validated.scriptPayload,
+          clientIp,
+        )
+        // Create the faucet claim record
+        await this.db.createFaucetClaim(
+          validated.scriptPayload,
+          validatedCode.code,
+        )
+        // Signal Temporal to process the first faucet drip (milestone 1)
+        try {
+          await this.temporalClient.workflow.signalWithStart(
+            config.temporal.command.workflowType,
+            {
+              signal: config.temporal.command.signal,
+              taskQueue: config.temporal.taskQueue,
+              workflowId: config.temporal.command.workflowId,
+              signalArgs: [
+                {
+                  action: 'faucetDrip',
+                  data: {
+                    scriptPayload: validated.scriptPayload,
+                    milestone: 1,
+                    amount: FAUCET_DRIP_AMOUNTS[0].toString(),
+                    referrerPayload: referral.referrerPayload,
+                  },
+                },
+              ],
+            },
+          )
+        } catch (temporalError) {
+          // Log but don't fail the redemption — the drip can be retried
+          log([
+            ['api', 'warn'],
+            ['action', 'post.referralRedeem.temporal'],
+            ['message', `"${String(temporalError)}"`],
+          ])
+        }
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'post.referralRedeem'],
+          ['redeemer', validated.scriptPayload],
+          ['referrer', referral.referrerPayload],
+          ['code', validatedCode.code],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          {
+            redeemed: true,
+            referrerPayload: referral.referrerPayload,
+            milestone: 1,
+            dripAmount: FAUCET_DRIP_AMOUNTS[0].toString(),
+          },
+          HTTP.OK,
+        )
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'post.referralRedeem'],
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, { error: e.message }, HTTP.INTERNAL_SERVER_ERROR)
+      }
+    },
+
+    /**
+     * Admin endpoint to generate genesis referral codes (batch).
+     * Requires ADMIN_SECRET header authentication.
+     * Used for initial onboarding before organic referral generation is possible.
+     *
+     * @param req Express Request with body: { count } and header: x-admin-secret
+     * @param res Express Response
+     * @returns JSON response with generated codes
+     */
+    referralGenesis: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        // Validate admin secret
+        const adminHeader = req.headers['x-admin-secret'] as string | undefined
+        const adminValidated = Validate.adminSecret(
+          adminHeader,
+          config.admin.secret,
+        )
+        if (!adminValidated.valid) {
+          return sendJSON(
+            res,
+            { error: adminValidated.error },
+            adminValidated.statusCode,
+          )
+        }
+        const body = req.body as { count?: number }
+        const count = Math.min(Math.max(body.count || 1, 1), 50)
+        // Generate batch of codes
+        const codes: Array<{
+          code: string
+          referrerPayload: string
+          expiresAt: Date
+        }> = []
+        const expiresAt = new Date(
+          Date.now() + REFERRAL_GENESIS_EXPIRY_HOURS * 3_600_000,
+        )
+        for (let i = 0; i < count; i++) {
+          const nonce = randomBytes(16).toString('hex')
+          const hmac = createHmac('sha256', config.referral.secret)
+          hmac.update(
+            `${REFERRAL_GENESIS_REFERRER}:${nonce}:${Date.now()}:${i}`,
+          )
+          const code = hmac.digest('hex').slice(0, REFERRAL_CODE_LENGTH)
+          codes.push({
+            code,
+            referrerPayload: REFERRAL_GENESIS_REFERRER,
+            expiresAt,
+          })
+        }
+        // Batch insert
+        const result = await this.db.createReferralCodeBatch(codes)
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'post.referralGenesis'],
+          ['count', `${result.count}`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          {
+            created: result.count,
+            codes: codes.map(c => ({
+              code: c.code,
+              expiresAt: c.expiresAt.toISOString(),
+            })),
+          },
+          HTTP.CREATED,
+        )
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'post.referralGenesis'],
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, { error: e.message }, HTTP.INTERNAL_SERVER_ERROR)
       }
     },
   }

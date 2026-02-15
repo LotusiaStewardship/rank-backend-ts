@@ -1,4 +1,8 @@
-import { EXT_INSTANCE_ID_DIFFICULTY, HTTP } from './constants'
+import {
+  EXT_INSTANCE_ID_DIFFICULTY,
+  HTTP,
+  REFERRAL_CODE_LENGTH,
+} from './constants'
 import { ScriptChunkPlatformUTF8 } from 'xpi-ts/lib/rank'
 import { Block } from 'lotus-nng-client'
 import { Address, Message, Networks } from 'xpi-ts/lib/bitcore'
@@ -370,5 +374,58 @@ export const Validate = {
       }
     }
     return { searchType }
+  },
+
+  /**
+   * Validates that the provided referral code is a valid hex string of the expected length
+   * @param code - The referral code to validate
+   * @returns The validated referral code or an error
+   */
+  referralCode: (code: string | undefined) => {
+    if (code === undefined || code.length === 0) {
+      return {
+        error: 'referral code must be specified',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    const regex = new RegExp(`^[a-f0-9]{${REFERRAL_CODE_LENGTH}}$`)
+    if (!regex.test(code)) {
+      return {
+        error: `referral code must be a ${REFERRAL_CODE_LENGTH}-character hex string`,
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    return { code }
+  },
+
+  /**
+   * Validates the admin secret header against the configured ADMIN_SECRET
+   * @param header - The admin secret header value
+   * @param configuredSecret - The configured admin secret from environment
+   * @returns Success or error
+   */
+  adminSecret: (
+    header: string | undefined,
+    configuredSecret: string | undefined,
+  ) => {
+    if (!configuredSecret) {
+      return {
+        error: 'admin endpoint not configured',
+        statusCode: HTTP.NOT_FOUND,
+      }
+    }
+    if (header === undefined || header.length === 0) {
+      return {
+        error: 'admin secret must be specified',
+        statusCode: HTTP.UNAUTHORIZED,
+      }
+    }
+    if (header !== configuredSecret) {
+      return {
+        error: 'invalid admin secret',
+        statusCode: HTTP.FORBIDDEN,
+      }
+    }
+    return { valid: true }
   },
 }

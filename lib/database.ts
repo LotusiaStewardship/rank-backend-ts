@@ -695,8 +695,7 @@ export class Database {
         // add the comments to the return data, or empty array if no comments
         if (profile.comments) {
           data.comments = []
-          const profileCommentsIterable = toAsyncIterable(profile.comments)
-          for await (const comment of profileCommentsIterable) {
+          for (const comment of profile.comments) {
             data.comments.push(this.convertRankCommentToPostAPI(comment))
           }
         }
@@ -2043,6 +2042,450 @@ export class Database {
     }
     return rewinds
   }
+  // ─── Referral Methods ──────────────────────────────────────────────────
+
+  /**
+   * Creates a new referral code in the database
+   * @param code - The HMAC-derived referral code (16-char hex)
+   * @param referrerPayload - The scriptPayload of the referrer
+   * @param expiresAt - The expiration date for the referral code
+   * @returns The created ReferralCode record
+   */
+  async createReferralCode(
+    code: string,
+    referrerPayload: string,
+    expiresAt: Date,
+  ) {
+    try {
+      return await this.db.referralCode.create({
+        data: {
+          code,
+          referrerPayload,
+          expiresAt,
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.createReferralCode: ${e.message}`)
+    }
+  }
+
+  /**
+   * Creates multiple referral codes in a single transaction (for genesis batch)
+   * @param codes - Array of referral code data objects
+   * @returns The count of created records
+   */
+  async createReferralCodeBatch(
+    codes: Array<{
+      code: string
+      referrerPayload: string
+      expiresAt: Date
+    }>,
+  ) {
+    try {
+      return await this.db.referralCode.createMany({
+        data: codes,
+      })
+    } catch (e) {
+      throw new Error(`db.createReferralCodeBatch: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves a referral code by its code string
+   * @param code - The referral code to look up
+   * @returns The ReferralCode record or null if not found
+   */
+  async getReferralCode(code: string) {
+    try {
+      return await this.db.referralCode.findUnique({
+        where: { code },
+      })
+    } catch (e) {
+      throw new Error(`db.getReferralCode: ${e.message}`)
+    }
+  }
+
+  /**
+   * Atomically redeems a referral code by setting the redeemer fields.
+   * Uses a where clause to ensure the code has not already been redeemed.
+   * @param code - The referral code to redeem
+   * @param redeemerPayload - The scriptPayload of the redeemer
+   * @param redeemerIp - The IP address of the redeemer
+   * @returns The updated ReferralCode record
+   */
+  async redeemReferralCode(
+    code: string,
+    redeemerPayload: string,
+    redeemerIp: string,
+  ) {
+    try {
+      return await this.db.referralCode.update({
+        where: {
+          code,
+          redeemedAt: null,
+        },
+        data: {
+          redeemerPayload,
+          redeemerIp,
+          redeemedAt: new Date(),
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.redeemReferralCode: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts outstanding (unredeemed, unexpired) referral codes for a referrer
+   * @param referrerPayload - The scriptPayload of the referrer
+   * @returns The count of outstanding referral codes
+   */
+  async countOutstandingReferralCodes(
+    referrerPayload: string,
+  ): Promise<number> {
+    try {
+      return await this.db.referralCode.count({
+        where: {
+          referrerPayload,
+          redeemedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.countOutstandingReferralCodes: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts recent referral redemptions from a specific IP address within the last 24 hours
+   * @param ip - The IP address to check
+   * @returns The count of recent redemptions from this IP
+   */
+  async countRecentRedemptionsByIp(ip: string): Promise<number> {
+    try {
+      const oneDayAgo = new Date(Date.now() - 86_400_000)
+      return await this.db.referralCode.count({
+        where: {
+          redeemerIp: ip,
+          redeemedAt: { gte: oneDayAgo },
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.countRecentRedemptionsByIp: ${e.message}`)
+    }
+  }
+
+  // ─── Faucet Methods ───────────────────────────────────────────────────
+
+  /**
+   * Creates a new faucet claim record for a referred user
+   * @param scriptPayload - The scriptPayload of the new user
+   * @param referralCode - The referral code that was redeemed
+   * @returns The created FaucetClaim record
+   */
+  async createFaucetClaim(scriptPayload: string, referralCode: string) {
+    try {
+      return await this.db.faucetClaim.create({
+        data: {
+          scriptPayload,
+          referralCode,
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.createFaucetClaim: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves a faucet claim by scriptPayload
+   * @param scriptPayload - The scriptPayload to look up
+   * @returns The FaucetClaim record or null if not found
+   */
+  async getFaucetClaim(scriptPayload: string) {
+    try {
+      return await this.db.faucetClaim.findUnique({
+        where: { scriptPayload },
+      })
+    } catch (e) {
+      throw new Error(`db.getFaucetClaim: ${e.message}`)
+    }
+  }
+
+  /**
+   * Advances a faucet claim to the next milestone and records the drip amount
+   * @param scriptPayload - The scriptPayload of the user
+   * @param nextMilestone - The new milestone number
+   * @param dripAmount - The amount dripped in this milestone (in satoshis)
+   * @returns The updated FaucetClaim record
+   */
+  async advanceFaucetMilestone(
+    scriptPayload: string,
+    nextMilestone: number,
+    dripAmount: bigint,
+  ) {
+    try {
+      return await this.db.faucetClaim.update({
+        where: { scriptPayload },
+        data: {
+          milestone: nextMilestone,
+          totalDripped: { increment: dripAmount },
+          lastDripAt: new Date(),
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.advanceFaucetMilestone: ${e.message}`)
+    }
+  }
+
+  // ─── Engagement Methods ───────────────────────────────────────────────
+
+  /**
+   * Gets or creates a WalletEngagement record for a scriptPayload
+   * @param scriptPayload - The scriptPayload to look up or create
+   * @returns The WalletEngagement record
+   */
+  async getOrCreateWalletEngagement(scriptPayload: string) {
+    try {
+      return await this.db.walletEngagement.upsert({
+        where: { scriptPayload },
+        create: { scriptPayload },
+        update: {},
+      })
+    } catch (e) {
+      throw new Error(`db.getOrCreateWalletEngagement: ${e.message}`)
+    }
+  }
+
+  /**
+   * Updates a WalletEngagement record with new computed values
+   * @param scriptPayload - The scriptPayload to update
+   * @param data - The fields to update
+   * @returns The updated WalletEngagement record
+   */
+  async updateWalletEngagement(
+    scriptPayload: string,
+    data: {
+      tier?: number
+      engagementPoints?: number
+      epBreakdown?: object
+      lifetimeVotes?: number
+      lifetimeReferrals?: number
+      lifetimeComments?: number
+      currentStreak?: number
+      longestStreak?: number
+      lastVoteDate?: Date
+      lifetimeRewards?: bigint
+    },
+  ) {
+    try {
+      return await this.db.walletEngagement.update({
+        where: { scriptPayload },
+        data,
+      })
+    } catch (e) {
+      throw new Error(`db.updateWalletEngagement: ${e.message}`)
+    }
+  }
+
+  /**
+   * Upserts a WalletEngagement record — creates if not exists, updates if exists.
+   * Used by the backfill script and daily EP recomputation.
+   * @param scriptPayload - The scriptPayload to upsert
+   * @param data - The engagement data to set
+   * @returns The upserted WalletEngagement record
+   */
+  async upsertWalletEngagement(
+    scriptPayload: string,
+    data: {
+      tier: number
+      engagementPoints: number
+      epBreakdown: object
+      lifetimeVotes: number
+      lifetimeReferrals: number
+      lifetimeComments: number
+      currentStreak: number
+      longestStreak: number
+      lastVoteDate: Date | null
+      lifetimeRewards: bigint
+    },
+  ) {
+    try {
+      return await this.db.walletEngagement.upsert({
+        where: { scriptPayload },
+        create: { scriptPayload, ...data },
+        update: data,
+      })
+    } catch (e) {
+      throw new Error(`db.upsertWalletEngagement: ${e.message}`)
+    }
+  }
+
+  /**
+   * Resets streaks for wallets that haven't voted since the given date.
+   * Called daily to break streaks for inactive users.
+   * @param cutoffDate - Wallets with lastVoteDate before this are reset
+   * @returns The count of updated records
+   */
+  async resetBrokenStreaks(cutoffDate: Date) {
+    try {
+      return await this.db.walletEngagement.updateMany({
+        where: {
+          currentStreak: { gt: 0 },
+          lastVoteDate: { lt: cutoffDate },
+        },
+        data: {
+          currentStreak: 0,
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.resetBrokenStreaks: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves all distinct scriptPayloads that have cast RANK votes.
+   * Used by the backfill script to enumerate all wallets.
+   * @returns Array of distinct scriptPayload strings
+   */
+  async getDistinctVoterScriptPayloads(): Promise<string[]> {
+    try {
+      const results = await this.db.rankTransaction.groupBy({
+        by: ['scriptPayload'],
+      })
+      return results.map(r => r.scriptPayload)
+    } catch (e) {
+      throw new Error(`db.getDistinctVoterScriptPayloads: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts the total number of RANK transactions for a specific scriptPayload
+   * @param scriptPayload - The scriptPayload to count votes for
+   * @returns The total vote count
+   */
+  async countRankTxsByScriptPayload(scriptPayload: string): Promise<number> {
+    try {
+      return await this.db.rankTransaction.count({
+        where: { scriptPayload },
+      })
+    } catch (e) {
+      throw new Error(`db.countRankTxsByScriptPayload: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts the number of redeemed referral codes where the given scriptPayload is the referrer
+   * @param referrerPayload - The scriptPayload of the referrer
+   * @returns The count of redeemed referrals
+   */
+  async countRedeemedReferralsByReferrer(
+    referrerPayload: string,
+  ): Promise<number> {
+    try {
+      return await this.db.referralCode.count({
+        where: {
+          referrerPayload,
+          redeemedAt: { not: null },
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.countRedeemedReferralsByReferrer: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts the number of RNKC comments posted by a specific scriptPayload
+   * @param scriptPayload - The scriptPayload to count comments for
+   * @returns The total comment count
+   */
+  async countRnkcCommentsByScriptPayload(
+    scriptPayload: string,
+  ): Promise<number> {
+    try {
+      return await this.db.rankComment.count({
+        where: { scriptPayload },
+      })
+    } catch (e) {
+      throw new Error(`db.countRnkcCommentsByScriptPayload: ${e.message}`)
+    }
+  }
+
+  /**
+   * Gets the total XPI burned by a scriptPayload across all RANK transactions
+   * @param scriptPayload - The scriptPayload to sum burns for
+   * @returns The total sats burned as bigint
+   */
+  async getTotalBurnedByScriptPayload(scriptPayload: string): Promise<bigint> {
+    try {
+      const result = await this.db.rankTransaction.aggregate({
+        where: { scriptPayload },
+        _sum: { sats: true },
+      })
+      return result._sum.sats ?? 0n
+    } catch (e) {
+      throw new Error(`db.getTotalBurnedByScriptPayload: ${e.message}`)
+    }
+  }
+
+  /**
+   * Gets the earliest RANK transaction timestamp for a scriptPayload (account age proxy)
+   * @param scriptPayload - The scriptPayload to check
+   * @returns The earliest timestamp as bigint, or null if no transactions
+   */
+  async getEarliestRankTimestamp(
+    scriptPayload: string,
+  ): Promise<bigint | null> {
+    try {
+      const result = await this.db.rankTransaction.aggregate({
+        where: { scriptPayload },
+        _min: { timestamp: true },
+      })
+      return result._min.timestamp ?? null
+    } catch (e) {
+      throw new Error(`db.getEarliestRankTimestamp: ${e.message}`)
+    }
+  }
+
+  /**
+   * Gets the most recent vote date for a scriptPayload
+   * @param scriptPayload - The scriptPayload to check
+   * @returns The most recent timestamp as bigint, or null if no transactions
+   */
+  async getLatestRankTimestamp(scriptPayload: string): Promise<bigint | null> {
+    try {
+      const result = await this.db.rankTransaction.aggregate({
+        where: { scriptPayload },
+        _max: { timestamp: true },
+      })
+      return result._max.timestamp ?? null
+    } catch (e) {
+      throw new Error(`db.getLatestRankTimestamp: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts distinct days on which a scriptPayload has voted, used for streak calculation.
+   * Returns an array of distinct vote dates (UTC day boundaries).
+   * @param scriptPayload - The scriptPayload to check
+   * @returns Array of distinct vote date strings (YYYY-MM-DD)
+   */
+  async getDistinctVoteDates(scriptPayload: string): Promise<string[]> {
+    try {
+      const results: Array<{ vote_date: string }> = await this.db.$queryRaw`
+        SELECT DISTINCT DATE(TO_TIMESTAMP("timestamp")) AS vote_date
+        FROM "RankTransaction"
+        WHERE "scriptPayload" = ${scriptPayload}
+        AND "timestamp" IS NOT NULL
+        ORDER BY vote_date DESC
+      `
+      return results.map(r => r.vote_date)
+    } catch (e) {
+      throw new Error(`db.getDistinctVoteDates: ${e.message}`)
+    }
+  }
+
+  // ─── Private Helpers ──────────────────────────────────────────────────
+
   /**
    * Retrieves voter details for a specific platform profile
    * @param tx - The Prisma client transaction
