@@ -1,4 +1,4 @@
-import { Output, Transaction } from 'xpi-ts/lib/bitcore'
+import { BufferUtil, Output, Transaction } from 'xpi-ts/lib/bitcore'
 import { Builder, ByteBuffer } from 'flatbuffers'
 //import { isIP } from 'validator'
 //import { resolve } from 'node:path/posix'
@@ -15,6 +15,7 @@ import {
   PushNotification,
 } from './push'
 import { Database } from './database'
+import { Temporal } from './temporal'
 import { FAUCET_MILESTONE_VOTES, FAUCET_DRIP_AMOUNTS } from '../util/constants'
 import type {
   TransactionOutputRANK,
@@ -44,6 +45,7 @@ import * as NNGInterface from 'lotus-nng-client/lib/nng-interface'
 import { ERR } from '../util/constants'
 import { log, type LogEntry } from '../util/functions'
 import config from '../config'
+import type { Buffer } from 'buffer/'
 /**
  * Runtime cache for quickly reconciling missing LOKAD txs with blocks
  *
@@ -102,6 +104,8 @@ export class Indexer extends EventEmitter {
   private profileQueue: ProfileMap
   /** Runtime state used across modules */
   private state: RuntimeState
+  /** Temporal instance for storing indexed data */
+  private temporal: Temporal
   /**
    * Creates a new Indexer instance that connects to lotusd via NNG sockets
    * @param db Database instance for storing indexed data
@@ -111,12 +115,14 @@ export class Indexer extends EventEmitter {
   constructor({
     state,
     db,
+    temporal,
     subscriptionManager,
     pubUri,
     rpcUri,
   }: {
     state: RuntimeState
     db: Database
+    temporal: Temporal
     subscriptionManager: SubscriptionManager
     pubUri?: string
     rpcUri?: string
@@ -128,6 +134,7 @@ export class Indexer extends EventEmitter {
     // Module setup
     this.db = db
     this.state = state
+    this.temporal = temporal
     this.subscriptionManager = subscriptionManager
     // Runtime state setup
     this.mempool = new Map()
@@ -545,7 +552,7 @@ export class Indexer extends EventEmitter {
         bb,
       ).mempoolTx()
     const rawArray = mempooltx.tx().rawArray()
-    const tx = new Transaction(Buffer.from(rawArray))
+    const tx = new Transaction(BufferUtil.from(rawArray))
     // Process the transaction using the processTransaction function
     // block is null for mempool transactions
     const processed = this.processTransaction(tx, null)
@@ -800,7 +807,7 @@ export class Indexer extends EventEmitter {
       try {
         const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
-        const tx = new Transaction(Buffer.from(rawArray))
+        const tx = new Transaction(BufferUtil.from(rawArray))
         // Process the transaction as either block or mempool tx
         const processed = this.processTransaction(tx, block)
         if (processed.ranks) {
@@ -1049,7 +1056,9 @@ export class Indexer extends EventEmitter {
    * @returns {string} Block hash or txid as hex string (little endian)
    */
   private toBlockhashOrTxid(hash: NNGInterface.Hash): string {
-    return Buffer.from(hash.bb.bytes().subarray(hash.bb_pos, hash.bb_pos + 32))
+    return BufferUtil.from(
+      hash.bb.bytes().subarray(hash.bb_pos, hash.bb_pos + 32),
+    )
       .reverse() // reverse for little endian
       .toString('hex')
   }
@@ -1065,7 +1074,7 @@ export class Indexer extends EventEmitter {
       return undefined
     }
     const nHeight = header.rawArray().subarray(60, 64)
-    return Buffer.from(nHeight).readUInt32LE()
+    return BufferUtil.from(nHeight).readUInt32LE(0)
   }
   /**
    * Convert `NNGInterface.BlockHeader` to `Block` object

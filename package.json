@@ -53,6 +53,6 @@
     "lotus-nng-client": "file:submodules/lotus-nng-client",
     "nanomsg": "file:submodules/lotus-nng-client/submodules/nanomsg",
     "web-push": "3.6.7",
-    "xpi-ts": "0.2.14"
+    "xpi-ts": "^0.2.15"
   }
 }

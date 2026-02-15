@@ -9,22 +9,14 @@ import express, {
   NextFunction,
   json,
 } from 'express'
-import {
-  Connection,
-  Client as TemporalClient,
-  type WorkflowExecutionInfo,
-  type SearchAttributes,
-  type SignalDefinition,
-} from '@temporalio/client'
-import { Worker as TemporalWorker, NativeConnection } from '@temporalio/worker'
-import { Address, Message, Networks } from 'xpi-ts/lib/bitcore'
+import { Address, BufferUtil, Message, Networks } from 'xpi-ts/lib/bitcore'
 import {
   PlatformConfiguration,
   type ScriptChunkPlatformUTF8,
   toProfileIdBuf,
 } from 'xpi-ts/lib/rank'
 import type { RuntimeState } from './state'
-import { Database, getTimestampUTC } from './database'
+import { Database } from './database'
 import {
   computeFullEngagement,
   getTierName,
@@ -57,6 +49,7 @@ import {
 } from '../util/functions'
 import type { AuthorizationCache } from './api/authCache'
 import type { Timespan } from './database'
+import { Temporal } from './temporal'
 
 /**
  * Represents a profile's ranking information including total and change metrics
@@ -489,10 +482,8 @@ export class API extends EventEmitter {
   private server: Server
   /** Runtime state containing application configuration */
   private state: RuntimeState
-  /** Temporal client for workflow orchestration */
-  private temporalClient!: TemporalClient
-  /** Temporal worker for executing workflow activities */
-  private temporalWorker!: TemporalWorker
+  /** Temporal client and worker wrapper instance */
+  private temporal: Temporal
 
   /**
    * Initializes Express router with endpoints for profiles, posts, stats, and wallet operations.
@@ -503,15 +494,18 @@ export class API extends EventEmitter {
     routers,
     state,
     db,
+    temporal,
   }: {
     authCache: AuthorizationCache
     routers: [string, Router][]
     state: RuntimeState
     db: Database
+    temporal: Temporal
   }) {
     super()
     this.state = state
     this.db = db
+    this.temporal = temporal
     //this.app = express()
     this.authCache = authCache
     this.router = Router({
@@ -592,43 +586,6 @@ export class API extends EventEmitter {
       ['httpServer', 'listening'],
       ['httpServerPort', `${API_SERVER_PORT}`],
     ])
-    // set up Temporal client and worker if complete configuration exists
-    if (
-      !Object.values(config.temporal).some(v => v === undefined || v === '')
-    ) {
-      try {
-        // Temporal client
-        this.temporalClient = new TemporalClient({
-          connection: await Connection.connect({
-            address: config.temporal.host,
-          }),
-          namespace: config.temporal.namespace,
-        })
-        // Temporal worker
-        const activities = {
-          ...this.temporalActivities,
-          ...this.temporalLocalActivities,
-        }
-        this.temporalWorker = await TemporalWorker.create({
-          connection: await NativeConnection.connect({
-            address: config.temporal.host,
-          }),
-          namespace: config.temporal.namespace,
-          taskQueue: config.temporal.taskQueue,
-          activities,
-          workflowBundle: {
-            codePath: require.resolve('./temporal/workflows'),
-          },
-        })
-        this.temporalWorker.run()
-      } catch (e) {
-        log([
-          ['init', 'temporal'],
-          ['status', 'warn'],
-          ['message', `"${String(e)}"`],
-        ])
-      }
-    }
   }
 
   /**
@@ -637,10 +594,7 @@ export class API extends EventEmitter {
   async close() {
     this.server?.closeAllConnections()
     this.server?.close()
-    await this.temporalClient?.connection?.close()
-    this.temporalWorker?.shutdown()
   }
-
   /**
    * GET Method Handlers
    */
@@ -829,7 +783,7 @@ export class API extends EventEmitter {
           if (dataType == 'activity') {
             const timespan =
               startTime.charAt(0).toUpperCase() + startTime.slice(1)
-            result = (await this.temporalActivities.queryWorkflow({
+            result = (await this.temporal.activities.queryWorkflow({
               workflowId: config.temporal.api.chartsWalletActivity.workflowId,
               queryType:
                 config.temporal.api.chartsWalletActivity.queryType + timespan,
@@ -1329,7 +1283,7 @@ export class API extends EventEmitter {
         if (
           !new Message(body.instanceId).verify(
             Address.fromPublicKeyHash(
-              Buffer.from(body.scriptPayload, 'hex'),
+              BufferUtil.from(body.scriptPayload, 'hex'),
               Networks.livenet,
             ),
             body.signature,
@@ -1348,7 +1302,7 @@ export class API extends EventEmitter {
           throw new Error(registrationResult.error)
         }
         // TODO: trigger Temporal workflow to fund the new instance
-        await this.temporalClient.workflow.signalWithStart(
+        await this.temporal.client.workflow.signalWithStart(
           config.temporal.command.workflowType,
           {
             signal: config.temporal.command.signal,
@@ -1408,7 +1362,7 @@ export class API extends EventEmitter {
         const message = `generate-referral:${validated.scriptPayload}`
         try {
           const address = Address.fromPublicKeyHash(
-            Buffer.from(validated.scriptPayload, 'hex'),
+            BufferUtil.from(validated.scriptPayload, 'hex'),
             Networks.livenet,
           )
           if (!new Message(message).verify(address, body.signature)) {
@@ -1530,7 +1484,7 @@ export class API extends EventEmitter {
         const message = `redeem-referral:${validatedCode.code}:${validated.scriptPayload}`
         try {
           const address = Address.fromPublicKeyHash(
-            Buffer.from(validated.scriptPayload, 'hex'),
+            BufferUtil.from(validated.scriptPayload, 'hex'),
             Networks.livenet,
           )
           if (!new Message(message).verify(address, body.signature)) {
@@ -1618,7 +1572,7 @@ export class API extends EventEmitter {
         )
         // Signal Temporal to process the first faucet drip (milestone 1)
         try {
-          await this.temporalClient.workflow.signalWithStart(
+          await this.temporal.client.workflow.signalWithStart(
             config.temporal.command.workflowType,
             {
               signal: config.temporal.command.signal,
@@ -1753,215 +1707,6 @@ export class API extends EventEmitter {
         ])
         return sendJSON(res, { error: e.message }, HTTP.INTERNAL_SERVER_ERROR)
       }
-    },
-  }
-  /**
-   * Temporal Activity definitions (must be arrow functions)
-   */
-  temporalActivities = {
-    /**
-     * List all workflows matching the query and return the workflow execution info
-     * @param query - The SQL-like query to list workflows
-     * @returns The list of workflow executions
-     */
-    listWorkflows: async ({ query }: { query: string }) => {
-      const queryResult = this.temporalClient.workflow.list({ query })
-      const workflowList: WorkflowExecutionInfo[] = []
-      for await (const workflowInfo of queryResult) {
-        workflowList.push(workflowInfo)
-      }
-      return workflowList
-    },
-
-    /**
-     * Get the result of a workflow execution
-     * @param workflowId - The ID of the workflow for which to get the result
-     * @returns The result of the workflow execution
-     */
-    resultWorkflow: async ({
-      workflowId,
-      runId,
-    }: {
-      workflowId: string
-      runId?: string
-    }) => {
-      return await this.temporalClient.workflow.result(workflowId, runId, {
-        followRuns: true,
-      })
-    },
-
-    /**
-     * Query a Temporal workflow, returning the query result
-     * @param workflowId - The ID of the workflow for which to query
-     * @param queryType - The type of query to execute
-     * @returns The query result
-     */
-    queryWorkflow: async ({
-      workflowId,
-      queryType,
-    }: {
-      workflowId: string
-      queryType: string
-    }) => {
-      const handle = this.temporalClient.workflow.getHandle(workflowId)
-      return await handle.query(queryType)
-    },
-
-    /**
-     * Start a Temporal workflow, returning a handle to the workflow
-     * @param param0 - Workflow type, taskQueue, workflowId, searchAttributes, and args
-     * @returns Workflow handle
-     */
-    startWorkflow: async ({
-      taskQueue,
-      workflowType,
-      workflowId,
-      searchAttributes,
-      args,
-    }: {
-      taskQueue: string
-      workflowType: string
-      workflowId: string
-      searchAttributes?: SearchAttributes
-      args?: unknown[]
-    }) => {
-      return await this.temporalClient.workflow.start(workflowType, {
-        taskQueue,
-        workflowId,
-        searchAttributes,
-        args,
-      })
-    },
-
-    /**
-     * Signal a Temporal workflow, returning a handle to the workflow
-     * @param param0 - Workflow type, taskQueue, workflowId, args, signal, and signalArgs
-     * @returns Workflow handle
-     */
-    signalWithStart: async ({
-      taskQueue,
-      workflowType,
-      workflowId,
-      args,
-      signal,
-      signalArgs,
-    }: {
-      taskQueue: string
-      workflowType: string
-      workflowId: string
-      args?: unknown[]
-      signal: string | SignalDefinition
-      signalArgs?: unknown[]
-    }) => {
-      return await this.temporalClient.workflow.signalWithStart(workflowType, {
-        taskQueue,
-        workflowId,
-        args,
-        signal,
-        signalArgs,
-      })
-    },
-
-    /**
-     * Retrieves the activity for a wallet rank based on the provided script payload and optional time range.
-     * @param scriptPayload - The script payload to get activity for
-     * @param startTime - The start time to get activity for
-     * @param endTime - The end time to get activity for
-     * @returns Wallet rank activity
-     */
-    getWalletRankActivity: async (
-      scriptPayload: string,
-      startTime?: Timespan,
-      endTime?: Timespan,
-    ) => {
-      if (!startTime) {
-        startTime = 'today'
-      }
-      if (!endTime) {
-        endTime = 'now'
-      }
-      const address = Address.fromPublicKeyHash(
-        Buffer.from(scriptPayload, 'hex'),
-        Networks.mainnet,
-      )
-      const activity = await this.db.ipcGetScriptPayloadActivity(
-        {
-          startTime,
-          endTime,
-          scriptPayload,
-        },
-        'api',
-      )
-      return {
-        address: address.toXAddress(),
-        activity,
-      }
-    },
-
-    /**
-     * Retrieves the activity summary for a wallet rank based on the provided script payload and optional time range.
-     * @param startTime - The start time to get activity for
-     * @param endTime - The end time to get activity for
-     * @returns Wallet rank activity summary
-     */
-    getWalletRankActivitySummary: async (
-      startTime: Timespan,
-      endTime?: Timespan,
-    ) => {
-      return await this.db.ipcGetScriptPayloadActivitySummary({
-        startTime,
-        endTime,
-      })
-    },
-
-    /**
-     * Retrieves the top ranked profiles of all time.
-     * @returns Top ranked profiles
-     */
-    getAllTimeTopRankedProfiles: async (): Promise<RankTopProfile[]> => {
-      return await this.db.getStatsPlatformRanked({
-        dataType: 'profileId',
-        rankingType: 'top',
-        startTime: 'all',
-      })
-    },
-
-    /**
-     * Retrieves the top ranked profiles for a platform based on the provided time range.
-     * @param startTime - The start time to get profiles for
-     * @returns Top ranked profiles
-     */
-    getTopRankedProfiles: async (
-      startTime: Timespan,
-    ): Promise<RankTopProfile[]> => {
-      return await this.db.getStatsPlatformRanked({
-        dataType: 'profileId',
-        rankingType: 'top',
-        startTime,
-      })
-    },
-
-    /**
-     * Retrieves the top ranked posts for a platform based on the provided time range.
-     * @param startTime - The start time to get posts for
-     * @returns Top ranked posts
-     */
-    getTopRankedPosts: async (startTime: Timespan): Promise<RankTopPost[]> => {
-      return await this.db.getStatsPlatformRanked({
-        dataType: 'postId',
-        rankingType: 'top',
-        startTime,
-      })
-    },
-    //getRankedProfile: this.db.apiGetPlatformProfile,
-    //getRankedPost: this.db.apiGetPlatformProfilePost,
-  }
-  temporalLocalActivities = {
-    /**
-     * Async wrapper for `getTimestampUTC`
-     */
-    getTimestampUTC: async (timespan: Timespan) => {
-      return getTimestampUTC(timespan)
     },
   }
 }

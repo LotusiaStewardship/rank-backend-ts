@@ -5,7 +5,7 @@ import {
 } from './constants'
 import { ScriptChunkPlatformUTF8 } from 'xpi-ts/lib/rank'
 import { Block } from 'lotus-nng-client'
-import { Address, Message, Networks } from 'xpi-ts/lib/bitcore'
+import { Address, BufferUtil, Message, Networks } from 'xpi-ts/lib/bitcore'
 import type { Request, Response } from 'express'
 import type { TopicCategory, Topic } from '../lib/push'
 import { AuthorizationPayload } from '../lib/api/authCache'
@@ -341,7 +341,7 @@ export const Validate = {
     }
     // convert scriptPayload to Address
     const address = Address.fromPublicKeyHash(
-      Buffer.from(scriptPayload, 'hex'),
+      BufferUtil.from(scriptPayload, 'hex'),
       Networks.livenet,
     )
     // verify message signature
