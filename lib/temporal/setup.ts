@@ -63,7 +63,7 @@ export class Temporal {
           taskQueue: config.temporal.taskQueue,
           activities,
           workflowBundle: {
-            codePath: require.resolve('./temporal/workflows'),
+            codePath: require.resolve('./workflows'),
           },
         })
         this.worker.run()
