@@ -69,8 +69,11 @@ export class AuthorizationCache {
     authorizationHeader: string,
   ): boolean {
     try {
-      const [authData, authPayloadStr, signature] =
-        processAuthorizationHeader(authorizationHeader)
+      const result = processAuthorizationHeader(authorizationHeader)
+      if (!result) {
+        return false
+      }
+      const { authData, authPayloadStr, signature } = result
       // make sure the instanceId is provided
       if (!authData?.instanceId) {
         return false
@@ -90,7 +93,7 @@ export class AuthorizationCache {
       if (
         !hasCachedEntry ||
         (hasCachedEntry &&
-          this.cache.get(instanceId).scriptPayload !== authData.scriptPayload)
+          this.cache.get(instanceId)?.scriptPayload !== authData.scriptPayload)
       ) {
         // returning false will trigger check for `Authorization: BlockDataSig` header
         if (
@@ -125,7 +128,7 @@ export class AuthorizationCache {
       // log the error
       log([
         ['error', 'AuthorizationCache.isRequestAuthorized'],
-        ['message', e.message],
+        ['message', (e as Error).message],
       ])
       return false
     }

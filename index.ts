@@ -12,13 +12,14 @@ import {
   NNG_PUB_DEFAULT_SOCKET_PATH,
   NNG_RPC_DEFAULT_SOCKET_PATH,
 } from './util/constants'
+import config from './config'
 
 type Exception = [number | string, string]
 /**
  * SETUP
  */
 // Instantiate all required modules
-const db = new Database(process.env.DATABASE_URL)
+const db = new Database(config.datasourceUrl)
 const temporal = new Temporal(db)
 const subscriptionManager = new SubscriptionManager(db)
 const state = new RuntimeState()
@@ -68,7 +69,7 @@ async function close(exitCode: number | string, exitError?: string) {
   if (exitError?.length) {
     log([
       ['shutdown', 'fatal'],
-      ['error', `${ERR[exitCode]}`],
+      ['error', `${ERR[exitCode as number]}`],
       [`code`, `${exitCode}`],
       [`debug`, `${exitError}`],
     ])
@@ -99,5 +100,5 @@ async function close(exitCode: number | string, exitError?: string) {
   await temporal.init()
 })().catch(e => {
   const [exitCode, exitError] = e as Exception
-  return close(ERR[exitCode], exitError)
+  return close(ERR[exitCode as number], exitError)
 })

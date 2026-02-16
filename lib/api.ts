@@ -75,8 +75,8 @@ export type RankTopProfile = {
     /** Number of new negative votes */
     votesNegative: number
   }
-  /** Array of timestamps for vote history */
-  votesTimespan: string[]
+  /** Array of votes within the timespan, or null if not available */
+  votesTimespan: string[] | null
   /** Unique identifier for the profile */
   profileId: string
   /** The social media platform */
@@ -108,7 +108,11 @@ export type Endpoint =
   | 'referralGenesis'
   | 'engagement'
 /** Handler function type for processing API endpoint requests */
-export type EndpointHandler = (req: Request, res: Response) => void
+export type EndpointHandler = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => void
 /** Available parameter names that can be validated in API endpoints */
 export type EndpointParameter =
   | 'platform'
@@ -128,7 +132,7 @@ export type EndpointParameterHandler = (
   req: Request,
   res: Response,
   next: NextFunction,
-  param: string | undefined,
+  param: string | ScriptChunkPlatformUTF8 | ChartType,
 ) => void
 
 /** This type is data returned from the database, not Temporal */
@@ -192,10 +196,12 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req: Request,
     res: Response,
     next: NextFunction,
-    platform: ScriptChunkPlatformUTF8,
+    platform: string,
   ) => {
-    platform = platform.toLowerCase() as ScriptChunkPlatformUTF8
-    const platformParams = PlatformConfiguration.get(platform)
+    platform = platform.toLowerCase()
+    const platformParams = PlatformConfiguration.get(
+      platform as ScriptChunkPlatformUTF8,
+    )
     if (!platformParams) {
       return sendJSON(
         res,
@@ -243,7 +249,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
   ) => {
     postId = postId.toLowerCase()
     const platform = req.params.platform as ScriptChunkPlatformUTF8
-    const { postId: postIdParams } = PlatformConfiguration.get(platform)
+    const { postId: postIdParams } = PlatformConfiguration.get(platform)!
     if (!postId.match(postIdParams.regex)) {
       return sendJSON(
         res,
@@ -279,9 +285,9 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req: Request,
     res: Response,
     next: NextFunction,
-    chartType: ChartType,
+    chartType: string,
   ) => {
-    switch (chartType) {
+    switch (chartType as ChartType) {
       case 'wallet':
         break
       default:
@@ -303,9 +309,9 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req: Request,
     res: Response,
     next: NextFunction,
-    dataType: ChartDataType,
+    dataType: string,
   ) => {
-    switch (dataType) {
+    switch (dataType as ChartDataType) {
       case 'activity':
         break
       case 'summary':
@@ -329,13 +335,14 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req: Request,
     res: Response,
     next: NextFunction,
-    searchType: 'profile' | 'post',
+    searchType: string,
   ) => {
-    const validated = Validate.searchType(searchType)
+    const validated = Validate.searchType(searchType as 'profile' | 'post')
     if (validated.error) {
       return sendJSON(res, { error: validated.error }, validated.statusCode)
     }
-    req.params.searchType = validated.searchType
+    // searchType is validated, so it is safe to cast
+    req.params.searchType = validated.searchType!
     next()
   },
 
@@ -350,8 +357,15 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     scriptPayload: string | undefined,
   ) => {
     const result = Validate.scriptPayload(scriptPayload)
+    if (!result.scriptPayload) {
+      return sendJSON(
+        res,
+        { error: `invalid script payload specified` },
+        HTTP.BAD_REQUEST,
+      )
+    }
     // TODO: handle signature validation here
-    req.params.scriptPayload = result?.scriptPayload
+    req.params.scriptPayload = result.scriptPayload
     next()
   },
 
@@ -363,11 +377,11 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     req: Request,
     res: Response,
     next: NextFunction,
-    statsRoute: StatsRoute,
+    statsRoute: string,
   ) => {
-    statsRoute = statsRoute.toLowerCase() as StatsRoute
+    statsRoute = statsRoute.toLowerCase()
     // Must be a defined route
-    if (!StatsRoutes[statsRoute]) {
+    if (!StatsRoutes[statsRoute as StatsRoute]) {
       return sendJSON(
         res,
         { error: `invalid stats path specified` },
@@ -395,7 +409,8 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
         HTTP.BAD_REQUEST,
       )
     }
-    req.params.pageNum = pageNum
+    // pageNum is validated, so it is safe to cast
+    req.params.pageNum = pageNum!
     next()
   },
 
@@ -421,7 +436,8 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     if (pageSizeNum > 40) {
       pageSize = '40'
     }
-    req.params.pageSize = pageSize
+    // pageSize is validated, so it is safe to cast
+    req.params.pageSize = pageSize!
     next()
   },
 
@@ -439,7 +455,8 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     if (result.error) {
       return sendJSON(res, { ...result }, result.statusCode)
     }
-    req.params.instanceId = instanceId
+    // instanceId is validated, so it is safe to cast
+    req.params.instanceId = instanceId!
     next()
   },
 
@@ -453,7 +470,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     next: NextFunction,
     txid: string | undefined,
   ) => {
-    if (!txid.match(/^[0-9a-fA-F]{64}$/)) {
+    if (!txid?.match(/^[0-9a-fA-F]{64}$/)) {
       return sendJSON(
         res,
         { error: `invalid txid specified` },
@@ -479,7 +496,7 @@ export class API extends EventEmitter {
   /** Express router for handling API routes */
   private router: Router
   /** HTTP server instance */
-  private server: Server
+  private server!: Server
   /** Runtime state containing application configuration */
   private state: RuntimeState
   /** Temporal client and worker wrapper instance */
@@ -779,20 +796,27 @@ export class API extends EventEmitter {
 
       switch (chartType) {
         case 'wallet': {
-          let result: object
+          let data:
+            | WalletRankActivityWorkflowResult
+            | ChartWalletSummary
+            | null = null
           if (dataType == 'activity') {
+            // Capitalize first letter of timespan to match Temporal query type naming convention
+            // e.g., 'day' -> 'Day' to form query type like 'getActivityDay'
             const timespan =
               startTime.charAt(0).toUpperCase() + startTime.slice(1)
-            result = (await this.temporal.activities.queryWorkflow({
+            // Query the Temporal workflow for cached wallet activity data
+            const result = await this.temporal.activities.queryWorkflow({
               workflowId: config.temporal.api.chartsWalletActivity.workflowId,
               queryType:
                 config.temporal.api.chartsWalletActivity.queryType + timespan,
-            })) as WalletRankActivityWorkflowResult
+            })
+            data = result as WalletRankActivityWorkflowResult
           }
           if (dataType == 'summary') {
-            result = (await this.db.apiChartWalletSummary(
-              startTime,
-            )) as ChartWalletSummary
+            // Fetch wallet summary directly from database for aggregate statistics
+            const result = await this.db.apiChartWalletSummary(startTime)
+            data = result as ChartWalletSummary
           }
           const t1 = (performance.now() - t0).toFixed(3)
           log([
@@ -800,9 +824,12 @@ export class API extends EventEmitter {
             ...toLogEntries(req.params),
             ['elapsed', `${t1}ms`],
           ])
-          return sendJSON(res, result, HTTP.OK)
+          // Return empty object if no data was retrieved (shouldn't happen with valid dataType)
+          return sendJSON(res, data ?? {}, HTTP.OK)
         }
         default:
+          // This case should not be reached due to middleware validation,
+          // but serves as a fallback for safety
           return sendJSON(
             res,
             { error: `invalid chart type specified` },
@@ -967,11 +994,19 @@ export class API extends EventEmitter {
         ...toLogEntries(req.params),
       ] as LogEntry[]
 
+      const authorizationHeader = req.headers['authorization']
+      if (!authorizationHeader) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        entries.push(['elapsed', `${t1}ms`])
+        log(entries)
+        return sendAuthChallenge(res, this.state.checkpoint)
+      }
+
       // check if the instanceId is authorized
       if (
         !this.authCache.isRequestAuthorized(
           req.params.instanceId,
-          req.headers['authorization'],
+          authorizationHeader,
         )
       ) {
         const t1 = (performance.now() - t0).toFixed(3)
@@ -982,14 +1017,16 @@ export class API extends EventEmitter {
       // REQUEST IS NOW AUTHORIZED
 
       // validate the scriptPayload GET parameter
-      const { scriptPayload, error } = Validate.scriptPayload(
-        req.params.scriptPayload,
-      )
-      if (error) {
+      const validationResult = Validate.scriptPayload(req.params.scriptPayload)
+      if (validationResult.error) {
         const t1 = (performance.now() - t0).toFixed(3)
         entries.push(['elapsed', `${t1}ms`])
         log(entries)
-        return sendJSON(res, { error }, HTTP.BAD_REQUEST)
+        return sendJSON(
+          res,
+          { error: validationResult.error },
+          HTTP.BAD_REQUEST,
+        )
       }
 
       // proceed with request
@@ -998,13 +1035,13 @@ export class API extends EventEmitter {
       try {
         const data = req.path.startsWith('/wallet/summary')
           ? await this.db.ipcGetScriptPayloadActivitySummary({
-              scriptPayload,
+              scriptPayload: validationResult.scriptPayload,
               startTime,
               endTime,
             })
           : await this.db.ipcGetScriptPayloadActivity(
               {
-                scriptPayload,
+                scriptPayload: validationResult.scriptPayload,
                 startTime,
                 endTime,
               },

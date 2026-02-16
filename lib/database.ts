@@ -1735,15 +1735,25 @@ export class Database {
   }
   /**
    * Generates database statements for upserting profiles and their associated posts
+   *
+   * Statements are structured in three phases to satisfy FK constraints:
+   *   Phase 1: Upsert Profiles and Posts (parent records, no child relations)
+   *   Phase 2: Create RankTransactions and RankComments (child records via Profile relation)
+   *   Phase 3: Connect RankTransactions to Posts and connectOrCreate RankComments on Posts
+   *
    * @param profiles - Map of profiles to generate upsert statements for
    * @returns Array of database upsert statements
    */
   async toProfileUpsertStatements(profiles: ProfileMap) {
-    const upserts: ReturnType<
+    // Phase 1: Upsert parent records (Profiles and Posts) without child relations
+    const phase1: ReturnType<
       typeof this.db.post.upsert | typeof this.db.profile.upsert
     >[] = []
-    const profilesIterable = toAsyncIterable(profiles)
-    for await (const [id, profile] of profilesIterable) {
+    // Phase 2: Create child records (RankTransactions and RankComments) via Profile relation
+    const phase2: ReturnType<typeof this.db.profile.update>[] = []
+    // Phase 3: Connect RankTransactions to Posts and connectOrCreate RankComments on Posts
+    const phase3: ReturnType<typeof this.db.post.update>[] = []
+    for (const [id, profile] of profiles) {
       const {
         platform,
         ranks,
@@ -1754,23 +1764,8 @@ export class Database {
         votesPositive,
         votesNegative,
       } = profile
-      const ranksCreateMany = ranks
-        ? {
-            createMany: {
-              data: ranks,
-            },
-          }
-        : undefined
-      const commentsCreateMany = comments
-        ? {
-            createMany: {
-              data: comments,
-            },
-          }
-        : undefined
-      // push profile upsert first
-      // These upserts will create the RankTransaction records
-      upserts.push(
+      // Phase 1: Upsert the Profile without ranks or comments
+      phase1.push(
         this.db.profile.upsert({
           where: {
             platform_id: { platform, id },
@@ -1785,13 +1780,9 @@ export class Database {
             votesPositive,
             votesNegative,
             account: { create: { id: randomUUID() } },
-            ranks: ranksCreateMany,
-            comments: commentsCreateMany,
           },
           // profile exists
           update: {
-            ranks: ranksCreateMany,
-            comments: commentsCreateMany,
             ranking: {
               increment: ranking,
             },
@@ -1810,26 +1801,70 @@ export class Database {
           },
         }),
       )
-      // push any post upsert(s) after Profile exists
-      // These upserts will connect the RankTransaction records to the Post
+      // Phase 1: Upsert Posts without rank connections or comments
       if (profile.posts) {
         const posts = toAsyncIterable(profile.posts)
-        for await (const [id, post] of posts) {
+        for await (const [postId, post] of posts) {
           const {
-            platform,
+            platform: postPlatform,
             profileId,
             data, // data is the comment text for Lotusia posts
-            ranking,
-            satsPositive,
-            satsNegative,
-            votesPositive,
-            votesNegative,
-            ranks,
-            comments,
+            ranking: postRanking,
+            satsPositive: postSatsPositive,
+            satsNegative: postSatsNegative,
+            votesPositive: postVotesPositive,
+            votesNegative: postVotesNegative,
+            ranks: postRanks,
+            comments: postComments,
           } = post
-          const ranksConnect = ranks
+          const postIncrements = {
+            ranking: {
+              increment: postRanking,
+            },
+            satsPositive: {
+              increment: postSatsPositive,
+            },
+            satsNegative: {
+              increment: postSatsNegative,
+            },
+            votesPositive: {
+              increment: postVotesPositive,
+            },
+            votesNegative: {
+              increment: postVotesNegative,
+            },
+          }
+          phase1.push(
+            this.db.post.upsert({
+              where: {
+                platform_profileId_id: {
+                  platform: postPlatform,
+                  profileId,
+                  id: postId,
+                },
+              },
+              // post doesn't exist
+              create: {
+                id: postId,
+                platform: postPlatform,
+                profileId,
+                data, // data is the comment text for Lotusia posts
+                ranking: postRanking,
+                satsPositive: postSatsPositive,
+                satsNegative: postSatsNegative,
+                votesPositive: postVotesPositive,
+                votesNegative: postVotesNegative,
+              },
+              // post exists
+              update: {
+                ...postIncrements,
+              },
+            }),
+          )
+          // Phase 3: Connect RankTransactions to Posts and connectOrCreate RankComments
+          const ranksConnect = postRanks?.length
             ? {
-                connect: ranks.map(rank => ({
+                connect: postRanks.map(rank => ({
                   txid_outIdx: {
                     txid: rank.txid,
                     outIdx: rank.outIdx,
@@ -1841,9 +1876,9 @@ export class Database {
           // necessarily associated with the profile. If comments are defined
           // in this post, then we want to create the comment record(s) in the
           // upsert statement(s) below
-          const commentsConnectOrCreate = comments
+          const commentsConnectOrCreate = postComments?.length
             ? {
-                connectOrCreate: comments.map(comment => ({
+                connectOrCreate: postComments.map(comment => ({
                   where: {
                     txid: comment.txid,
                   },
@@ -1851,59 +1886,55 @@ export class Database {
                 })),
               }
             : undefined
-          const increments = {
-            ranking: {
-              increment: ranking,
-            },
-            satsPositive: {
-              increment: satsPositive,
-            },
-            satsNegative: {
-              increment: satsNegative,
-            },
-            votesPositive: {
-              increment: votesPositive,
-            },
-            votesNegative: {
-              increment: votesNegative,
-            },
-          }
-          // upsert the post first
-          upserts.push(
-            this.db.post.upsert({
-              where: {
-                platform_profileId_id: {
-                  platform,
-                  profileId,
-                  id,
+          if (ranksConnect || commentsConnectOrCreate) {
+            phase3.push(
+              this.db.post.update({
+                where: {
+                  platform_profileId_id: {
+                    platform: postPlatform,
+                    profileId,
+                    id: postId,
+                  },
                 },
-              },
-              // post doesn't exist
-              create: {
-                id,
-                platform,
-                profileId,
-                data, // data is the comment text for Lotusia posts
-                ranking,
-                satsPositive,
-                satsNegative,
-                votesPositive,
-                votesNegative,
-                ranks: ranksConnect,
-                comments: commentsConnectOrCreate,
-              },
-              // post exists
-              update: {
-                ranks: ranksConnect,
-                comments: commentsConnectOrCreate,
-                ...increments,
-              },
-            }),
-          )
+                data: {
+                  ranks: ranksConnect,
+                  comments: commentsConnectOrCreate,
+                },
+              }),
+            )
+          }
         }
       }
+      // Phase 2: Create RankTransactions and RankComments via Profile relation
+      const ranksCreateMany = ranks?.length
+        ? {
+            createMany: {
+              data: ranks,
+            },
+          }
+        : undefined
+      const commentsCreateMany = comments?.length
+        ? {
+            createMany: {
+              data: comments,
+            },
+          }
+        : undefined
+      if (ranksCreateMany || commentsCreateMany) {
+        phase2.push(
+          this.db.profile.update({
+            where: {
+              platform_id: { platform, id },
+            },
+            data: {
+              ranks: ranksCreateMany,
+              comments: commentsCreateMany,
+            },
+          }),
+        )
+      }
     }
-    return upserts
+    return [...phase1, ...phase2, ...phase3]
   }
   /**
    * Generates database statements for rewinding profiles and their associated posts

@@ -1008,9 +1008,8 @@ export class Indexer extends EventEmitter {
     const outpoints: Outpoint[] = []
     const missing: IndexedTransaction[] = []
     for (const tx of blockTxs) {
-      if (this.mempool.has(`${tx.txid}_${tx.outIdx}`)) {
-        // Mempool contains this block tx, so delete it from cache
-        this.mempool.delete(`${tx.txid}_${tx.outIdx}`)
+      // Mempool contains this block tx, so delete it from cache
+      if (this.mempool.delete(`${tx.txid}_${tx.outIdx}`)) {
         outpoints.push({ txid: tx.txid, outIdx: tx.outIdx })
         continue
       }
@@ -1121,13 +1120,14 @@ export class Indexer extends EventEmitter {
    */
   private addRankCommentToProfileQueue = (rnkc: TransactionRNKC): void => {
     // Each RNKC is a Lotusia post from a profile, so we add it to the profile queue
+    const profile = this.toProfileFromRNKC(rnkc)
     this.profileQueue.set(
       rnkc.scriptPayload, // scriptPayload is the profileId for Lotusia posts
-      this.toLotusiaProfileFromRNKC(rnkc),
+      profile,
     )
     // Each RNKC is also a comment on a profile or post, so we add it to the replied
     // profile's queue as well
-    const repliedProfile = this.toProfileFromRNKC(rnkc)
+    const repliedProfile = this.toRepliedProfileFromRNKC(rnkc)
     if (repliedProfile) {
       this.profileQueue.set(repliedProfile.id, repliedProfile)
     }
@@ -1222,7 +1222,7 @@ export class Indexer extends EventEmitter {
    * @param rnkc `IndexedTransactionRNKC` object
    * @returns Lotusia-specific `Profile` object
    */
-  private toLotusiaProfileFromRNKC(rnkc: TransactionRNKC): Profile {
+  private toProfileFromRNKC(rnkc: TransactionRNKC): Profile {
     // pull out the fields we need to create a new profile/post
     const { scriptPayload: profileId, txid: postId, data } = rnkc
     // Check if the profile exists in the queue, otherwise create
@@ -1268,7 +1268,7 @@ export class Indexer extends EventEmitter {
    * @param rnkc `IndexedTransactionRNKC` object
    * @returns `Profile` object
    */
-  private toProfileFromRNKC(rnkc: TransactionRNKC): Profile | null {
+  private toRepliedProfileFromRNKC(rnkc: TransactionRNKC): Profile | null {
     // pull out the fields we need to create a new profile/post
     const {
       inReplyToPlatform,
@@ -1277,8 +1277,8 @@ export class Indexer extends EventEmitter {
       ...partialRNKC
     } = rnkc
     // if there is no profileId, return undefined
-    // This is a valid RNKC transaction, but it doesn't have a profileId
-    // so we can't add it to the profile queue
+    // This is a valid RNKC transaction, but it doesn't have a profileId so we
+    // can't add it to the profile queue
     if (!inReplyToProfileId) {
       return null
     }
@@ -1301,6 +1301,9 @@ export class Indexer extends EventEmitter {
     // Add the RNKC to the post's comments
     let post = profile.posts.get(inReplyToPostId)
     if (post) {
+      if (!post.comments) {
+        post.comments = []
+      }
       post.comments.push(partialRNKC)
     } else {
       post = this.toPost({
@@ -1325,12 +1328,12 @@ export class Indexer extends EventEmitter {
       profileId: post?.profileId,
       ranks: post?.ranks,
       data: post?.data,
-      comments: post?.comments,
-      ranking: post?.ranking ?? 0n,
-      satsPositive: post?.satsPositive ?? 0n,
-      satsNegative: post?.satsNegative ?? 0n,
-      votesPositive: post?.votesPositive ?? 0,
-      votesNegative: post?.votesNegative ?? 0,
+      comments: post?.comments || [],
+      ranking: post?.ranking || 0n,
+      satsPositive: post?.satsPositive || 0n,
+      satsNegative: post?.satsNegative || 0n,
+      votesPositive: post?.votesPositive || 0,
+      votesNegative: post?.votesNegative || 0,
     }
   }
   /**
@@ -1343,13 +1346,13 @@ export class Indexer extends EventEmitter {
       id: profile?.id,
       platform: profile?.platform,
       ranks: profile?.ranks,
-      comments: profile?.comments,
-      ranking: profile?.ranking ?? 0n,
-      satsPositive: profile?.satsPositive ?? 0n,
-      satsNegative: profile?.satsNegative ?? 0n,
-      votesPositive: profile?.votesPositive ?? 0,
-      votesNegative: profile?.votesNegative ?? 0,
-      posts: profile?.posts ?? new Map(),
+      comments: profile?.comments || [],
+      ranking: profile?.ranking || 0n,
+      satsPositive: profile?.satsPositive || 0n,
+      satsNegative: profile?.satsNegative || 0n,
+      votesPositive: profile?.votesPositive || 0,
+      votesNegative: profile?.votesNegative || 0,
+      posts: profile?.posts || new Map(),
     }
   }
   /**

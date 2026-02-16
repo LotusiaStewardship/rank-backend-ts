@@ -63,7 +63,7 @@ export async function isValidInstanceId({
   } catch (e) {
     log([
       ['api.error', 'isValidInstanceId'],
-      ['error', e.message],
+      ['error', (e as Error).message],
     ])
     return false
   }
@@ -164,11 +164,11 @@ export function toTopic(category: TopicCategory, subcategory: string): Topic {
  * @returns The script payload or null if invalid
  */
 export function extractScriptPayload(header: string): string | null {
-  const [authData] = processAuthorizationHeader(header)
-  if (!authData) {
+  const result = processAuthorizationHeader(header)
+  if (!result) {
     return null
   }
-  return authData.scriptPayload
+  return result.authData.scriptPayload
 }
 
 /**
@@ -179,21 +179,27 @@ export function extractScriptPayload(header: string): string | null {
  *   - Raw authorization data string or null if invalid
  *   - Signature string or null if invalid
  */
-export function processAuthorizationHeader(
-  header: string | undefined,
-): [AuthorizationPayload, string, string] {
+export function processAuthorizationHeader(header: string | undefined): {
+  authData: AuthorizationPayload
+  authPayloadStr: string
+  signature: string
+} | null {
   if (header === undefined) {
-    return [null, null, null]
+    return null
   }
   if (!isBase64(header)) {
-    return [null, null, null]
+    return null
   }
   const [authPayloadStr, signature] = Util.base64.decode(header).split(':::')
   if (!authPayloadStr || !signature) {
-    return [null, null, null]
+    return null
   }
   const authData = JSON.parse(authPayloadStr ?? '{}') as AuthorizationPayload
-  return [authData, authPayloadStr, signature]
+  return {
+    authData,
+    authPayloadStr,
+    signature,
+  }
 }
 
 /**
@@ -238,9 +244,7 @@ export const Util = {
      * @returns The decoded string
      */
     decode(str: string) {
-      if (!isBase64(str)) {
-        throw new Error('Invalid base64 string')
-      }
+      // Don't validate the string; validation should be handled by the caller
       return Buffer.from(str, 'base64').toString('utf8')
     },
   },
