@@ -192,6 +192,22 @@ Extends `RankTopProfile` (identical structure, used for posts).
 }
 ```
 
+### FeedResponse
+
+```typescript
+{
+  posts: PostAPI[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalPages: number;
+    totalItems: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+  };
+}
+```
+
 ### ChartWalletSummary
 
 ```typescript
@@ -282,7 +298,90 @@ Extends `RankTopProfile` (identical structure, used for posts).
 
 ## GET Endpoints
 
-### GET /profiles/:page?/:pageSize?
+### GET `/api/v1/feed/posts`
+
+Retrieves a paginated feed of posts with profile data, rankings, RNKC comment content, and reply threads. This is the primary unified feed endpoint.
+
+**Query Parameters:**
+
+- `platform` (optional): Filter by platform (e.g., `twitter`, `lotusia`)
+- `sortBy` (optional): Sort mode — `ranking` (default), `recent`, or `controversial`
+- `startTime` (optional): Time filter — only posts with votes in this window (e.g., `day`, `week`, `month`, `all`)
+- `page` (optional): Page number (default: 1)
+- `pageSize` (optional): Items per page (default: 20, max: 20)
+- `scriptPayload` (optional): Wallet P2PKH hex — includes Vote-to-Reveal (R1) `postMeta` in response
+
+**Response:** `FeedResponse` — `{ posts: PostAPI[], pagination: { page, pageSize, totalPages, totalItems, hasNext, hasPrev } }`
+
+Each `PostAPI` includes:
+
+- Post ranking metrics (`ranking`, `satsPositive`, `satsNegative`, `votesPositive`, `votesNegative`)
+- Parent `profile` metrics
+- Lotusia post content (`data`, `inReplyTo*`, `timestamp`, `firstSeen`) when applicable
+- Reply threads (`comments: PostAPI[]`)
+- Wallet vote metadata (`postMeta`) when `scriptPayload` is provided
+
+**Examples:**
+
+```bash
+GET /api/v1/feed/posts?sortBy=ranking&pageSize=20
+GET /api/v1/feed/posts?platform=lotusia&sortBy=recent&startTime=week
+GET /api/v1/feed/posts?sortBy=controversial&scriptPayload=abc123...
+```
+
+### GET `/api/v1/feed/trending/:windowHours?/:limit?`
+
+Retrieves trending posts based on recent vote activity volume. Returns full `PostAPI` objects ordered by activity count.
+
+**Path Parameters:**
+
+- `windowHours` (optional): Time window in hours (default: 24)
+- `limit` (optional): Maximum results (default: 20)
+
+**Query Parameters:**
+
+- `scriptPayload` (optional): Wallet P2PKH hex — includes Vote-to-Reveal `postMeta`
+
+**Response:** `PostAPI[]`
+
+**Examples:**
+
+```bash
+GET /api/v1/feed/trending/24/10
+GET /api/v1/feed/trending/6/20?scriptPayload=abc123...
+```
+
+### GET `/api/v1/feed/leaderboard/:period/:limit?`
+
+Retrieves a leaderboard of top voters ranked by total sats burned in a period, enriched with engagement data.
+
+**Path Parameters:**
+
+- `period`: Time period (`daily` or `weekly`)
+- `limit` (optional): Maximum entries (default: 20, max: 100)
+
+**Response:**
+
+```typescript
+Array<{
+  rank: number
+  scriptPayload: string
+  totalVotes: number
+  totalBurned: string
+  tier: number
+  currentStreak: number
+  engagementPoints: number
+}>
+```
+
+**Examples:**
+
+```bash
+GET /api/v1/feed/leaderboard/daily/10
+GET /api/v1/feed/leaderboard/weekly
+```
+
+### GET `/api/v1/profiles/:page?/:pageSize?`
 
 Retrieve a paginated list of all profiles.
 

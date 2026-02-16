@@ -13,6 +13,7 @@ import { Address, BufferUtil, Message, Networks } from 'xpi-ts/lib/bitcore'
 import {
   PlatformConfiguration,
   type ScriptChunkPlatformUTF8,
+  ScriptChunkSentimentUTF8,
   toProfileIdBuf,
 } from 'xpi-ts/lib/rank'
 import type { RuntimeState } from './state'
@@ -98,11 +99,16 @@ export type Endpoint =
   | 'stats'
   | 'instance'
   | 'wallet'
+  | 'feed'
+  | 'trending'
   | 'charts'
   | 'search'
   | 'tx'
   | 'txs'
   | 'voteActivity'
+  | 'feedPosts'
+  | 'feedTrending'
+  | 'leaderboard'
   | 'referralGenerate'
   | 'referralRedeem'
   | 'referralGenesis'
@@ -483,7 +489,9 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
 }
 
 /**
- * API class for handling HTTP requests and responses
+ * API class for handling HTTP requests and responses.
+ * Manages Express routes, authentication, and database interactions.
+ * Emits events for state changes and error handling.
  * @extends {EventEmitter}
  */
 export class API extends EventEmitter {
@@ -553,6 +561,12 @@ export class API extends EventEmitter {
       '/wallet/:instanceId/:scriptPayload/:startTime?/:endTime?',
       this.GET.wallet,
     )
+    this.router.get(
+      '/feed/trending/:windowHours?/:limit?',
+      this.GET.feedTrending,
+    )
+    this.router.get('/feed/posts', this.GET.feedPosts)
+    this.router.get('/feed/leaderboard/:period/:limit?', this.GET.leaderboard)
     this.router.get('/votes/:page?/:pageSize?', this.GET.voteActivity)
     this.router.get('/txs/:platform/:profileId/:page?/:pageSize?', this.GET.txs)
     this.router.get('/charts/:chartType/:dataType/:timespan?', this.GET.charts)
@@ -580,7 +594,9 @@ export class API extends EventEmitter {
     this.router.post('/admin/referral/genesis', this.POST.referralGenesis)
     this.router.post('/referral/generate', this.POST.referralGenerate)
     this.router.post('/referral/redeem', this.POST.referralRedeem)
-    // Get posts for a platform, up to 50 maximum per request
+    // Router POST endpoint for retrieving multiple posts by platform.
+    // Used by the extension when a user is scrolling their feed
+    // and needs to load their vote history for all posts in the feed
     this.router.post('/posts/:platform/:scriptPayload', this.POST.posts)
 
     // Router PATCH endpoint configuration (DEEPEST ROUTES FIRST!)
@@ -1100,7 +1116,147 @@ export class API extends EventEmitter {
     },
 
     /**
-     * Retrieves the engagement profile for a wallet
+     * Retrieves a paginated feed of posts with profile data, rankings, and comments.
+     * Supports filtering by platform, sorting by ranking/recency/controversy,
+     * time-based filtering, and optional wallet-specific vote metadata.
+     * @param req Express Request object with query params (platform, sortBy, startTime, page, pageSize, scriptPayload)
+     * @param res Express Response object to send back post feed data
+     * @returns JSON response with PostAPI[] and pagination metadata
+     */
+    feedPosts: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        const filters = {
+          platform: req.query.platform as ScriptChunkPlatformUTF8,
+          sortBy:
+            (req.query.sortBy as 'ranking' | 'recent' | 'controversial') ??
+            undefined,
+          startTime: req.query.startTime as Timespan,
+          page: req.query.page ? Number(req.query.page) : undefined,
+          pageSize: req.query.pageSize ? Number(req.query.pageSize) : undefined,
+          scriptPayload: req.query.scriptPayload as string,
+        }
+
+        const result = await this.db.apiGetFeedPosts(filters)
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.feedPosts'],
+          ['filters', JSON.stringify(filters)],
+          ['results', `${result.posts.length}`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, result, HTTP.OK)
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'get.feedPosts'],
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          { error: 'feed posts not found', message: e.message },
+          HTTP.NOT_FOUND,
+        )
+      }
+    },
+
+    /**
+     * Retrieves trending posts based on recent vote activity volume.
+     * Returns full PostAPI objects ordered by activity count in the time window.
+     * @param req Express Request object with windowHours and limit path params, optional scriptPayload query param
+     * @param res Express Response object to send back trending post data
+     * @returns JSON response with PostAPI[]
+     */
+    feedTrending: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        const windowHours = req.params.windowHours
+          ? Number(req.params.windowHours)
+          : 24
+        const limit = req.params.limit ? Number(req.params.limit) : 20
+        const scriptPayload = req.query.scriptPayload as string
+
+        const result = await this.db.apiGetTrendingPosts(
+          windowHours,
+          limit,
+          scriptPayload,
+        )
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.feedTrending'],
+          ['windowHours', `${windowHours}`],
+          ['limit', `${limit}`],
+          ['results', `${result.length}`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, result, HTTP.OK)
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'get.feedTrending'],
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          { error: 'trending posts not found', message: e.message },
+          HTTP.NOT_FOUND,
+        )
+      }
+    },
+
+    /**
+     * Retrieves a leaderboard of top voters ranked by total sats burned.
+     * Enriched with WalletEngagement data (tier, streak, EP) when available.
+     * @param req Express Request object with period ('daily'|'weekly') and optional limit path params
+     * @param res Express Response object to send back leaderboard data
+     * @returns JSON response with leaderboard entries
+     */
+    leaderboard: async (req: Request, res: Response) => {
+      const t0 = performance.now()
+      try {
+        const period = req.params.period as 'daily' | 'weekly'
+        const limit = req.params.limit ? Number(req.params.limit) : 20
+
+        if (period !== 'daily' && period !== 'weekly') {
+          return sendJSON(
+            res,
+            { error: 'period must be "daily" or "weekly"' },
+            HTTP.BAD_REQUEST,
+          )
+        }
+
+        const result = await this.db.apiGetLeaderboard(period, limit)
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'get.leaderboard'],
+          ['period', period],
+          ['limit', `${limit}`],
+          ['results', `${result.length}`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(res, result, HTTP.OK)
+      } catch (e) {
+        const t1 = (performance.now() - t0).toFixed(3)
+        log([
+          ['api', 'error'],
+          ['action', 'get.leaderboard'],
+          ['message', `"${String(e)}"`],
+          ['elapsed', `${t1}ms`],
+        ])
+        return sendJSON(
+          res,
+          { error: 'leaderboard not found', message: e.message },
+          HTTP.NOT_FOUND,
+        )
+      }
+    },
+
+    /**
+     * Retrieves engagement profile for a wallet
      * @param req Express Request object containing `scriptPayload` parameter
      * @param res Express Response object to send back engagement data
      * @returns JSON response with engagement data or error message

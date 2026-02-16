@@ -13,6 +13,14 @@ export const API_WALLET_RESULT_COUNT = 10
 export const API_SEARCH_RESULT_COUNT = 5
 export const API_AUTH_CACHE_ENTRY_TTL = 420 // blocks over 1 day time span
 /**
+ * Feed configuration
+ */
+export const API_FEED_DEFAULT_PAGE_SIZE = 20
+export const API_FEED_MAX_PAGE_SIZE = 100
+export const API_FEED_CACHE_TTL_SECONDS = 60 // 1 minute cache for feed queries
+export const API_FEED_TRENDING_WINDOW_HOURS = 24 // Trending content from last 24h
+export const API_FEED_CONTROVERSIAL_MIN_VOTES = 5 // Minimum votes for controversy calculation
+/**
  * NNG configuration
  */
 export const NNG_PUB_DEFAULT_SOCKET_PATH = `${os.homedir()}/.lotus/pub.pipe`
