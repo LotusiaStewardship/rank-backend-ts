@@ -1,4 +1,4 @@
-import { Output, Transaction } from 'xpi-ts/lib/bitcore'
+import { BufferUtil, Output, Transaction } from 'xpi-ts/lib/bitcore'
 import { Builder, ByteBuffer } from 'flatbuffers'
 //import { isIP } from 'validator'
 //import { resolve } from 'node:path/posix'
@@ -15,6 +15,8 @@ import {
   PushNotification,
 } from './push'
 import { Database } from './database'
+import { Temporal } from './temporal'
+import { FAUCET_MILESTONE_VOTES, FAUCET_DRIP_AMOUNTS } from '../util/constants'
 import type {
   TransactionOutputRANK,
   TransactionOutputRNKC,
@@ -43,6 +45,7 @@ import * as NNGInterface from 'lotus-nng-client/lib/nng-interface'
 import { ERR } from '../util/constants'
 import { log, type LogEntry } from '../util/functions'
 import config from '../config'
+import type { Buffer } from 'buffer/'
 /**
  * Runtime cache for quickly reconciling missing LOKAD txs with blocks
  *
@@ -101,6 +104,8 @@ export class Indexer extends EventEmitter {
   private profileQueue: ProfileMap
   /** Runtime state used across modules */
   private state: RuntimeState
+  /** Temporal instance for storing indexed data */
+  private temporal: Temporal
   /**
    * Creates a new Indexer instance that connects to lotusd via NNG sockets
    * @param db Database instance for storing indexed data
@@ -110,12 +115,14 @@ export class Indexer extends EventEmitter {
   constructor({
     state,
     db,
+    temporal,
     subscriptionManager,
     pubUri,
     rpcUri,
   }: {
     state: RuntimeState
     db: Database
+    temporal: Temporal
     subscriptionManager: SubscriptionManager
     pubUri?: string
     rpcUri?: string
@@ -127,6 +134,7 @@ export class Indexer extends EventEmitter {
     // Module setup
     this.db = db
     this.state = state
+    this.temporal = temporal
     this.subscriptionManager = subscriptionManager
     // Runtime state setup
     this.mempool = new Map()
@@ -544,7 +552,7 @@ export class Indexer extends EventEmitter {
         bb,
       ).mempoolTx()
     const rawArray = mempooltx.tx().rawArray()
-    const tx = new Transaction(Buffer.from(rawArray))
+    const tx = new Transaction(BufferUtil.from(rawArray))
     // Process the transaction using the processTransaction function
     // block is null for mempool transactions
     const processed = this.processTransaction(tx, null)
@@ -600,6 +608,20 @@ export class Indexer extends EventEmitter {
         //  })
         //}
         this.profileQueue.clear()
+        // Check faucet milestones for each distinct voter in this tx
+        if (processed.ranks?.length > 0) {
+          const voterPayloads = processed.ranks.map(r => r.scriptPayload)
+          for (const scriptPayload of voterPayloads) {
+            this.checkFaucetMilestone(scriptPayload).catch(e => {
+              log([
+                ['nng', 'warn'],
+                ['action', 'checkFaucetMilestone'],
+                ['scriptPayload', scriptPayload],
+                ['message', `"${String(e)}"`],
+              ])
+            })
+          }
+        }
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['nng', 'mempooltxadd'],
@@ -785,7 +807,7 @@ export class Indexer extends EventEmitter {
       try {
         const rawArray = data.txs(i).tx().rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
-        const tx = new Transaction(Buffer.from(rawArray))
+        const tx = new Transaction(BufferUtil.from(rawArray))
         // Process the transaction as either block or mempool tx
         const processed = this.processTransaction(tx, block)
         if (processed.ranks) {
@@ -986,9 +1008,8 @@ export class Indexer extends EventEmitter {
     const outpoints: Outpoint[] = []
     const missing: IndexedTransaction[] = []
     for (const tx of blockTxs) {
-      if (this.mempool.has(`${tx.txid}_${tx.outIdx}`)) {
-        // Mempool contains this block tx, so delete it from cache
-        this.mempool.delete(`${tx.txid}_${tx.outIdx}`)
+      // Mempool contains this block tx, so delete it from cache
+      if (this.mempool.delete(`${tx.txid}_${tx.outIdx}`)) {
         outpoints.push({ txid: tx.txid, outIdx: tx.outIdx })
         continue
       }
@@ -1034,7 +1055,9 @@ export class Indexer extends EventEmitter {
    * @returns {string} Block hash or txid as hex string (little endian)
    */
   private toBlockhashOrTxid(hash: NNGInterface.Hash): string {
-    return Buffer.from(hash.bb.bytes().subarray(hash.bb_pos, hash.bb_pos + 32))
+    return BufferUtil.from(
+      hash.bb.bytes().subarray(hash.bb_pos, hash.bb_pos + 32),
+    )
       .reverse() // reverse for little endian
       .toString('hex')
   }
@@ -1050,7 +1073,7 @@ export class Indexer extends EventEmitter {
       return undefined
     }
     const nHeight = header.rawArray().subarray(60, 64)
-    return Buffer.from(nHeight).readUInt32LE()
+    return BufferUtil.from(nHeight).readUInt32LE(0)
   }
   /**
    * Convert `NNGInterface.BlockHeader` to `Block` object
@@ -1097,13 +1120,14 @@ export class Indexer extends EventEmitter {
    */
   private addRankCommentToProfileQueue = (rnkc: TransactionRNKC): void => {
     // Each RNKC is a Lotusia post from a profile, so we add it to the profile queue
+    const profile = this.toProfileFromRNKC(rnkc)
     this.profileQueue.set(
       rnkc.scriptPayload, // scriptPayload is the profileId for Lotusia posts
-      this.toLotusiaProfileFromRNKC(rnkc),
+      profile,
     )
     // Each RNKC is also a comment on a profile or post, so we add it to the replied
     // profile's queue as well
-    const repliedProfile = this.toProfileFromRNKC(rnkc)
+    const repliedProfile = this.toRepliedProfileFromRNKC(rnkc)
     if (repliedProfile) {
       this.profileQueue.set(repliedProfile.id, repliedProfile)
     }
@@ -1198,7 +1222,7 @@ export class Indexer extends EventEmitter {
    * @param rnkc `IndexedTransactionRNKC` object
    * @returns Lotusia-specific `Profile` object
    */
-  private toLotusiaProfileFromRNKC(rnkc: TransactionRNKC): Profile {
+  private toProfileFromRNKC(rnkc: TransactionRNKC): Profile {
     // pull out the fields we need to create a new profile/post
     const { scriptPayload: profileId, txid: postId, data } = rnkc
     // Check if the profile exists in the queue, otherwise create
@@ -1244,7 +1268,7 @@ export class Indexer extends EventEmitter {
    * @param rnkc `IndexedTransactionRNKC` object
    * @returns `Profile` object
    */
-  private toProfileFromRNKC(rnkc: TransactionRNKC): Profile | null {
+  private toRepliedProfileFromRNKC(rnkc: TransactionRNKC): Profile | null {
     // pull out the fields we need to create a new profile/post
     const {
       inReplyToPlatform,
@@ -1253,8 +1277,8 @@ export class Indexer extends EventEmitter {
       ...partialRNKC
     } = rnkc
     // if there is no profileId, return undefined
-    // This is a valid RNKC transaction, but it doesn't have a profileId
-    // so we can't add it to the profile queue
+    // This is a valid RNKC transaction, but it doesn't have a profileId so we
+    // can't add it to the profile queue
     if (!inReplyToProfileId) {
       return null
     }
@@ -1277,6 +1301,9 @@ export class Indexer extends EventEmitter {
     // Add the RNKC to the post's comments
     let post = profile.posts.get(inReplyToPostId)
     if (post) {
+      if (!post.comments) {
+        post.comments = []
+      }
       post.comments.push(partialRNKC)
     } else {
       post = this.toPost({
@@ -1301,12 +1328,12 @@ export class Indexer extends EventEmitter {
       profileId: post?.profileId,
       ranks: post?.ranks,
       data: post?.data,
-      comments: post?.comments,
-      ranking: post?.ranking ?? 0n,
-      satsPositive: post?.satsPositive ?? 0n,
-      satsNegative: post?.satsNegative ?? 0n,
-      votesPositive: post?.votesPositive ?? 0,
-      votesNegative: post?.votesNegative ?? 0,
+      comments: post?.comments || [],
+      ranking: post?.ranking || 0n,
+      satsPositive: post?.satsPositive || 0n,
+      satsNegative: post?.satsNegative || 0n,
+      votesPositive: post?.votesPositive || 0,
+      votesNegative: post?.votesNegative || 0,
     }
   }
   /**
@@ -1319,13 +1346,13 @@ export class Indexer extends EventEmitter {
       id: profile?.id,
       platform: profile?.platform,
       ranks: profile?.ranks,
-      comments: profile?.comments,
-      ranking: profile?.ranking ?? 0n,
-      satsPositive: profile?.satsPositive ?? 0n,
-      satsNegative: profile?.satsNegative ?? 0n,
-      votesPositive: profile?.votesPositive ?? 0,
-      votesNegative: profile?.votesNegative ?? 0,
-      posts: profile?.posts ?? new Map(),
+      comments: profile?.comments || [],
+      ranking: profile?.ranking || 0n,
+      satsPositive: profile?.satsPositive || 0n,
+      satsNegative: profile?.satsNegative || 0n,
+      votesPositive: profile?.votesPositive || 0,
+      votesNegative: profile?.votesNegative || 0,
+      posts: profile?.posts || new Map(),
     }
   }
   /**
@@ -1371,5 +1398,86 @@ export class Indexer extends EventEmitter {
     }
 
     return notification
+  }
+
+  /**
+   * Checks if a voter's scriptPayload has a FaucetClaim that needs advancing
+   * to the next milestone. Called after each RANK tx is processed.
+   *
+   * Milestones are defined in FAUCET_MILESTONE_VOTES:
+   *   - Milestone 1: 0 votes (on redemption — already handled by referralRedeem)
+   *   - Milestone 2: 1 vote
+   *   - Milestone 3: 5 votes
+   *   - Milestone 4: 10 votes
+   *
+   * @param scriptPayload - The voter's scriptPayload
+   */
+  private async checkFaucetMilestone(scriptPayload: string): Promise<void> {
+    // Look up the faucet claim for this wallet
+    const claim = await this.db.getFaucetClaim(scriptPayload)
+    if (!claim) return // No faucet claim — not a referred user
+
+    // Check if all milestones are already completed
+    const currentMilestone = claim.milestone
+    if (currentMilestone > FAUCET_MILESTONE_VOTES.length) return
+
+    // Get the vote threshold for the next milestone
+    const nextMilestoneIndex = currentMilestone // 0-indexed into FAUCET_MILESTONE_VOTES
+    if (nextMilestoneIndex >= FAUCET_MILESTONE_VOTES.length) return
+
+    const requiredVotes = FAUCET_MILESTONE_VOTES[nextMilestoneIndex]
+    const dripAmount = FAUCET_DRIP_AMOUNTS[nextMilestoneIndex]
+
+    // Count the user's total RANK votes
+    const totalVotes = await this.db.countRankTxsByScriptPayload(scriptPayload)
+
+    // Check if the user has reached the next milestone
+    if (totalVotes >= requiredVotes) {
+      // Advance the milestone in the database
+      await this.db.advanceFaucetMilestone(
+        scriptPayload,
+        currentMilestone + 1,
+        dripAmount,
+      )
+
+      // Signal Temporal to process the faucet drip
+      try {
+        await this.temporal.client.workflow.signalWithStart(
+          config.temporal.command.workflowType,
+          {
+            signal: config.temporal.command.signal,
+            taskQueue: config.temporal.taskQueue,
+            workflowId: config.temporal.command.workflowId,
+            signalArgs: [
+              {
+                action: 'faucetDrip',
+                data: {
+                  scriptPayload,
+                  milestone: currentMilestone + 1,
+                  amount: dripAmount.toString(),
+                },
+              },
+            ],
+          },
+        )
+      } catch (e) {
+        // Log but don't throw — the drip can be retried manually
+        log([
+          ['indexer', 'warn'],
+          ['action', 'checkFaucetMilestone.temporal'],
+          ['scriptPayload', scriptPayload],
+          ['milestone', `${currentMilestone + 1}`],
+          ['message', `"${String(e)}"`],
+        ])
+      }
+
+      log([
+        ['indexer', 'checkFaucetMilestone'],
+        ['scriptPayload', scriptPayload],
+        ['milestone', `${currentMilestone + 1}`],
+        ['totalVotes', `${totalVotes}`],
+        ['dripAmount', dripAmount.toString()],
+      ])
+    }
   }
 }

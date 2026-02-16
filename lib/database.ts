@@ -83,6 +83,27 @@ export type VoterActivitySummary = {
   lastSeen: string
   firstSeen: string
 }
+/** Feed filter parameters for unified post feed queries */
+export type FeedFilterParams = {
+  platform?: ScriptChunkPlatformUTF8
+  sortBy?: 'ranking' | 'recent' | 'controversial'
+  startTime?: Timespan
+  page?: number
+  pageSize?: number
+  scriptPayload?: string
+}
+/** Feed response with pagination metadata */
+export type FeedResponse = {
+  posts: PostAPI[]
+  pagination: {
+    page: number
+    pageSize: number
+    totalPages: number
+    totalItems: number
+    hasNext: boolean
+    hasPrev: boolean
+  }
+}
 /** Metadata about the post's voter, included in authorized API responses */
 export type VoterPostMetadata = {
   hasWalletUpvoted: boolean
@@ -695,8 +716,7 @@ export class Database {
         // add the comments to the return data, or empty array if no comments
         if (profile.comments) {
           data.comments = []
-          const profileCommentsIterable = toAsyncIterable(profile.comments)
-          for await (const comment of profileCommentsIterable) {
+          for (const comment of profile.comments) {
             data.comments.push(this.convertRankCommentToPostAPI(comment))
           }
         }
@@ -1736,15 +1756,25 @@ export class Database {
   }
   /**
    * Generates database statements for upserting profiles and their associated posts
+   *
+   * Statements are structured in three phases to satisfy FK constraints:
+   *   Phase 1: Upsert Profiles and Posts (parent records, no child relations)
+   *   Phase 2: Create RankTransactions and RankComments (child records via Profile relation)
+   *   Phase 3: Connect RankTransactions to Posts and connectOrCreate RankComments on Posts
+   *
    * @param profiles - Map of profiles to generate upsert statements for
    * @returns Array of database upsert statements
    */
   async toProfileUpsertStatements(profiles: ProfileMap) {
-    const upserts: ReturnType<
+    // Phase 1: Upsert parent records (Profiles and Posts) without child relations
+    const phase1: ReturnType<
       typeof this.db.post.upsert | typeof this.db.profile.upsert
     >[] = []
-    const profilesIterable = toAsyncIterable(profiles)
-    for await (const [id, profile] of profilesIterable) {
+    // Phase 2: Create child records (RankTransactions and RankComments) via Profile relation
+    const phase2: ReturnType<typeof this.db.profile.update>[] = []
+    // Phase 3: Connect RankTransactions to Posts and connectOrCreate RankComments on Posts
+    const phase3: ReturnType<typeof this.db.post.update>[] = []
+    for (const [id, profile] of profiles) {
       const {
         platform,
         ranks,
@@ -1755,23 +1785,8 @@ export class Database {
         votesPositive,
         votesNegative,
       } = profile
-      const ranksCreateMany = ranks
-        ? {
-            createMany: {
-              data: ranks,
-            },
-          }
-        : undefined
-      const commentsCreateMany = comments
-        ? {
-            createMany: {
-              data: comments,
-            },
-          }
-        : undefined
-      // push profile upsert first
-      // These upserts will create the RankTransaction records
-      upserts.push(
+      // Phase 1: Upsert the Profile without ranks or comments
+      phase1.push(
         this.db.profile.upsert({
           where: {
             platform_id: { platform, id },
@@ -1786,13 +1801,9 @@ export class Database {
             votesPositive,
             votesNegative,
             account: { create: { id: randomUUID() } },
-            ranks: ranksCreateMany,
-            comments: commentsCreateMany,
           },
           // profile exists
           update: {
-            ranks: ranksCreateMany,
-            comments: commentsCreateMany,
             ranking: {
               increment: ranking,
             },
@@ -1811,26 +1822,70 @@ export class Database {
           },
         }),
       )
-      // push any post upsert(s) after Profile exists
-      // These upserts will connect the RankTransaction records to the Post
+      // Phase 1: Upsert Posts without rank connections or comments
       if (profile.posts) {
         const posts = toAsyncIterable(profile.posts)
-        for await (const [id, post] of posts) {
+        for await (const [postId, post] of posts) {
           const {
-            platform,
+            platform: postPlatform,
             profileId,
             data, // data is the comment text for Lotusia posts
-            ranking,
-            satsPositive,
-            satsNegative,
-            votesPositive,
-            votesNegative,
-            ranks,
-            comments,
+            ranking: postRanking,
+            satsPositive: postSatsPositive,
+            satsNegative: postSatsNegative,
+            votesPositive: postVotesPositive,
+            votesNegative: postVotesNegative,
+            ranks: postRanks,
+            comments: postComments,
           } = post
-          const ranksConnect = ranks
+          const postIncrements = {
+            ranking: {
+              increment: postRanking,
+            },
+            satsPositive: {
+              increment: postSatsPositive,
+            },
+            satsNegative: {
+              increment: postSatsNegative,
+            },
+            votesPositive: {
+              increment: postVotesPositive,
+            },
+            votesNegative: {
+              increment: postVotesNegative,
+            },
+          }
+          phase1.push(
+            this.db.post.upsert({
+              where: {
+                platform_profileId_id: {
+                  platform: postPlatform,
+                  profileId,
+                  id: postId,
+                },
+              },
+              // post doesn't exist
+              create: {
+                id: postId,
+                platform: postPlatform,
+                profileId,
+                data, // data is the comment text for Lotusia posts
+                ranking: postRanking,
+                satsPositive: postSatsPositive,
+                satsNegative: postSatsNegative,
+                votesPositive: postVotesPositive,
+                votesNegative: postVotesNegative,
+              },
+              // post exists
+              update: {
+                ...postIncrements,
+              },
+            }),
+          )
+          // Phase 3: Connect RankTransactions to Posts and connectOrCreate RankComments
+          const ranksConnect = postRanks?.length
             ? {
-                connect: ranks.map(rank => ({
+                connect: postRanks.map(rank => ({
                   txid_outIdx: {
                     txid: rank.txid,
                     outIdx: rank.outIdx,
@@ -1842,9 +1897,9 @@ export class Database {
           // necessarily associated with the profile. If comments are defined
           // in this post, then we want to create the comment record(s) in the
           // upsert statement(s) below
-          const commentsConnectOrCreate = comments
+          const commentsConnectOrCreate = postComments?.length
             ? {
-                connectOrCreate: comments.map(comment => ({
+                connectOrCreate: postComments.map(comment => ({
                   where: {
                     txid: comment.txid,
                   },
@@ -1852,59 +1907,55 @@ export class Database {
                 })),
               }
             : undefined
-          const increments = {
-            ranking: {
-              increment: ranking,
-            },
-            satsPositive: {
-              increment: satsPositive,
-            },
-            satsNegative: {
-              increment: satsNegative,
-            },
-            votesPositive: {
-              increment: votesPositive,
-            },
-            votesNegative: {
-              increment: votesNegative,
-            },
-          }
-          // upsert the post first
-          upserts.push(
-            this.db.post.upsert({
-              where: {
-                platform_profileId_id: {
-                  platform,
-                  profileId,
-                  id,
+          if (ranksConnect || commentsConnectOrCreate) {
+            phase3.push(
+              this.db.post.update({
+                where: {
+                  platform_profileId_id: {
+                    platform: postPlatform,
+                    profileId,
+                    id: postId,
+                  },
                 },
-              },
-              // post doesn't exist
-              create: {
-                id,
-                platform,
-                profileId,
-                data, // data is the comment text for Lotusia posts
-                ranking,
-                satsPositive,
-                satsNegative,
-                votesPositive,
-                votesNegative,
-                ranks: ranksConnect,
-                comments: commentsConnectOrCreate,
-              },
-              // post exists
-              update: {
-                ranks: ranksConnect,
-                comments: commentsConnectOrCreate,
-                ...increments,
-              },
-            }),
-          )
+                data: {
+                  ranks: ranksConnect,
+                  comments: commentsConnectOrCreate,
+                },
+              }),
+            )
+          }
         }
       }
+      // Phase 2: Create RankTransactions and RankComments via Profile relation
+      const ranksCreateMany = ranks?.length
+        ? {
+            createMany: {
+              data: ranks,
+            },
+          }
+        : undefined
+      const commentsCreateMany = comments?.length
+        ? {
+            createMany: {
+              data: comments,
+            },
+          }
+        : undefined
+      if (ranksCreateMany || commentsCreateMany) {
+        phase2.push(
+          this.db.profile.update({
+            where: {
+              platform_id: { platform, id },
+            },
+            data: {
+              ranks: ranksCreateMany,
+              comments: commentsCreateMany,
+            },
+          }),
+        )
+      }
     }
-    return upserts
+    return [...phase1, ...phase2, ...phase3]
   }
   /**
    * Generates database statements for rewinding profiles and their associated posts
@@ -2043,6 +2094,849 @@ export class Database {
     }
     return rewinds
   }
+  // ─── Referral Methods ──────────────────────────────────────────────────
+
+  /**
+   * Creates a new referral code in the database
+   * @param code - The HMAC-derived referral code (16-char hex)
+   * @param referrerPayload - The scriptPayload of the referrer
+   * @param expiresAt - The expiration date for the referral code
+   * @returns The created ReferralCode record
+   */
+  async createReferralCode(
+    code: string,
+    referrerPayload: string,
+    expiresAt: Date,
+  ) {
+    try {
+      return await this.db.referralCode.create({
+        data: {
+          code,
+          referrerPayload,
+          expiresAt,
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.createReferralCode: ${e.message}`)
+    }
+  }
+
+  /**
+   * Creates multiple referral codes in a single transaction (for genesis batch)
+   * @param codes - Array of referral code data objects
+   * @returns The count of created records
+   */
+  async createReferralCodeBatch(
+    codes: Array<{
+      code: string
+      referrerPayload: string
+      expiresAt: Date
+    }>,
+  ) {
+    try {
+      return await this.db.referralCode.createMany({
+        data: codes,
+      })
+    } catch (e) {
+      throw new Error(`db.createReferralCodeBatch: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves a referral code by its code string
+   * @param code - The referral code to look up
+   * @returns The ReferralCode record or null if not found
+   */
+  async getReferralCode(code: string) {
+    try {
+      return await this.db.referralCode.findUnique({
+        where: { code },
+      })
+    } catch (e) {
+      throw new Error(`db.getReferralCode: ${e.message}`)
+    }
+  }
+
+  /**
+   * Atomically redeems a referral code by setting the redeemer fields.
+   * Uses a where clause to ensure the code has not already been redeemed.
+   * @param code - The referral code to redeem
+   * @param redeemerPayload - The scriptPayload of the redeemer
+   * @param redeemerIp - The IP address of the redeemer
+   * @returns The updated ReferralCode record
+   */
+  async redeemReferralCode(
+    code: string,
+    redeemerPayload: string,
+    redeemerIp: string,
+  ) {
+    try {
+      return await this.db.referralCode.update({
+        where: {
+          code,
+          redeemedAt: null,
+        },
+        data: {
+          redeemerPayload,
+          redeemerIp,
+          redeemedAt: new Date(),
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.redeemReferralCode: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts outstanding (unredeemed, unexpired) referral codes for a referrer
+   * @param referrerPayload - The scriptPayload of the referrer
+   * @returns The count of outstanding referral codes
+   */
+  async countOutstandingReferralCodes(
+    referrerPayload: string,
+  ): Promise<number> {
+    try {
+      return await this.db.referralCode.count({
+        where: {
+          referrerPayload,
+          redeemedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.countOutstandingReferralCodes: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts recent referral redemptions from a specific IP address within the last 24 hours
+   * @param ip - The IP address to check
+   * @returns The count of recent redemptions from this IP
+   */
+  async countRecentRedemptionsByIp(ip: string): Promise<number> {
+    try {
+      const oneDayAgo = new Date(Date.now() - 86_400_000)
+      return await this.db.referralCode.count({
+        where: {
+          redeemerIp: ip,
+          redeemedAt: { gte: oneDayAgo },
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.countRecentRedemptionsByIp: ${e.message}`)
+    }
+  }
+
+  // ─── Faucet Methods ───────────────────────────────────────────────────
+
+  /**
+   * Creates a new faucet claim record for a referred user
+   * @param scriptPayload - The scriptPayload of the new user
+   * @param referralCode - The referral code that was redeemed
+   * @returns The created FaucetClaim record
+   */
+  async createFaucetClaim(scriptPayload: string, referralCode: string) {
+    try {
+      return await this.db.faucetClaim.create({
+        data: {
+          scriptPayload,
+          referralCode,
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.createFaucetClaim: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves a faucet claim by scriptPayload
+   * @param scriptPayload - The scriptPayload to look up
+   * @returns The FaucetClaim record or null if not found
+   */
+  async getFaucetClaim(scriptPayload: string) {
+    try {
+      return await this.db.faucetClaim.findUnique({
+        where: { scriptPayload },
+      })
+    } catch (e) {
+      throw new Error(`db.getFaucetClaim: ${e.message}`)
+    }
+  }
+
+  /**
+   * Advances a faucet claim to the next milestone and records the drip amount
+   * @param scriptPayload - The scriptPayload of the user
+   * @param nextMilestone - The new milestone number
+   * @param dripAmount - The amount dripped in this milestone (in satoshis)
+   * @returns The updated FaucetClaim record
+   */
+  async advanceFaucetMilestone(
+    scriptPayload: string,
+    nextMilestone: number,
+    dripAmount: bigint,
+  ) {
+    try {
+      return await this.db.faucetClaim.update({
+        where: { scriptPayload },
+        data: {
+          milestone: nextMilestone,
+          totalDripped: { increment: dripAmount },
+          lastDripAt: new Date(),
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.advanceFaucetMilestone: ${e.message}`)
+    }
+  }
+
+  // ─── Engagement Methods ───────────────────────────────────────────────
+
+  /**
+   * Gets or creates a WalletEngagement record for a scriptPayload
+   * @param scriptPayload - The scriptPayload to look up or create
+   * @returns The WalletEngagement record
+   */
+  async getOrCreateWalletEngagement(scriptPayload: string) {
+    try {
+      return await this.db.walletEngagement.upsert({
+        where: { scriptPayload },
+        create: { scriptPayload },
+        update: {},
+      })
+    } catch (e) {
+      throw new Error(`db.getOrCreateWalletEngagement: ${e.message}`)
+    }
+  }
+
+  /**
+   * Updates a WalletEngagement record with new computed values
+   * @param scriptPayload - The scriptPayload to update
+   * @param data - The fields to update
+   * @returns The updated WalletEngagement record
+   */
+  async updateWalletEngagement(
+    scriptPayload: string,
+    data: {
+      tier?: number
+      engagementPoints?: number
+      epBreakdown?: object
+      lifetimeVotes?: number
+      lifetimeReferrals?: number
+      lifetimeComments?: number
+      currentStreak?: number
+      longestStreak?: number
+      lastVoteDate?: Date
+      lifetimeRewards?: bigint
+    },
+  ) {
+    try {
+      return await this.db.walletEngagement.update({
+        where: { scriptPayload },
+        data,
+      })
+    } catch (e) {
+      throw new Error(`db.updateWalletEngagement: ${e.message}`)
+    }
+  }
+
+  /**
+   * Upserts a WalletEngagement record — creates if not exists, updates if exists.
+   * Used by the backfill script and daily EP recomputation.
+   * @param scriptPayload - The scriptPayload to upsert
+   * @param data - The engagement data to set
+   * @returns The upserted WalletEngagement record
+   */
+  async upsertWalletEngagement(
+    scriptPayload: string,
+    data: {
+      tier: number
+      engagementPoints: number
+      epBreakdown: object
+      lifetimeVotes: number
+      lifetimeReferrals: number
+      lifetimeComments: number
+      currentStreak: number
+      longestStreak: number
+      lastVoteDate: Date | null
+      lifetimeRewards: bigint
+    },
+  ) {
+    try {
+      return await this.db.walletEngagement.upsert({
+        where: { scriptPayload },
+        create: { scriptPayload, ...data },
+        update: data,
+      })
+    } catch (e) {
+      throw new Error(`db.upsertWalletEngagement: ${e.message}`)
+    }
+  }
+
+  /**
+   * Resets streaks for wallets that haven't voted since the given date.
+   * Called daily to break streaks for inactive users.
+   * @param cutoffDate - Wallets with lastVoteDate before this are reset
+   * @returns The count of updated records
+   */
+  async resetBrokenStreaks(cutoffDate: Date) {
+    try {
+      return await this.db.walletEngagement.updateMany({
+        where: {
+          currentStreak: { gt: 0 },
+          lastVoteDate: { lt: cutoffDate },
+        },
+        data: {
+          currentStreak: 0,
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.resetBrokenStreaks: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves all distinct scriptPayloads that have cast RANK votes.
+   * Used by the backfill script to enumerate all wallets.
+   * @returns Array of distinct scriptPayload strings
+   */
+  async getDistinctVoterScriptPayloads(): Promise<string[]> {
+    try {
+      const results = await this.db.rankTransaction.groupBy({
+        by: ['scriptPayload'],
+      })
+      return results.map(r => r.scriptPayload)
+    } catch (e) {
+      throw new Error(`db.getDistinctVoterScriptPayloads: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts the total number of RANK transactions for a specific scriptPayload
+   * @param scriptPayload - The scriptPayload to count votes for
+   * @returns The total vote count
+   */
+  async countRankTxsByScriptPayload(scriptPayload: string): Promise<number> {
+    try {
+      return await this.db.rankTransaction.count({
+        where: { scriptPayload },
+      })
+    } catch (e) {
+      throw new Error(`db.countRankTxsByScriptPayload: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts the number of redeemed referral codes where the given scriptPayload is the referrer
+   * @param referrerPayload - The scriptPayload of the referrer
+   * @returns The count of redeemed referrals
+   */
+  async countRedeemedReferralsByReferrer(
+    referrerPayload: string,
+  ): Promise<number> {
+    try {
+      return await this.db.referralCode.count({
+        where: {
+          referrerPayload,
+          redeemedAt: { not: null },
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.countRedeemedReferralsByReferrer: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts the number of RNKC comments posted by a specific scriptPayload
+   * @param scriptPayload - The scriptPayload to count comments for
+   * @returns The total comment count
+   */
+  async countRnkcCommentsByScriptPayload(
+    scriptPayload: string,
+  ): Promise<number> {
+    try {
+      return await this.db.rankComment.count({
+        where: { scriptPayload },
+      })
+    } catch (e) {
+      throw new Error(`db.countRnkcCommentsByScriptPayload: ${e.message}`)
+    }
+  }
+
+  /**
+   * Gets the total XPI burned by a scriptPayload across all RANK transactions
+   * @param scriptPayload - The scriptPayload to sum burns for
+   * @returns The total sats burned as bigint
+   */
+  async getTotalBurnedByScriptPayload(scriptPayload: string): Promise<bigint> {
+    try {
+      const result = await this.db.rankTransaction.aggregate({
+        where: { scriptPayload },
+        _sum: { sats: true },
+      })
+      return result._sum.sats ?? 0n
+    } catch (e) {
+      throw new Error(`db.getTotalBurnedByScriptPayload: ${e.message}`)
+    }
+  }
+
+  /**
+   * Gets the earliest RANK transaction timestamp for a scriptPayload (account age proxy)
+   * @param scriptPayload - The scriptPayload to check
+   * @returns The earliest timestamp as bigint, or null if no transactions
+   */
+  async getEarliestRankTimestamp(
+    scriptPayload: string,
+  ): Promise<bigint | null> {
+    try {
+      const result = await this.db.rankTransaction.aggregate({
+        where: { scriptPayload },
+        _min: { timestamp: true },
+      })
+      return result._min.timestamp ?? null
+    } catch (e) {
+      throw new Error(`db.getEarliestRankTimestamp: ${e.message}`)
+    }
+  }
+
+  /**
+   * Gets the most recent vote date for a scriptPayload
+   * @param scriptPayload - The scriptPayload to check
+   * @returns The most recent timestamp as bigint, or null if no transactions
+   */
+  async getLatestRankTimestamp(scriptPayload: string): Promise<bigint | null> {
+    try {
+      const result = await this.db.rankTransaction.aggregate({
+        where: { scriptPayload },
+        _max: { timestamp: true },
+      })
+      return result._max.timestamp ?? null
+    } catch (e) {
+      throw new Error(`db.getLatestRankTimestamp: ${e.message}`)
+    }
+  }
+
+  /**
+   * Counts distinct days on which a scriptPayload has voted, used for streak calculation.
+   * Returns an array of distinct vote dates (UTC day boundaries).
+   * @param scriptPayload - The scriptPayload to check
+   * @returns Array of distinct vote date strings (YYYY-MM-DD)
+   */
+  async getDistinctVoteDates(scriptPayload: string): Promise<string[]> {
+    try {
+      const results: Array<{ vote_date: string }> = await this.db.$queryRaw`
+        SELECT DISTINCT DATE(TO_TIMESTAMP("timestamp")) AS vote_date
+        FROM "RankTransaction"
+        WHERE "scriptPayload" = ${scriptPayload}
+        AND "timestamp" IS NOT NULL
+        ORDER BY vote_date DESC
+      `
+      return results.map(r => r.vote_date)
+    } catch (e) {
+      throw new Error(`db.getDistinctVoteDates: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves a paginated feed of posts with profile data, rankings, and comments.
+   * This is the primary unified feed query — it fetches Post models directly and
+   * includes their associated Profile metrics, RNKC comment metadata (for Lotusia
+   * posts), and reply threads.
+   *
+   * Supports filtering by platform, sorting by ranking/recency/controversy, and
+   * optional wallet-specific vote metadata via scriptPayload.
+   *
+   * @param filters - Feed filter parameters (platform, sortBy, time range, pagination, scriptPayload)
+   * @returns Feed response with PostAPI[] and pagination metadata
+   */
+  async apiGetFeedPosts(filters: FeedFilterParams = {}): Promise<FeedResponse> {
+    const {
+      platform,
+      sortBy = 'ranking',
+      startTime,
+      page = 1,
+      pageSize = 20,
+      scriptPayload,
+    } = filters
+
+    const normalizedPage = Math.max(1, page)
+    const normalizedPageSize = Math.min(20, Math.max(1, pageSize))
+
+    try {
+      return await this.db.$transaction(async tx => {
+        // Build where clause for Post model
+        const whereClause: any = {}
+        if (platform) {
+          whereClause.platform = platform
+        }
+        // Time-based filtering: find posts that received votes within the timespan
+        if (startTime && startTime !== 'all') {
+          whereClause.ranks = {
+            some: {
+              timestamp: { gte: getTimestampUTC(startTime) },
+            },
+          }
+        }
+
+        // Build orderBy based on sort mode
+        let orderBy: any
+        switch (sortBy) {
+          case 'recent':
+            // Most recently voted-on posts first (by latest RANK tx)
+            // Prisma doesn't support ordering by relation aggregates directly,
+            // so we order by ranking desc as a proxy and filter by time
+            orderBy = [{ ranking: 'desc' }]
+            break
+          case 'controversial':
+            // Posts with high vote counts on both sides — order by total votes desc
+            // and filter for posts with both positive and negative votes
+            whereClause.AND = [
+              { votesPositive: { gt: 0 } },
+              { votesNegative: { gt: 0 } },
+            ]
+            orderBy = [{ votesPositive: 'desc' }, { votesNegative: 'desc' }]
+            break
+          case 'ranking':
+          default:
+            orderBy = [{ ranking: 'desc' }]
+            break
+        }
+
+        // Wallet-specific RANK vote filter (for Vote-to-Reveal postMeta)
+        const includeRanks = !scriptPayload
+          ? undefined
+          : {
+              where: { scriptPayload, sentiment: { not: 'neutral' } },
+              select: {
+                txid: true,
+                sats: true,
+                sentiment: true,
+              },
+            }
+
+        const [totalItems, posts] = await Promise.all([
+          tx.post.count({ where: whereClause }),
+          tx.post.findMany({
+            where: whereClause,
+            orderBy,
+            skip: (normalizedPage - 1) * normalizedPageSize,
+            take: normalizedPageSize,
+            include: {
+              profile: {
+                select: targetEntityMetricsSelect,
+              },
+              // RNKC data for Lotusia posts (comment metadata)
+              comment: {
+                select: {
+                  inReplyToPlatform: true,
+                  inReplyToProfileId: true,
+                  inReplyToPostId: true,
+                  timestamp: true,
+                  firstSeen: true,
+                },
+              },
+              // Replies to this post
+              comments: {
+                include: {
+                  post: {
+                    include: {
+                      profile: {
+                        select: targetEntityMetricsSelect,
+                      },
+                    },
+                  },
+                },
+              },
+              // Wallet-specific vote data (if scriptPayload provided)
+              ranks: includeRanks,
+            },
+          }),
+        ])
+
+        const totalPages = Math.ceil(totalItems / normalizedPageSize)
+
+        // Convert each post to PostAPI shape
+        const feedPosts: PostAPI[] = []
+        for (const post of posts) {
+          const postData: PostAPI = {
+            id: post.id,
+            platform: post.platform as ScriptChunkPlatformUTF8,
+            profileId: post.profileId,
+            ranking: post.ranking.toString(),
+            satsPositive: post.satsPositive.toString(),
+            satsNegative: post.satsNegative.toString(),
+            votesPositive: post.votesPositive,
+            votesNegative: post.votesNegative,
+            profile: {
+              ranking: post.profile.ranking.toString(),
+              satsPositive: post.profile.satsPositive.toString(),
+              satsNegative: post.profile.satsNegative.toString(),
+              votesPositive: post.profile.votesPositive,
+              votesNegative: post.profile.votesNegative,
+            },
+          }
+          // Lotusia post: add RNKC comment data (text, inReplyTo, timestamps)
+          if (post.data) {
+            postData.data = toCommentUTF8(post.data)
+            if (post.comment) {
+              postData.inReplyToPlatform = post.comment
+                .inReplyToPlatform as ScriptChunkPlatformUTF8
+              postData.inReplyToProfileId = post.comment.inReplyToProfileId
+              postData.inReplyToPostId = post.comment.inReplyToPostId
+              const firstSeenSeconds = post.comment.firstSeen / 1_000n
+              postData.timestamp =
+                firstSeenSeconds < post.comment.timestamp
+                  ? firstSeenSeconds.toString()
+                  : (post.comment.timestamp?.toString() ?? null)
+              postData.firstSeen = firstSeenSeconds.toString()
+            }
+          }
+          // Add reply threads (RNKC comments on this post)
+          if (post.comments?.length) {
+            postData.comments = []
+            for (const reply of post.comments) {
+              postData.comments.push(
+                this.convertRankCommentToPostAPI(
+                  reply as unknown as IndexedTransactionRNKC,
+                ),
+              )
+            }
+          }
+          // Add wallet-specific vote metadata (Vote-to-Reveal R1)
+          if (post.ranks?.length) {
+            postData.postMeta = await this.convertRankTransactionsToPostMeta(
+              post.ranks,
+            )
+          }
+          feedPosts.push(postData)
+        }
+
+        return {
+          posts: feedPosts,
+          pagination: {
+            page: normalizedPage,
+            pageSize: normalizedPageSize,
+            totalPages,
+            totalItems,
+            hasNext: normalizedPage < totalPages,
+            hasPrev: normalizedPage > 1,
+          },
+        }
+      })
+    } catch (e) {
+      throw new Error(`db.apiGetFeedPosts: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves trending posts based on recent vote activity volume.
+   * Finds posts with the most RANK transaction activity within a time window,
+   * then fetches the full Post data with profile and comment relations.
+   *
+   * @param windowHours - Time window in hours (default 24h)
+   * @param limit - Maximum number of results (default 20)
+   * @param scriptPayload - Optional wallet for Vote-to-Reveal metadata
+   * @returns Array of PostAPI objects ordered by recent activity volume
+   */
+  async apiGetTrendingPosts(
+    windowHours: number = 24,
+    limit: number = 20,
+    scriptPayload?: string,
+  ): Promise<PostAPI[]> {
+    try {
+      const startTimestamp = Math.floor(Date.now() / 1000) - windowHours * 3600
+
+      // Phase 1: Find post IDs with the most activity in the window
+      const trendingGroups = await this.db.rankTransaction.groupBy({
+        by: ['platform', 'profileId', 'postId'],
+        where: {
+          timestamp: { gte: startTimestamp },
+          postId: { not: null },
+        },
+        _count: { txid: true },
+        _sum: { sats: true },
+        orderBy: { _count: { txid: 'desc' } },
+        take: limit,
+      })
+
+      if (!trendingGroups.length) {
+        return []
+      }
+
+      // Wallet-specific RANK vote filter
+      const includeRanks = !scriptPayload
+        ? undefined
+        : {
+            where: { scriptPayload, sentiment: { not: 'neutral' } },
+            select: {
+              txid: true,
+              sats: true,
+              sentiment: true,
+            },
+          }
+
+      // Phase 2: Fetch full Post data for each trending post
+      const posts = await this.db.$transaction(
+        trendingGroups.map(group =>
+          this.db.post.findFirst({
+            where: {
+              platform: group.platform,
+              profileId: group.profileId,
+              id: group.postId,
+            },
+            include: {
+              profile: {
+                select: targetEntityMetricsSelect,
+              },
+              comment: {
+                select: {
+                  inReplyToPlatform: true,
+                  inReplyToProfileId: true,
+                  inReplyToPostId: true,
+                  timestamp: true,
+                  firstSeen: true,
+                },
+              },
+              comments: {
+                include: {
+                  post: {
+                    include: {
+                      profile: {
+                        select: targetEntityMetricsSelect,
+                      },
+                    },
+                  },
+                },
+              },
+              ranks: includeRanks,
+            },
+          }),
+        ),
+      )
+
+      // Phase 3: Convert to PostAPI shape, preserving trending order
+      const result: PostAPI[] = []
+      for (const post of posts) {
+        if (!post) continue
+        const postData: PostAPI = {
+          id: post.id,
+          platform: post.platform as ScriptChunkPlatformUTF8,
+          profileId: post.profileId,
+          ranking: post.ranking.toString(),
+          satsPositive: post.satsPositive.toString(),
+          satsNegative: post.satsNegative.toString(),
+          votesPositive: post.votesPositive,
+          votesNegative: post.votesNegative,
+          profile: {
+            ranking: post.profile.ranking.toString(),
+            satsPositive: post.profile.satsPositive.toString(),
+            satsNegative: post.profile.satsNegative.toString(),
+            votesPositive: post.profile.votesPositive,
+            votesNegative: post.profile.votesNegative,
+          },
+        }
+        if (post.data) {
+          postData.data = toCommentUTF8(post.data)
+          if (post.comment) {
+            postData.inReplyToPlatform = post.comment
+              .inReplyToPlatform as ScriptChunkPlatformUTF8
+            postData.inReplyToProfileId = post.comment.inReplyToProfileId
+            postData.inReplyToPostId = post.comment.inReplyToPostId
+            const firstSeenSeconds = post.comment.firstSeen / 1_000n
+            postData.timestamp =
+              firstSeenSeconds < post.comment.timestamp
+                ? firstSeenSeconds.toString()
+                : (post.comment.timestamp?.toString() ?? null)
+            postData.firstSeen = firstSeenSeconds.toString()
+          }
+        }
+        if (post.comments?.length) {
+          postData.comments = []
+          for (const reply of post.comments) {
+            postData.comments.push(
+              this.convertRankCommentToPostAPI(
+                reply as unknown as IndexedTransactionRNKC,
+              ),
+            )
+          }
+        }
+        if (post.ranks?.length) {
+          postData.postMeta = await this.convertRankTransactionsToPostMeta(
+            post.ranks,
+          )
+        }
+        result.push(postData)
+      }
+      return result
+    } catch (e) {
+      throw new Error(`db.apiGetTrendingPosts: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves a leaderboard of top voters ranked by total sats burned in a period.
+   * Used for the Leaderboard page (Phase 5.4) and the `getLeaderboard` API composable
+   * method specified in 02-FEED-AND-ONBOARDING.md.
+   *
+   * @param period - Time period ('daily' or 'weekly')
+   * @param limit - Maximum number of entries (default 20)
+   * @returns Array of leaderboard entries with wallet stats
+   */
+  async apiGetLeaderboard(period: 'daily' | 'weekly', limit: number = 20) {
+    try {
+      const startTime = period === 'daily' ? 'today' : 'week'
+      const startTimestamp = getTimestampUTC(startTime as Timespan)
+
+      const results = await this.db.rankTransaction.groupBy({
+        by: ['scriptPayload'],
+        where: {
+          timestamp: { gte: startTimestamp },
+        },
+        _count: { txid: true },
+        _sum: { sats: true },
+        orderBy: { _sum: { sats: 'desc' } },
+        take: Math.min(limit, 100),
+      })
+
+      // Enrich with WalletEngagement data if available
+      const leaderboard = await Promise.all(
+        results.map(async (entry, index) => {
+          let engagement: {
+            tier: number
+            currentStreak: number
+            engagementPoints: number
+          } | null = null
+          try {
+            engagement = await this.db.walletEngagement.findUnique({
+              where: { scriptPayload: entry.scriptPayload },
+              select: {
+                tier: true,
+                currentStreak: true,
+                engagementPoints: true,
+              },
+            })
+          } catch {
+            // WalletEngagement may not exist for this wallet
+          }
+          return {
+            rank: index + 1,
+            scriptPayload: entry.scriptPayload,
+            totalVotes: entry._count.txid,
+            totalBurned: entry._sum.sats?.toString() ?? '0',
+            tier: engagement?.tier ?? 0,
+            currentStreak: engagement?.currentStreak ?? 0,
+            engagementPoints: engagement?.engagementPoints ?? 0,
+          }
+        }),
+      )
+
+      return leaderboard
+    } catch (e) {
+      throw new Error(`db.apiGetLeaderboard: ${e.message}`)
+    }
+  }
+
+  // ─── Private Helpers ──────────────────────────────────────────────────
+
   /**
    * Retrieves voter details for a specific platform profile
    * @param tx - The Prisma client transaction

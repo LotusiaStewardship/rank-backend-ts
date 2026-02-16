@@ -9,6 +9,12 @@ type ParsedConfig = {
     height: number
     hash: string
   }
+  referral: {
+    secret: string
+  }
+  admin: {
+    secret: string
+  }
   push: {
     vapid: {
       subject: string
@@ -50,6 +56,12 @@ class Config {
       genesis: {
         height: parseInt(this.env.parsed?.RANK_GENESIS_HEIGHT),
         hash: this.env.parsed?.RANK_GENESIS_HASH,
+      },
+      referral: {
+        secret: this.env.parsed?.REFERRAL_SECRET,
+      },
+      admin: {
+        secret: this.env.parsed?.ADMIN_SECRET,
       },
       push: {
         vapid: {

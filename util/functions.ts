@@ -1,7 +1,11 @@
-import { EXT_INSTANCE_ID_DIFFICULTY, HTTP } from './constants'
+import {
+  EXT_INSTANCE_ID_DIFFICULTY,
+  HTTP,
+  REFERRAL_CODE_LENGTH,
+} from './constants'
 import { ScriptChunkPlatformUTF8 } from 'xpi-ts/lib/rank'
 import { Block } from 'lotus-nng-client'
-import { Address, Message, Networks } from 'xpi-ts/lib/bitcore'
+import { Address, BufferUtil, Message, Networks } from 'xpi-ts/lib/bitcore'
 import type { Request, Response } from 'express'
 import type { TopicCategory, Topic } from '../lib/push'
 import { AuthorizationPayload } from '../lib/api/authCache'
@@ -59,7 +63,7 @@ export async function isValidInstanceId({
   } catch (e) {
     log([
       ['api.error', 'isValidInstanceId'],
-      ['error', e.message],
+      ['error', (e as Error).message],
     ])
     return false
   }
@@ -160,11 +164,11 @@ export function toTopic(category: TopicCategory, subcategory: string): Topic {
  * @returns The script payload or null if invalid
  */
 export function extractScriptPayload(header: string): string | null {
-  const [authData] = processAuthorizationHeader(header)
-  if (!authData) {
+  const result = processAuthorizationHeader(header)
+  if (!result) {
     return null
   }
-  return authData.scriptPayload
+  return result.authData.scriptPayload
 }
 
 /**
@@ -175,21 +179,27 @@ export function extractScriptPayload(header: string): string | null {
  *   - Raw authorization data string or null if invalid
  *   - Signature string or null if invalid
  */
-export function processAuthorizationHeader(
-  header: string | undefined,
-): [AuthorizationPayload, string, string] {
+export function processAuthorizationHeader(header: string | undefined): {
+  authData: AuthorizationPayload
+  authPayloadStr: string
+  signature: string
+} | null {
   if (header === undefined) {
-    return [null, null, null]
+    return null
   }
   if (!isBase64(header)) {
-    return [null, null, null]
+    return null
   }
   const [authPayloadStr, signature] = Util.base64.decode(header).split(':::')
   if (!authPayloadStr || !signature) {
-    return [null, null, null]
+    return null
   }
   const authData = JSON.parse(authPayloadStr ?? '{}') as AuthorizationPayload
-  return [authData, authPayloadStr, signature]
+  return {
+    authData,
+    authPayloadStr,
+    signature,
+  }
 }
 
 /**
@@ -234,9 +244,7 @@ export const Util = {
      * @returns The decoded string
      */
     decode(str: string) {
-      if (!isBase64(str)) {
-        throw new Error('Invalid base64 string')
-      }
+      // Don't validate the string; validation should be handled by the caller
       return Buffer.from(str, 'base64').toString('utf8')
     },
   },
@@ -337,7 +345,7 @@ export const Validate = {
     }
     // convert scriptPayload to Address
     const address = Address.fromPublicKeyHash(
-      Buffer.from(scriptPayload, 'hex'),
+      BufferUtil.from(scriptPayload, 'hex'),
       Networks.livenet,
     )
     // verify message signature
@@ -370,5 +378,58 @@ export const Validate = {
       }
     }
     return { searchType }
+  },
+
+  /**
+   * Validates that the provided referral code is a valid hex string of the expected length
+   * @param code - The referral code to validate
+   * @returns The validated referral code or an error
+   */
+  referralCode: (code: string | undefined) => {
+    if (code === undefined || code.length === 0) {
+      return {
+        error: 'referral code must be specified',
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    const regex = new RegExp(`^[a-f0-9]{${REFERRAL_CODE_LENGTH}}$`)
+    if (!regex.test(code)) {
+      return {
+        error: `referral code must be a ${REFERRAL_CODE_LENGTH}-character hex string`,
+        statusCode: HTTP.BAD_REQUEST,
+      }
+    }
+    return { code }
+  },
+
+  /**
+   * Validates the admin secret header against the configured ADMIN_SECRET
+   * @param header - The admin secret header value
+   * @param configuredSecret - The configured admin secret from environment
+   * @returns Success or error
+   */
+  adminSecret: (
+    header: string | undefined,
+    configuredSecret: string | undefined,
+  ) => {
+    if (!configuredSecret) {
+      return {
+        error: 'admin endpoint not configured',
+        statusCode: HTTP.NOT_FOUND,
+      }
+    }
+    if (header === undefined || header.length === 0) {
+      return {
+        error: 'admin secret must be specified',
+        statusCode: HTTP.UNAUTHORIZED,
+      }
+    }
+    if (header !== configuredSecret) {
+      return {
+        error: 'invalid admin secret',
+        statusCode: HTTP.FORBIDDEN,
+      }
+    }
+    return { valid: true }
   },
 }

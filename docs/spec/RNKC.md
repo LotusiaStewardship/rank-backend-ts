@@ -193,7 +193,7 @@ Breakdown:
   - `6a` - OP_RETURN
   - `4c` - OP_PUSHDATA1
   - `1b` - Push 27 bytes
-  - `54686973206973206120636f6d6d656e7420616e6f7574206120747765657421` - "This is a comment anout a tweet!" (27 bytes)
+  - `54686973206973206120636f6d6d656e7420616e6f7574206120747765657421` - "This is a comment about a tweet!" (27 bytes)
 
 ### Example 2: Comment on Lotusia Profile with Post ID
 
@@ -202,7 +202,7 @@ Output 0:
 6a 04 524e4b43 01 00 14 1234567890abcdef1234567890abcdef12345678 20 abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
 
 Output 1:
-6a 4c df [223 bytes of comment data]
+6a 4c dc [220 bytes of comment data]
 
 Output 2:
 6a 4c 7f [127 bytes of comment data]
@@ -226,8 +226,8 @@ Breakdown:
 
   - `6a` - OP_RETURN
   - `4c` - OP_PUSHDATA1
-  - `df` - Push 223 bytes
-  - [223 bytes of comment data]
+  - `dc` - Push 220 bytes
+  - [220 bytes of comment data]
 
 - Output 2:
   - `6a` - OP_RETURN
@@ -321,7 +321,7 @@ The indexer tracks:
 
 ### Platform Limitations
 
-- **Supported Platforms**: Lotusia and Twitter/X only
+- **Supported Platforms**: Currently Lotusia and Twitter/X only
 - **Profile ID Format**: Platform-specific validation required
 - **Post ID Format**: Platform-specific validation required
 
@@ -329,7 +329,7 @@ The indexer tracks:
 
 ### Relationship with Other LOKAD Protocols
 
-The RNKC protocol is one of several LOKAD-based protocols in the Lotus ecosystem. Other protocols may coexist in the same transaction, but each output is processed independently based on its LOKAD prefix.
+The RNKC protocol is one of several LOKAD-based protocols in the Lotus ecosystem. Other protocols may coexist in the same transaction, but each output is processed independently based on its LOKAD prefix. Because the RNKC LOKAD protocol encompasses 2-3 OP_RETURN outputs, it is not advisable to associate RNKC with other LOKAD protocols in the same transaction.
 
 ### Cross-Protocol References
 

@@ -1,3 +1,5 @@
-import { API } from '../api'
-export type Activities = typeof API.prototype.temporalActivities
-export type LocalActivities = typeof API.prototype.temporalLocalActivities
+import { Temporal } from './setup'
+export type Activities = typeof Temporal.prototype.activities
+export type LocalActivities = typeof Temporal.prototype.localActivities
+
+export { Temporal }

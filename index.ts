@@ -1,4 +1,5 @@
 import { Database } from './lib/database'
+import { Temporal } from './lib/temporal'
 import { SubscriptionManager } from './lib/push'
 import { RuntimeState } from './lib/state'
 import { Indexer } from './lib/indexer'
@@ -11,18 +12,21 @@ import {
   NNG_PUB_DEFAULT_SOCKET_PATH,
   NNG_RPC_DEFAULT_SOCKET_PATH,
 } from './util/constants'
+import config from './config'
 
 type Exception = [number | string, string]
 /**
  * SETUP
  */
 // Instantiate all required modules
-const db = new Database(process.env.DATABASE_URL)
+const db = new Database(config.datasourceUrl)
+const temporal = new Temporal(db)
 const subscriptionManager = new SubscriptionManager(db)
 const state = new RuntimeState()
 const indexer = new Indexer({
   state,
   db,
+  temporal,
   subscriptionManager,
   pubUri: String(process.argv[2] || NNG_PUB_DEFAULT_SOCKET_PATH), // /path/to/pub.pipe
   rpcUri: String(process.argv[3] || NNG_RPC_DEFAULT_SOCKET_PATH), // /path/to/rpc.pipe
@@ -33,6 +37,7 @@ const api = new API({
   routers: [],
   state,
   db,
+  temporal,
 })
 const pushApi = new PushAPI({ subscriptionManager, authCache, state, db })
 // Event/Signal handlers
@@ -53,15 +58,18 @@ async function close(exitCode: number | string, exitError?: string) {
     await api.close()
     await pushApi.close()
     await indexer.close()
-    await db.disconnect()
+    await temporal.close()
     subscriptionManager.close()
+
+    // disconnect db last
+    await db.disconnect()
   } catch (e) {
     // ignore
   }
   if (exitError?.length) {
     log([
       ['shutdown', 'fatal'],
-      ['error', `${ERR[exitCode]}`],
+      ['error', `${ERR[exitCode as number]}`],
       [`code`, `${exitCode}`],
       [`debug`, `${exitError}`],
     ])
@@ -79,6 +87,7 @@ async function close(exitCode: number | string, exitError?: string) {
  * RUNTIME
  */
 ;(async () => {
+  // connect db first
   await db.connect()
   log([
     ['init', 'database'],
@@ -88,7 +97,8 @@ async function close(exitCode: number | string, exitError?: string) {
   await indexer.init()
   await api.init()
   await pushApi.init()
+  await temporal.init()
 })().catch(e => {
   const [exitCode, exitError] = e as Exception
-  return close(ERR[exitCode], exitError)
+  return close(ERR[exitCode as number], exitError)
 })
