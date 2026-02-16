@@ -1442,17 +1442,7 @@ export class Indexer extends EventEmitter {
 
       // Signal Temporal to process the faucet drip
       try {
-        // Import the API's temporal client via the runtime state
-        // The Temporal signal is fire-and-forget from the indexer's perspective
-        const { Connection, Client } = await import('@temporalio/client')
-        const connection = await Connection.connect({
-          address: config.temporal.host,
-        })
-        const client = new Client({
-          connection,
-          namespace: config.temporal.namespace,
-        })
-        await client.workflow.signalWithStart(
+        await this.temporal.client.workflow.signalWithStart(
           config.temporal.command.workflowType,
           {
             signal: config.temporal.command.signal,
@@ -1470,7 +1460,6 @@ export class Indexer extends EventEmitter {
             ],
           },
         )
-        await connection.close()
       } catch (e) {
         // Log but don't throw — the drip can be retried manually
         log([
