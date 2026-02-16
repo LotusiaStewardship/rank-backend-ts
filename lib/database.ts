@@ -2536,6 +2536,405 @@ export class Database {
     }
   }
 
+  /**
+   * Retrieves a paginated feed of posts with profile data, rankings, and comments.
+   * This is the primary unified feed query — it fetches Post models directly and
+   * includes their associated Profile metrics, RNKC comment metadata (for Lotusia
+   * posts), and reply threads.
+   *
+   * Supports filtering by platform, sorting by ranking/recency/controversy, and
+   * optional wallet-specific vote metadata via scriptPayload.
+   *
+   * @param filters - Feed filter parameters (platform, sortBy, time range, pagination, scriptPayload)
+   * @returns Feed response with PostAPI[] and pagination metadata
+   */
+  async apiGetFeedPosts(filters: FeedFilterParams = {}): Promise<FeedResponse> {
+    const {
+      platform,
+      sortBy = 'ranking',
+      startTime,
+      page = 1,
+      pageSize = 20,
+      scriptPayload,
+    } = filters
+
+    const normalizedPage = Math.max(1, page)
+    const normalizedPageSize = Math.min(20, Math.max(1, pageSize))
+
+    try {
+      return await this.db.$transaction(async tx => {
+        // Build where clause for Post model
+        const whereClause: any = {}
+        if (platform) {
+          whereClause.platform = platform
+        }
+        // Time-based filtering: find posts that received votes within the timespan
+        if (startTime && startTime !== 'all') {
+          whereClause.ranks = {
+            some: {
+              timestamp: { gte: getTimestampUTC(startTime) },
+            },
+          }
+        }
+
+        // Build orderBy based on sort mode
+        let orderBy: any
+        switch (sortBy) {
+          case 'recent':
+            // Most recently voted-on posts first (by latest RANK tx)
+            // Prisma doesn't support ordering by relation aggregates directly,
+            // so we order by ranking desc as a proxy and filter by time
+            orderBy = [{ ranking: 'desc' }]
+            break
+          case 'controversial':
+            // Posts with high vote counts on both sides — order by total votes desc
+            // and filter for posts with both positive and negative votes
+            whereClause.AND = [
+              { votesPositive: { gt: 0 } },
+              { votesNegative: { gt: 0 } },
+            ]
+            orderBy = [{ votesPositive: 'desc' }, { votesNegative: 'desc' }]
+            break
+          case 'ranking':
+          default:
+            orderBy = [{ ranking: 'desc' }]
+            break
+        }
+
+        // Wallet-specific RANK vote filter (for Vote-to-Reveal postMeta)
+        const includeRanks = !scriptPayload
+          ? undefined
+          : {
+              where: { scriptPayload, sentiment: { not: 'neutral' } },
+              select: {
+                txid: true,
+                sats: true,
+                sentiment: true,
+              },
+            }
+
+        const [totalItems, posts] = await Promise.all([
+          tx.post.count({ where: whereClause }),
+          tx.post.findMany({
+            where: whereClause,
+            orderBy,
+            skip: (normalizedPage - 1) * normalizedPageSize,
+            take: normalizedPageSize,
+            include: {
+              profile: {
+                select: targetEntityMetricsSelect,
+              },
+              // RNKC data for Lotusia posts (comment metadata)
+              comment: {
+                select: {
+                  inReplyToPlatform: true,
+                  inReplyToProfileId: true,
+                  inReplyToPostId: true,
+                  timestamp: true,
+                  firstSeen: true,
+                },
+              },
+              // Replies to this post
+              comments: {
+                include: {
+                  post: {
+                    include: {
+                      profile: {
+                        select: targetEntityMetricsSelect,
+                      },
+                    },
+                  },
+                },
+              },
+              // Wallet-specific vote data (if scriptPayload provided)
+              ranks: includeRanks,
+            },
+          }),
+        ])
+
+        const totalPages = Math.ceil(totalItems / normalizedPageSize)
+
+        // Convert each post to PostAPI shape
+        const feedPosts: PostAPI[] = []
+        for (const post of posts) {
+          const postData: PostAPI = {
+            id: post.id,
+            platform: post.platform as ScriptChunkPlatformUTF8,
+            profileId: post.profileId,
+            ranking: post.ranking.toString(),
+            satsPositive: post.satsPositive.toString(),
+            satsNegative: post.satsNegative.toString(),
+            votesPositive: post.votesPositive,
+            votesNegative: post.votesNegative,
+            profile: {
+              ranking: post.profile.ranking.toString(),
+              satsPositive: post.profile.satsPositive.toString(),
+              satsNegative: post.profile.satsNegative.toString(),
+              votesPositive: post.profile.votesPositive,
+              votesNegative: post.profile.votesNegative,
+            },
+          }
+          // Lotusia post: add RNKC comment data (text, inReplyTo, timestamps)
+          if (post.data) {
+            postData.data = toCommentUTF8(post.data)
+            if (post.comment) {
+              postData.inReplyToPlatform = post.comment
+                .inReplyToPlatform as ScriptChunkPlatformUTF8
+              postData.inReplyToProfileId = post.comment.inReplyToProfileId
+              postData.inReplyToPostId = post.comment.inReplyToPostId
+              const firstSeenSeconds = post.comment.firstSeen / 1_000n
+              postData.timestamp =
+                firstSeenSeconds < post.comment.timestamp
+                  ? firstSeenSeconds.toString()
+                  : (post.comment.timestamp?.toString() ?? null)
+              postData.firstSeen = firstSeenSeconds.toString()
+            }
+          }
+          // Add reply threads (RNKC comments on this post)
+          if (post.comments?.length) {
+            postData.comments = []
+            for (const reply of post.comments) {
+              postData.comments.push(
+                this.convertRankCommentToPostAPI(
+                  reply as unknown as IndexedTransactionRNKC,
+                ),
+              )
+            }
+          }
+          // Add wallet-specific vote metadata (Vote-to-Reveal R1)
+          if (post.ranks?.length) {
+            postData.postMeta = await this.convertRankTransactionsToPostMeta(
+              post.ranks,
+            )
+          }
+          feedPosts.push(postData)
+        }
+
+        return {
+          posts: feedPosts,
+          pagination: {
+            page: normalizedPage,
+            pageSize: normalizedPageSize,
+            totalPages,
+            totalItems,
+            hasNext: normalizedPage < totalPages,
+            hasPrev: normalizedPage > 1,
+          },
+        }
+      })
+    } catch (e) {
+      throw new Error(`db.apiGetFeedPosts: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves trending posts based on recent vote activity volume.
+   * Finds posts with the most RANK transaction activity within a time window,
+   * then fetches the full Post data with profile and comment relations.
+   *
+   * @param windowHours - Time window in hours (default 24h)
+   * @param limit - Maximum number of results (default 20)
+   * @param scriptPayload - Optional wallet for Vote-to-Reveal metadata
+   * @returns Array of PostAPI objects ordered by recent activity volume
+   */
+  async apiGetTrendingPosts(
+    windowHours: number = 24,
+    limit: number = 20,
+    scriptPayload?: string,
+  ): Promise<PostAPI[]> {
+    try {
+      const startTimestamp = Math.floor(Date.now() / 1000) - windowHours * 3600
+
+      // Phase 1: Find post IDs with the most activity in the window
+      const trendingGroups = await this.db.rankTransaction.groupBy({
+        by: ['platform', 'profileId', 'postId'],
+        where: {
+          timestamp: { gte: startTimestamp },
+          postId: { not: null },
+        },
+        _count: { txid: true },
+        _sum: { sats: true },
+        orderBy: { _count: { txid: 'desc' } },
+        take: limit,
+      })
+
+      if (!trendingGroups.length) {
+        return []
+      }
+
+      // Wallet-specific RANK vote filter
+      const includeRanks = !scriptPayload
+        ? undefined
+        : {
+            where: { scriptPayload, sentiment: { not: 'neutral' } },
+            select: {
+              txid: true,
+              sats: true,
+              sentiment: true,
+            },
+          }
+
+      // Phase 2: Fetch full Post data for each trending post
+      const posts = await this.db.$transaction(
+        trendingGroups.map(group =>
+          this.db.post.findFirst({
+            where: {
+              platform: group.platform,
+              profileId: group.profileId,
+              id: group.postId,
+            },
+            include: {
+              profile: {
+                select: targetEntityMetricsSelect,
+              },
+              comment: {
+                select: {
+                  inReplyToPlatform: true,
+                  inReplyToProfileId: true,
+                  inReplyToPostId: true,
+                  timestamp: true,
+                  firstSeen: true,
+                },
+              },
+              comments: {
+                include: {
+                  post: {
+                    include: {
+                      profile: {
+                        select: targetEntityMetricsSelect,
+                      },
+                    },
+                  },
+                },
+              },
+              ranks: includeRanks,
+            },
+          }),
+        ),
+      )
+
+      // Phase 3: Convert to PostAPI shape, preserving trending order
+      const result: PostAPI[] = []
+      for (const post of posts) {
+        if (!post) continue
+        const postData: PostAPI = {
+          id: post.id,
+          platform: post.platform as ScriptChunkPlatformUTF8,
+          profileId: post.profileId,
+          ranking: post.ranking.toString(),
+          satsPositive: post.satsPositive.toString(),
+          satsNegative: post.satsNegative.toString(),
+          votesPositive: post.votesPositive,
+          votesNegative: post.votesNegative,
+          profile: {
+            ranking: post.profile.ranking.toString(),
+            satsPositive: post.profile.satsPositive.toString(),
+            satsNegative: post.profile.satsNegative.toString(),
+            votesPositive: post.profile.votesPositive,
+            votesNegative: post.profile.votesNegative,
+          },
+        }
+        if (post.data) {
+          postData.data = toCommentUTF8(post.data)
+          if (post.comment) {
+            postData.inReplyToPlatform = post.comment
+              .inReplyToPlatform as ScriptChunkPlatformUTF8
+            postData.inReplyToProfileId = post.comment.inReplyToProfileId
+            postData.inReplyToPostId = post.comment.inReplyToPostId
+            const firstSeenSeconds = post.comment.firstSeen / 1_000n
+            postData.timestamp =
+              firstSeenSeconds < post.comment.timestamp
+                ? firstSeenSeconds.toString()
+                : (post.comment.timestamp?.toString() ?? null)
+            postData.firstSeen = firstSeenSeconds.toString()
+          }
+        }
+        if (post.comments?.length) {
+          postData.comments = []
+          for (const reply of post.comments) {
+            postData.comments.push(
+              this.convertRankCommentToPostAPI(
+                reply as unknown as IndexedTransactionRNKC,
+              ),
+            )
+          }
+        }
+        if (post.ranks?.length) {
+          postData.postMeta = await this.convertRankTransactionsToPostMeta(
+            post.ranks,
+          )
+        }
+        result.push(postData)
+      }
+      return result
+    } catch (e) {
+      throw new Error(`db.apiGetTrendingPosts: ${e.message}`)
+    }
+  }
+
+  /**
+   * Retrieves a leaderboard of top voters ranked by total sats burned in a period.
+   * Used for the Leaderboard page (Phase 5.4) and the `getLeaderboard` API composable
+   * method specified in 02-FEED-AND-ONBOARDING.md.
+   *
+   * @param period - Time period ('daily' or 'weekly')
+   * @param limit - Maximum number of entries (default 20)
+   * @returns Array of leaderboard entries with wallet stats
+   */
+  async apiGetLeaderboard(period: 'daily' | 'weekly', limit: number = 20) {
+    try {
+      const startTime = period === 'daily' ? 'today' : 'week'
+      const startTimestamp = getTimestampUTC(startTime as Timespan)
+
+      const results = await this.db.rankTransaction.groupBy({
+        by: ['scriptPayload'],
+        where: {
+          timestamp: { gte: startTimestamp },
+        },
+        _count: { txid: true },
+        _sum: { sats: true },
+        orderBy: { _sum: { sats: 'desc' } },
+        take: Math.min(limit, 100),
+      })
+
+      // Enrich with WalletEngagement data if available
+      const leaderboard = await Promise.all(
+        results.map(async (entry, index) => {
+          let engagement: {
+            tier: number
+            currentStreak: number
+            engagementPoints: number
+          } | null = null
+          try {
+            engagement = await this.db.walletEngagement.findUnique({
+              where: { scriptPayload: entry.scriptPayload },
+              select: {
+                tier: true,
+                currentStreak: true,
+                engagementPoints: true,
+              },
+            })
+          } catch {
+            // WalletEngagement may not exist for this wallet
+          }
+          return {
+            rank: index + 1,
+            scriptPayload: entry.scriptPayload,
+            totalVotes: entry._count.txid,
+            totalBurned: entry._sum.sats?.toString() ?? '0',
+            tier: engagement?.tier ?? 0,
+            currentStreak: engagement?.currentStreak ?? 0,
+            engagementPoints: engagement?.engagementPoints ?? 0,
+          }
+        }),
+      )
+
+      return leaderboard
+    } catch (e) {
+      throw new Error(`db.apiGetLeaderboard: ${e.message}`)
+    }
+  }
+
   // ─── Private Helpers ──────────────────────────────────────────────────
 
   /**
