@@ -816,7 +816,8 @@ export class API extends EventEmitter {
             // e.g., 'day' -> 'Day' to form query type like 'getActivityDay'
             const timespan =
               startTime.charAt(0).toUpperCase() + startTime.slice(1)
-            result = (await this.temporal.activities.queryWorkflow({
+            // Query the Temporal workflow for cached wallet activity data
+            const result = await this.temporal.activities.queryWorkflow({
               workflowId: config.temporal.api.chartsWalletActivity.workflowId,
               queryType:
                 config.temporal.api.chartsWalletActivity.queryType + timespan,
