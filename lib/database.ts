@@ -157,6 +157,12 @@ type PostAPI = TargetEntityMetricsAPI & {
   ranks?: IndexedTransactionRANK[]
   /** Comments associated with the post, modified for `application/json` API response */
   comments?: PostAPI[]
+  /**
+   * Ancestor chain for RNKC replies — ordered from genesis post (index 0) to
+   * immediate parent (last index). Only populated when the post has inReplyToPostId set.
+   * Enables Twitter-style "view full conversation" rendering on the detail page.
+   */
+  ancestors?: PostAPI[]
   /** Metadata about the post's voter, included in authorized API responses */
   postMeta?: VoterPostMetadata
   /**
@@ -940,14 +946,30 @@ export class Database {
             firstSeenSeconds < timestamp
               ? firstSeenSeconds.toString()
               : timestamp.toString()
+          // Fetch ancestor chain for Twitter-style "view full conversation" rendering.
+          // Only populated when this post is a reply (inReplyToPostId is set).
+          if (inReplyToPostId) {
+            data.ancestors = await this.fetchAncestorChain(
+              tx as PrismaClient,
+              inReplyToPlatform,
+              inReplyToProfileId,
+              inReplyToPostId,
+            )
+          }
         }
         // if this post has replies, add them to the return data
         if (post.comments) {
           data.comments = []
           const postRepliesIterable = toAsyncIterable(post.comments)
           for await (const reply of postRepliesIterable) {
-            data.comments.push(this.convertRankCommentToPostAPI(reply))
-            // TODO: add nested replies to the return data
+            const replyAPI = this.convertRankCommentToPostAPI(reply)
+            // Serialize level-2 nested replies (fetched by Prisma include above)
+            if (reply.post.comments?.length) {
+              replyAPI.comments = reply.post.comments.map(nested =>
+                this.convertRankCommentToPostAPI(nested),
+              )
+            }
+            data.comments.push(replyAPI)
           }
         }
         // set up post metadata
@@ -3186,6 +3208,121 @@ export class Database {
 
     return Object.values(voterDetails)
   }
+  /**
+   * Walks up the inReplyToPostId chain from a given post, collecting each
+   * ancestor as a PostAPI, until reaching the genesis post (no inReplyToPostId).
+   *
+   * Returns ancestors ordered from genesis (index 0) to immediate parent (last index).
+   * Caps traversal at 20 hops to prevent infinite loops from malformed data.
+   *
+   * @param tx - Prisma transaction client (this method is called within a transaction)
+   * @param inReplyToPlatform - Platform of the immediate parent
+   * @param inReplyToProfileId - ProfileId of the immediate parent
+   * @param inReplyToPostId - PostId of the immediate parent
+   */
+  private async fetchAncestorChain(
+    tx: PrismaClient,
+    inReplyToPlatform: string,
+    inReplyToProfileId: string,
+    inReplyToPostId: string,
+  ): Promise<PostAPI[]> {
+    const ancestors: PostAPI[] = []
+    const MAX_DEPTH = 20
+
+    let currentPlatform = inReplyToPlatform
+    let currentProfileId = inReplyToProfileId
+    let currentPostId = inReplyToPostId
+
+    for (let i = 0; i < MAX_DEPTH; i++) {
+      try {
+        const post = await tx.post.findUnique({
+          where: {
+            platform_profileId_id: {
+              platform: currentPlatform,
+              profileId: currentProfileId,
+              id: currentPostId,
+            },
+          },
+          include: {
+            profile: {
+              select: {
+                ranking: true,
+                satsPositive: true,
+                satsNegative: true,
+                votesPositive: true,
+                votesNegative: true,
+              },
+            },
+            comment: {
+              select: {
+                data: true,
+                inReplyToPlatform: true,
+                inReplyToProfileId: true,
+                inReplyToPostId: true,
+                timestamp: true,
+                firstSeen: true,
+              },
+            },
+          },
+        })
+
+        if (!post) break
+
+        const ancestorAPI: PostAPI = {
+          id: post.id,
+          platform: post.platform as ScriptChunkPlatformUTF8,
+          profileId: post.profileId,
+          firstVoted: post.firstVoted.toString(),
+          lastVoted: post.lastVoted.toString(),
+          ranking: post.ranking.toString(),
+          satsPositive: post.satsPositive.toString(),
+          satsNegative: post.satsNegative.toString(),
+          votesPositive: post.votesPositive,
+          votesNegative: post.votesNegative,
+          profile: {
+            ranking: post.profile.ranking.toString(),
+            satsPositive: post.profile.satsPositive.toString(),
+            satsNegative: post.profile.satsNegative.toString(),
+            votesPositive: post.profile.votesPositive,
+            votesNegative: post.profile.votesNegative,
+          },
+        }
+
+        // Populate RNKC-specific fields if this ancestor is a Lotusia comment
+        if (post.comment) {
+          ancestorAPI.data = BufferUtil.from(post.data).toString('utf-8')
+          ancestorAPI.inReplyToPlatform = post.comment
+            .inReplyToPlatform as ScriptChunkPlatformUTF8
+          ancestorAPI.inReplyToProfileId = post.comment.inReplyToProfileId
+          ancestorAPI.inReplyToPostId = post.comment.inReplyToPostId
+          const firstSeenSeconds = post.comment.firstSeen / 1_000n
+          ancestorAPI.firstSeen = firstSeenSeconds.toString()
+          ancestorAPI.timestamp =
+            firstSeenSeconds < post.comment.timestamp
+              ? firstSeenSeconds.toString()
+              : post.comment.timestamp.toString()
+        }
+
+        // Prepend so final array is root-first
+        ancestors.unshift(ancestorAPI)
+
+        // Walk up to the next ancestor if this post is also a reply
+        if (post.comment?.inReplyToPostId) {
+          currentPlatform = post.comment.inReplyToPlatform
+          currentProfileId = post.comment.inReplyToProfileId
+          currentPostId = post.comment.inReplyToPostId
+        } else {
+          // Reached genesis post — stop
+          break
+        }
+      } catch {
+        break
+      }
+    }
+
+    return ancestors
+  }
+
   /**
    * Converts a TransactionRNKC to a PostAPI
    * @param rnkc - The TransactionRNKC to convert
