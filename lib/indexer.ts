@@ -161,8 +161,10 @@ export interface Post extends TargetEntity {
   profileId: string
   /** Optional post content data */
   data?: Uint8Array
-  /** Unix timestamp (ms) when the post was first voted on */
+  /** Unix timestamp (seconds) when the post was first voted on */
   firstVoted: bigint
+  /** Unix timestamp (seconds) when the post was most recently voted on (for R64 temporal decay) */
+  lastVoted: bigint
 }
 /**
  * Runtime cache for quickly reconciling missing LOKAD txs with blocks
@@ -1314,6 +1316,8 @@ export class Indexer extends EventEmitter {
         post.satsNegative += satsNegative
         post.votesPositive += votesPositive
         post.votesNegative += votesNegative
+        // Update lastVoted to the most recent timestamp
+        post.lastVoted = partialRANK.timestamp ?? partialRANK.firstSeen / 1_000n
         post.ranks.push(partialRANK)
       } else {
         profile.posts.set(postId, {
@@ -1322,9 +1326,10 @@ export class Indexer extends EventEmitter {
           profileId,
           ranks: [partialRANK],
           comments: undefined,
-          // use the block timestamp for firstVoted, otherwise use
+          // use the block timestamp for firstVoted/lastVoted, otherwise use
           // the first-seen timestamp for mempool time (convert to seconds first)
           firstVoted: partialRANK.timestamp ?? partialRANK.firstSeen / 1_000n,
+          lastVoted: partialRANK.timestamp ?? partialRANK.firstSeen / 1_000n,
           ranking,
           satsPositive,
           satsNegative,
@@ -1373,6 +1378,7 @@ export class Indexer extends EventEmitter {
         // use the block timestamp for firstVoted, otherwise use
         // the first-seen timestamp for mempool time (convert to seconds first)
         firstVoted: rnkc.timestamp ?? rnkc.firstSeen / 1_000n,
+        lastVoted: rnkc.timestamp ?? rnkc.firstSeen / 1_000n,
       })
     }
     // Increment post ranking and satsPositive for the RNKC tx
@@ -1435,9 +1441,10 @@ export class Indexer extends EventEmitter {
         platform: inReplyToPlatform,
         profileId: inReplyToProfileId,
         comments: [partialRNKC],
-        // use the block timestamp for firstVoted, otherwise use
+        // use the block timestamp for firstVoted/lastVoted, otherwise use
         // the first-seen timestamp for mempool time (convert to seconds first)
         firstVoted: rnkc.timestamp ?? rnkc.firstSeen / 1_000n,
+        lastVoted: rnkc.timestamp ?? rnkc.firstSeen / 1_000n,
       })
     }
     profile.posts.set(inReplyToPostId, post)
@@ -1456,9 +1463,10 @@ export class Indexer extends EventEmitter {
       ranks: post?.ranks,
       data: post?.data,
       comments: post?.comments || [],
-      // Use the provided firstVoted timestamp, otherwise use
+      // Use the provided firstVoted/lastVoted timestamp, otherwise use
       // the current timestamp as a fallback
       firstVoted: post?.firstVoted ?? BigInt(Date.now()),
+      lastVoted: post?.lastVoted ?? post?.firstVoted ?? BigInt(Date.now()),
       ranking: post?.ranking || 0n,
       satsPositive: post?.satsPositive || 0n,
       satsNegative: post?.satsNegative || 0n,

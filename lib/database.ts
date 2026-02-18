@@ -146,6 +146,7 @@ type PostAPI = TargetEntityMetricsAPI & {
     profileMeta?: VoterProfileMetadata
   }
   firstVoted: string
+  lastVoted: string
   data?: string
   inReplyToPlatform?: ScriptChunkPlatformUTF8
   inReplyToProfileId?: string
@@ -782,7 +783,8 @@ export class Database {
             platform,
             profileId,
             data: '',
-            firstVoted: '',
+            firstVoted: null,
+            lastVoted: null,
             inReplyToPlatform: null,
             inReplyToProfileId: null,
             inReplyToPostId: null,
@@ -807,7 +809,8 @@ export class Database {
             id: postId,
             platform,
             profileId,
-            firstVoted: '',
+            firstVoted: null,
+            lastVoted: null,
             ranking: '0',
             satsPositive: '0',
             satsNegative: '0',
@@ -910,6 +913,9 @@ export class Database {
         data.satsNegative = post.satsNegative.toString()
         data.votesPositive = post.votesPositive
         data.votesNegative = post.votesNegative
+        // Add timestamps
+        data.firstVoted = post.firstVoted.toString()
+        data.lastVoted = post.lastVoted.toString()
         // if this is a Lotusia post, add the comment data to the return data
         // All RNKC fields will be available if the `data` relation is not null
         if (post.data) {
@@ -1858,6 +1864,7 @@ export class Database {
             profileId,
             data, // data is the comment text for Lotusia posts
             firstVoted: postTimestamp,
+            lastVoted: postLastVoted,
             ranking: postRanking,
             satsPositive: postSatsPositive,
             satsNegative: postSatsNegative,
@@ -1899,15 +1906,17 @@ export class Database {
                 profileId,
                 data, // data is the comment text for Lotusia posts
                 firstVoted: postTimestamp,
+                lastVoted: postLastVoted,
                 ranking: postRanking,
                 satsPositive: postSatsPositive,
                 satsNegative: postSatsNegative,
                 votesPositive: postVotesPositive,
                 votesNegative: postVotesNegative,
               },
-              // post exists
+              // post exists: update lastVoted to the most recent tx timestamp in this batch
               update: {
                 ...postIncrements,
+                lastVoted: postLastVoted,
               },
             }),
           )
@@ -2628,7 +2637,7 @@ export class Database {
             // Most recently voted-on posts first (by latest RANK tx)
             // Prisma doesn't support ordering by relation aggregates directly,
             // so we order by ranking desc as a proxy and filter by time
-            orderBy = [{ firstVoted: 'desc' }]
+            orderBy = [{ lastVoted: 'desc' }]
             break
           case 'controversial':
             // Posts with high vote counts on both sides — order by total votes desc
@@ -2712,11 +2721,19 @@ export class Database {
         // Convert each post to PostAPI shape, computing R62/R65 signals
         const feedPosts: PostAPI[] = []
         for (const post of posts) {
-          const firstVotedSeconds = Number(post.firstVoted)
+          // R64: decay anchor depends on sort mode.
+          // curated: firstVoted — prevents a trivial re-burn from resetting the
+          //   decay clock on old content (e.g. 100 XPI reviving a 2-week-old spam post).
+          // recent/other: lastVoted — re-emerging content with genuine new activity
+          //   surfaces correctly.
+          const decayAnchor =
+            sortBy === 'curated'
+              ? Number(post.firstVoted)
+              : Number(post.lastVoted)
           const signals = computeCompositeFeedScore(
             post.satsPositive,
             post.satsNegative,
-            firstVotedSeconds,
+            decayAnchor,
           )
           const postData: PostAPI = {
             id: post.id,
@@ -2724,6 +2741,7 @@ export class Database {
             profileId: post.profileId,
             ranking: post.ranking.toString(),
             firstVoted: post.firstVoted.toString(),
+            lastVoted: post.lastVoted.toString(),
             satsPositive: post.satsPositive.toString(),
             satsNegative: post.satsNegative.toString(),
             votesPositive: post.votesPositive,
@@ -2960,7 +2978,9 @@ export class Database {
       for (let i = 0; i < posts.length; i++) {
         const post = posts[i]
         if (!post) continue
-        const firstVotedSeconds = Number(post.firstVoted)
+        // R64: trending/recent feed uses lastVoted as the decay anchor so
+        // re-emerging content with genuine new activity surfaces correctly.
+        const decayAnchor = Number(post.lastVoted)
 
         // R66: compute velocity dampening for this post
         const velocityKey = `${post.platform}:${post.profileId}:${post.id}`
@@ -2970,11 +2990,11 @@ export class Database {
           BigInt(Math.floor(medianWindowBurns)),
         )
 
-        // R62 + R64 + R65: composite score with temporal decay and velocity dampening
+        // R62 + R64 + R65/R66: composite score with temporal decay and velocity dampening
         const signals = computeCompositeFeedScore(
           post.satsPositive,
           post.satsNegative,
-          firstVotedSeconds,
+          decayAnchor,
           velocityDampening,
         )
 
@@ -2984,6 +3004,7 @@ export class Database {
           profileId: post.profileId,
           ranking: post.ranking.toString(),
           firstVoted: post.firstVoted.toString(),
+          lastVoted: post.lastVoted.toString(),
           satsPositive: post.satsPositive.toString(),
           satsNegative: post.satsNegative.toString(),
           votesPositive: post.votesPositive,
@@ -3177,6 +3198,7 @@ export class Database {
       profileId: rnkc.post.profileId,
       data: BufferUtil.from(rnkc.data).toString('utf-8'),
       firstVoted: rnkc.post.firstVoted.toString(),
+      lastVoted: rnkc.post.lastVoted.toString(),
       inReplyToPlatform: rnkc.inReplyToPlatform as ScriptChunkPlatformUTF8,
       inReplyToProfileId: rnkc.inReplyToProfileId,
       inReplyToPostId: rnkc.inReplyToPostId,

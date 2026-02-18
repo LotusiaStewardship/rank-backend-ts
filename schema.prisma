@@ -64,6 +64,7 @@ model Post {
   profileId     String // Platform profile ID (i.e. username)
   data          Bytes? // the post text, in UInt8Array (decoded from UTF-8)
   firstVoted    BigInt // Time that this post was first voted on
+  lastVoted     BigInt // Time that this post was most recently voted on (for R64 temporal decay)
   ranking       BigInt // Overall post ranking, in satoshis (satsPositive - satsNegative)
   satsPositive  BigInt // Total amount of sats burned for positive sentiment
   satsNegative  BigInt // Total amount of sats burned for negative sentiment

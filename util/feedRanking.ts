@@ -267,8 +267,7 @@ export function computeVelocityDampening(
   if (rollingMedianBurns <= 0n) {
     return 1.0
   }
-  const velocityRatio =
-    Number(currentWindowBurns) / Number(rollingMedianBurns)
+  const velocityRatio = Number(currentWindowBurns) / Number(rollingMedianBurns)
   return 1 / (1 + Math.exp(sigmoidK * (velocityRatio - threshold)))
 }
 
@@ -281,23 +280,27 @@ export function computeVelocityDampening(
  * R63 (z-score capping) is applied at the feed-level after all items are
  * scored — see `applyZScoreCapping`.
  *
- * R64 (temporal conviction) is applied here via `firstVotedSeconds` when
- * provided. For full per-period conviction, use `computeTemporalConvictionScore`
- * directly.
+ * R64 (temporal conviction) is applied here via `decayAnchorSeconds` when
+ * provided. The caller decides which timestamp to use as the decay anchor:
+ * - curated feed: pass `firstVoted` (prevents trivial re-burns from resurrecting
+ *   old content by resetting the decay clock)
+ * - trending/recent feed: pass `lastVoted` (re-emerging content with genuine
+ *   new activity surfaces correctly)
+ * For full per-period conviction, use `computeTemporalConvictionScore` directly.
  *
  * R66 (velocity dampening) is applied here via `velocityDampening` when
  * provided (pre-computed by the caller from window burn data).
  *
  * @param satsPositive - Total positive burns (satoshis)
  * @param satsNegative - Total negative burns (satoshis)
- * @param firstVotedSeconds - Unix timestamp of first vote (for R64 temporal decay)
+ * @param decayAnchorSeconds - Unix timestamp used as the R64 decay anchor (caller-determined)
  * @param velocityDampening - Pre-computed velocity dampening factor (for R66)
  * @returns Composite feed score and bidirectional signal metrics
  */
 export function computeCompositeFeedScore(
   satsPositive: bigint,
   satsNegative: bigint,
-  firstVotedSeconds?: number,
+  decayAnchorSeconds?: number,
   velocityDampening: number = 1.0,
 ): {
   feedScore: number
@@ -308,8 +311,8 @@ export function computeCompositeFeedScore(
 } {
   let feedScore = computeAggregateFeedScore(satsPositive, satsNegative)
 
-  if (firstVotedSeconds !== undefined) {
-    feedScore = applyTemporalDecay(feedScore, firstVotedSeconds)
+  if (decayAnchorSeconds !== undefined) {
+    feedScore = applyTemporalDecay(feedScore, decayAnchorSeconds)
   }
 
   feedScore *= velocityDampening
