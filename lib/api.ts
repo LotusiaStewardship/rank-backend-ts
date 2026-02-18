@@ -49,7 +49,7 @@ import {
   type LogEntry,
 } from '../util/functions'
 import type { AuthorizationCache } from './api/authCache'
-import type { Timespan } from './database'
+import type { FeedFilterParams, Timespan } from './database'
 import { Temporal } from './temporal'
 
 /**
@@ -1128,9 +1128,7 @@ export class API extends EventEmitter {
       try {
         const filters = {
           platform: req.query.platform as ScriptChunkPlatformUTF8,
-          sortBy:
-            (req.query.sortBy as 'ranking' | 'recent' | 'controversial') ??
-            undefined,
+          sortBy: (req.query.sortBy as FeedFilterParams['sortBy']) ?? undefined,
           startTime: req.query.startTime as Timespan,
           page: req.query.page ? Number(req.query.page) : undefined,
           pageSize: req.query.pageSize ? Number(req.query.pageSize) : undefined,

@@ -21,6 +21,28 @@ export const API_FEED_CACHE_TTL_SECONDS = 60 // 1 minute cache for feed queries
 export const API_FEED_TRENDING_WINDOW_HOURS = 24 // Trending content from last 24h
 export const API_FEED_CONTROVERSIAL_MIN_VOTES = 5 // Minimum votes for controversy calculation
 /**
+ * Feed ranking algorithm constants (R62–R66)
+ * Implements burn-only, Sybil-neutral dampening for the off-chain feed layer.
+ * All functions operate on aggregate burn totals — never per-voter amounts.
+ * The user-facing name for this sort mode is 'curated'.
+ */
+/** R62: Logarithmic dampening base in satoshis. Burns at this level = 1.0 feed weight unit. */
+export const FEED_RANKING_LOG_BASE_SATS = 1_000_000n // 1 XPI = 1.0 unit
+/** R63: Maximum z-score for feed display. Caps outliers to prevent feed monopoly. */
+export const FEED_RANKING_ZSCORE_MAX = 3.0
+/** R63: Minimum number of scored posts before z-score normalization activates. */
+export const FEED_RANKING_ZSCORE_MIN_POSTS = 10
+/** R64: Half-life for temporal conviction decay, in hours. */
+export const FEED_RANKING_HALFLIFE_HOURS = 72
+/** R65: Controversy threshold (0–1). Above this ratio, a post is flagged as controversial. */
+export const FEED_RANKING_CONTROVERSY_THRESHOLD = 0.4
+/** R66: Velocity window for spike detection, in hours. */
+export const FEED_RANKING_VELOCITY_WINDOW_HOURS = 6
+/** R66: Velocity ratio above which sigmoid dampening begins. */
+export const FEED_RANKING_VELOCITY_THRESHOLD = 10.0
+/** R66: Sigmoid steepness parameter for velocity dampening curve. */
+export const FEED_RANKING_VELOCITY_SIGMOID_K = 0.5
+/**
  * NNG configuration
  */
 export const NNG_PUB_DEFAULT_SOCKET_PATH = `${os.homedir()}/.lotus/pub.pipe`

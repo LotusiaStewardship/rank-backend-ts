@@ -18,7 +18,13 @@ import {
   API_SEARCH_RESULT_COUNT,
   API_WALLET_RESULT_COUNT,
   ERR,
+  FEED_RANKING_VELOCITY_WINDOW_HOURS,
 } from '../util/constants'
+import {
+  computeCompositeFeedScore,
+  applyZScoreCapping,
+  computeVelocityDampening,
+} from '../util/feedRanking'
 import type {
   Outpoint,
   Post,
@@ -88,7 +94,7 @@ export type VoterActivitySummary = {
 /** Feed filter parameters for unified post feed queries */
 export type FeedFilterParams = {
   platform?: ScriptChunkPlatformUTF8
-  sortBy?: 'ranking' | 'recent' | 'controversial'
+  sortBy?: 'ranking' | 'curated' | 'recent' | 'controversial'
   startTime?: Timespan
   page?: number
   pageSize?: number
@@ -152,6 +158,22 @@ type PostAPI = TargetEntityMetricsAPI & {
   comments?: PostAPI[]
   /** Metadata about the post's voter, included in authorized API responses */
   postMeta?: VoterPostMetadata
+  /**
+   * Feed ranking signals (R62–R66). Present on feed responses; absent on
+   * individual post lookups. All derived from aggregate burns only.
+   */
+  /** R62: Logarithmically dampened net feed score */
+  feedScore?: number
+  /** R63: Z-score-normalized feed score (capped at FEED_RANKING_ZSCORE_MAX) */
+  feedScoreNormalized?: number
+  /** R65: Fraction of total burns that are positive (0–1) */
+  sentimentRatio?: number
+  /** R65: How evenly contested the burns are (0 = one-sided, 1 = perfectly split) */
+  controversyScore?: number
+  /** R65: Log-dampened total of all burns (pos + neg), used as tiebreaker */
+  totalEngagement?: number
+  /** R65: Whether this post exceeds the controversy threshold */
+  isControversial?: boolean
 }
 /** Parameters for querying a post from API */
 type PostQueryParameters = {
@@ -2549,8 +2571,13 @@ export class Database {
    * includes their associated Profile metrics, RNKC comment metadata (for Lotusia
    * posts), and reply threads.
    *
-   * Supports filtering by platform, sorting by ranking/recency/controversy, and
+   * Supports filtering by platform, sorting by ranking/curated/recency/controversy, and
    * optional wallet-specific vote metadata via scriptPayload.
+   *
+   * sortBy='curated' applies the full R62–R65 burn-only dampening pipeline:
+   *   R62: aggregate logarithmic dampening (log₂(1+B_pos/BASE) - log₂(1+B_neg/BASE))
+   *   R63: cross-content z-score capping (prevents feed monopoly)
+   *   R65: bidirectional signal fields (sentimentRatio, controversyScore, isControversial)
    *
    * @param filters - Feed filter parameters (platform, sortBy, time range, pagination, scriptPayload)
    * @returns Feed response with PostAPI[] and pagination metadata
@@ -2558,12 +2585,18 @@ export class Database {
   async apiGetFeedPosts(filters: FeedFilterParams = {}): Promise<FeedResponse> {
     const {
       platform,
-      sortBy = 'ranking',
+      sortBy = 'curated',
       startTime,
       page = 1,
       pageSize = 20,
       scriptPayload,
     } = filters
+
+    // For 'curated' sort, default to a 7-day window when no startTime is given.
+    // This ensures recency bias: the dampening pipeline operates on content that
+    // has received community signal within the past week, not all-time.
+    const effectiveStartTime: Timespan | undefined =
+      startTime ?? (sortBy === 'curated' ? 'week' : undefined)
 
     const normalizedPage = Math.max(1, page)
     const normalizedPageSize = Math.min(20, Math.max(1, pageSize))
@@ -2575,16 +2608,20 @@ export class Database {
         if (platform) {
           whereClause.platform = platform
         }
-        // Time-based filtering: find posts that received votes within the timespan
-        if (startTime && startTime !== 'all') {
+        // Time-based filtering: find posts that received at least one vote within
+        // the timespan. Uses 'some' (not 'every') so a post qualifies if any of
+        // its votes fall in the window — not all of them.
+        if (effectiveStartTime && effectiveStartTime !== 'all') {
           whereClause.ranks = {
-            every: {
-              timestamp: { gte: getTimestampUTC(startTime) },
+            some: {
+              timestamp: { gte: getTimestampUTC(effectiveStartTime) },
             },
           }
         }
 
-        // Build orderBy based on sort mode
+        // Build orderBy based on sort mode.
+        // 'curated' fetches by linear ranking first, then re-sorts in-memory
+        // after applying R62–R65 dampening (Prisma cannot order by computed fields).
         let orderBy: any
         switch (sortBy) {
           case 'recent':
@@ -2602,6 +2639,7 @@ export class Database {
             ]
             orderBy = [{ votesPositive: 'desc' }, { votesNegative: 'desc' }]
             break
+          case 'curated':
           case 'ranking':
           default:
             orderBy = [{ ranking: 'desc' }]
@@ -2620,13 +2658,23 @@ export class Database {
               },
             }
 
+        // For 'curated' sort, fetch a larger candidate set so we can
+        // re-sort by dampened score and then paginate in-memory.
+        const isDampened = sortBy === 'curated'
+        const fetchSize = isDampened
+          ? Math.min(normalizedPageSize * 5, 200)
+          : normalizedPageSize
+        const fetchSkip = isDampened
+          ? 0
+          : (normalizedPage - 1) * normalizedPageSize
+
         const [totalItems, posts] = await Promise.all([
           tx.post.count({ where: whereClause }),
           tx.post.findMany({
             where: whereClause,
             orderBy,
-            skip: (normalizedPage - 1) * normalizedPageSize,
-            take: normalizedPageSize,
+            skip: fetchSkip,
+            take: fetchSize,
             include: {
               profile: {
                 select: targetEntityMetricsSelect,
@@ -2661,9 +2709,15 @@ export class Database {
 
         const totalPages = Math.ceil(totalItems / normalizedPageSize)
 
-        // Convert each post to PostAPI shape
+        // Convert each post to PostAPI shape, computing R62/R65 signals
         const feedPosts: PostAPI[] = []
         for (const post of posts) {
+          const firstVotedSeconds = Number(post.firstVoted)
+          const signals = computeCompositeFeedScore(
+            post.satsPositive,
+            post.satsNegative,
+            firstVotedSeconds,
+          )
           const postData: PostAPI = {
             id: post.id,
             platform: post.platform as ScriptChunkPlatformUTF8,
@@ -2681,6 +2735,13 @@ export class Database {
               votesPositive: post.profile.votesPositive,
               votesNegative: post.profile.votesNegative,
             },
+            // R62: logarithmically dampened net score
+            feedScore: signals.feedScore,
+            // R65: bidirectional signal fields
+            sentimentRatio: signals.sentimentRatio,
+            controversyScore: signals.controversyScore,
+            totalEngagement: signals.totalEngagement,
+            isControversial: signals.isControversial,
           }
           // Lotusia post: add RNKC comment data (text, inReplyTo, timestamps)
           if (post.data) {
@@ -2718,6 +2779,36 @@ export class Database {
           feedPosts.push(postData)
         }
 
+        // R63: apply z-score capping across the candidate set, then
+        // re-sort by dampened score and paginate for 'curated' mode.
+        if (isDampened) {
+          const rawScores = feedPosts.map(p => p.feedScore ?? 0)
+          const cappedScores = applyZScoreCapping(rawScores)
+          for (let i = 0; i < feedPosts.length; i++) {
+            feedPosts[i].feedScoreNormalized = cappedScores[i]
+          }
+          feedPosts.sort(
+            (a, b) =>
+              (b.feedScoreNormalized ?? 0) - (a.feedScoreNormalized ?? 0),
+          )
+          const pageStart = (normalizedPage - 1) * normalizedPageSize
+          const paginated = feedPosts.slice(
+            pageStart,
+            pageStart + normalizedPageSize,
+          )
+          return {
+            posts: paginated,
+            pagination: {
+              page: normalizedPage,
+              pageSize: normalizedPageSize,
+              totalPages,
+              totalItems,
+              hasNext: normalizedPage < totalPages,
+              hasPrev: normalizedPage > 1,
+            },
+          }
+        }
+
         return {
           posts: feedPosts,
           pagination: {
@@ -2736,14 +2827,21 @@ export class Database {
   }
 
   /**
-   * Retrieves trending posts based on recent vote activity volume.
-   * Finds posts with the most RANK transaction activity within a time window,
-   * then fetches the full Post data with profile and comment relations.
+   * Retrieves trending posts based on recent burn activity, applying the full
+   * R62–R66 dampening pipeline:
+   *   R62: aggregate logarithmic dampening per post
+   *   R64: temporal conviction accumulation (exponential decay by age)
+   *   R65: bidirectional signal fields (sentimentRatio, controversyScore, isControversial)
+   *   R66: burn velocity spike dampening (sigmoid on window burns vs rolling median)
+   *
+   * Phase 1 fetches a larger candidate set sorted by aggregate window burns
+   * (Sybil-neutral: total sats, not vote count). Phase 2 applies dampening
+   * and re-sorts, then returns the top `limit` results.
    *
    * @param windowHours - Time window in hours (default 24h)
    * @param limit - Maximum number of results (default 20)
    * @param scriptPayload - Optional wallet for Vote-to-Reveal metadata
-   * @returns Array of PostAPI objects ordered by recent activity volume
+   * @returns Array of PostAPI objects ordered by dampened trending score
    */
   async apiGetTrendingPosts(
     windowHours: number = 24,
@@ -2751,9 +2849,15 @@ export class Database {
     scriptPayload?: string,
   ): Promise<PostAPI[]> {
     try {
-      const startTimestamp = Math.floor(Date.now() / 1000) - windowHours * 3600
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      const startTimestamp = nowSeconds - windowHours * 3600
+      const velocityWindowSeconds = FEED_RANKING_VELOCITY_WINDOW_HOURS * 3600
+      const velocityWindowStart = nowSeconds - velocityWindowSeconds
 
-      // Phase 1: Find post IDs with the most activity in the window
+      // Phase 1: Find post IDs with the most aggregate burn in the window.
+      // Sort by _sum.sats (total burned) rather than _count.txid (vote count)
+      // to avoid rewarding Sybil wallet splitting.
+      const candidateLimit = Math.min(limit * 5, 200)
       const trendingGroups = await this.db.rankTransaction.groupBy({
         by: ['platform', 'profileId', 'postId'],
         where: {
@@ -2762,9 +2866,39 @@ export class Database {
         },
         _count: { txid: true },
         _sum: { sats: true },
-        orderBy: { _count: { txid: 'desc' } },
-        take: limit,
+        orderBy: { _sum: { sats: 'desc' } },
+        take: candidateLimit,
       })
+
+      // Compute rolling median of window burns across all candidates for R66.
+      // This gives us a baseline to detect velocity spikes.
+      const windowBurns = trendingGroups
+        .map(g => Number(g._sum.sats ?? 0n))
+        .sort((a, b) => a - b)
+      const medianWindowBurns =
+        windowBurns.length > 0
+          ? windowBurns[Math.floor(windowBurns.length / 2)]
+          : 1
+
+      // Fetch velocity-window burns for each candidate (R66).
+      // This is the burn amount in the short detection window vs the full trend window.
+      const velocityGroups = await this.db.rankTransaction.groupBy({
+        by: ['platform', 'profileId', 'postId'],
+        where: {
+          timestamp: { gte: velocityWindowStart },
+          postId: { not: null },
+        },
+        _sum: { sats: true },
+      })
+      const velocityMap = new Map<string, bigint>()
+      for (const vg of velocityGroups) {
+        if (vg.postId) {
+          velocityMap.set(
+            `${vg.platform}:${vg.profileId}:${vg.postId}`,
+            vg._sum.sats ?? 0n,
+          )
+        }
+      }
 
       if (!trendingGroups.length) {
         return []
@@ -2821,10 +2955,29 @@ export class Database {
         ),
       )
 
-      // Phase 3: Convert to PostAPI shape, preserving trending order
+      // Phase 3: Convert to PostAPI shape, applying R62/R64/R65/R66 dampening
       const result: PostAPI[] = []
-      for (const post of posts) {
+      for (let i = 0; i < posts.length; i++) {
+        const post = posts[i]
         if (!post) continue
+        const firstVotedSeconds = Number(post.firstVoted)
+
+        // R66: compute velocity dampening for this post
+        const velocityKey = `${post.platform}:${post.profileId}:${post.id}`
+        const velocityBurns = velocityMap.get(velocityKey) ?? 0n
+        const velocityDampening = computeVelocityDampening(
+          velocityBurns,
+          BigInt(Math.floor(medianWindowBurns)),
+        )
+
+        // R62 + R64 + R65: composite score with temporal decay and velocity dampening
+        const signals = computeCompositeFeedScore(
+          post.satsPositive,
+          post.satsNegative,
+          firstVotedSeconds,
+          velocityDampening,
+        )
+
         const postData: PostAPI = {
           id: post.id,
           platform: post.platform as ScriptChunkPlatformUTF8,
@@ -2842,6 +2995,11 @@ export class Database {
             votesPositive: post.profile.votesPositive,
             votesNegative: post.profile.votesNegative,
           },
+          feedScore: signals.feedScore,
+          sentimentRatio: signals.sentimentRatio,
+          controversyScore: signals.controversyScore,
+          totalEngagement: signals.totalEngagement,
+          isControversial: signals.isControversial,
         }
         if (post.data) {
           postData.data = BufferUtil.from(post.data).toString('utf-8')
@@ -2875,7 +3033,10 @@ export class Database {
         }
         result.push(postData)
       }
-      return result
+
+      // Re-sort by dampened feedScore (R62+R64+R66) and return top `limit`
+      result.sort((a, b) => (b.feedScore ?? 0) - (a.feedScore ?? 0))
+      return result.slice(0, limit)
     } catch (e) {
       throw new Error(`db.apiGetTrendingPosts: ${e.message}`)
     }
