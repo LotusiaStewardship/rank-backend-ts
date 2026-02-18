@@ -7,7 +7,6 @@ import {
   type RankTransaction as PrismaRANK,
 } from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
-import { toCommentUTF8 } from 'xpi-ts/lib/rank'
 import { type Block } from 'lotus-nng-client'
 import {
   PushSubscription,
@@ -20,21 +19,24 @@ import {
   API_WALLET_RESULT_COUNT,
   ERR,
 } from '../util/constants'
-import type { Outpoint } from './indexer'
 import type {
-  ProfileMap,
+  Outpoint,
   Post,
+  ProfileMap,
+  IndexedTransaction,
   TargetEntity,
-  ScriptChunkPlatformUTF8,
-  ScriptChunkSentimentUTF8,
-  Transaction,
   TransactionRANK,
   TransactionRNKC,
+} from './indexer'
+import type {
+  ScriptChunkPlatformUTF8,
+  ScriptChunkSentimentUTF8,
 } from 'xpi-ts/lib/rank'
 import { toAsyncIterable } from '../util/functions'
+import { BufferUtil } from 'xpi-ts/lib/bitcore'
 
-export type IndexedTransactionRANK = Transaction & PrismaRANK
-export type IndexedTransactionRNKC = Transaction &
+export type IndexedTransactionRANK = IndexedTransaction & PrismaRANK
+export type IndexedTransactionRNKC = IndexedTransaction &
   PrismaRNKC & {
     post: PrismaPost & {
       profile: PrismaProfile | TargetEntityMetrics
@@ -137,6 +139,7 @@ type PostAPI = TargetEntityMetricsAPI & {
   profile: TargetEntityMetricsAPI & {
     profileMeta?: VoterProfileMetadata
   }
+  firstVoted: string
   data?: string
   inReplyToPlatform?: ScriptChunkPlatformUTF8
   inReplyToProfileId?: string
@@ -757,6 +760,7 @@ export class Database {
             platform,
             profileId,
             data: '',
+            firstVoted: '',
             inReplyToPlatform: null,
             inReplyToProfileId: null,
             inReplyToPostId: null,
@@ -781,6 +785,7 @@ export class Database {
             id: postId,
             platform,
             profileId,
+            firstVoted: '',
             ranking: '0',
             satsPositive: '0',
             satsNegative: '0',
@@ -896,7 +901,7 @@ export class Database {
               firstSeen,
             },
           } = post
-          data.data = toCommentUTF8(postData)
+          data.data = BufferUtil.from(postData).toString('utf-8')
           data.inReplyToPlatform = inReplyToPlatform as ScriptChunkPlatformUTF8
           data.inReplyToProfileId = inReplyToProfileId
           data.inReplyToPostId = inReplyToPostId
@@ -1830,6 +1835,7 @@ export class Database {
             platform: postPlatform,
             profileId,
             data, // data is the comment text for Lotusia posts
+            firstVoted: postTimestamp,
             ranking: postRanking,
             satsPositive: postSatsPositive,
             satsNegative: postSatsNegative,
@@ -1870,6 +1876,7 @@ export class Database {
                 platform: postPlatform,
                 profileId,
                 data, // data is the comment text for Lotusia posts
+                firstVoted: postTimestamp,
                 ranking: postRanking,
                 satsPositive: postSatsPositive,
                 satsNegative: postSatsNegative,
@@ -2571,7 +2578,7 @@ export class Database {
         // Time-based filtering: find posts that received votes within the timespan
         if (startTime && startTime !== 'all') {
           whereClause.ranks = {
-            some: {
+            every: {
               timestamp: { gte: getTimestampUTC(startTime) },
             },
           }
@@ -2584,7 +2591,7 @@ export class Database {
             // Most recently voted-on posts first (by latest RANK tx)
             // Prisma doesn't support ordering by relation aggregates directly,
             // so we order by ranking desc as a proxy and filter by time
-            orderBy = [{ ranking: 'desc' }]
+            orderBy = [{ firstVoted: 'desc' }]
             break
           case 'controversial':
             // Posts with high vote counts on both sides — order by total votes desc
@@ -2662,6 +2669,7 @@ export class Database {
             platform: post.platform as ScriptChunkPlatformUTF8,
             profileId: post.profileId,
             ranking: post.ranking.toString(),
+            firstVoted: post.firstVoted.toString(),
             satsPositive: post.satsPositive.toString(),
             satsNegative: post.satsNegative.toString(),
             votesPositive: post.votesPositive,
@@ -2676,7 +2684,7 @@ export class Database {
           }
           // Lotusia post: add RNKC comment data (text, inReplyTo, timestamps)
           if (post.data) {
-            postData.data = toCommentUTF8(post.data)
+            postData.data = BufferUtil.from(post.data).toString('utf-8')
             if (post.comment) {
               postData.inReplyToPlatform = post.comment
                 .inReplyToPlatform as ScriptChunkPlatformUTF8
@@ -2822,6 +2830,7 @@ export class Database {
           platform: post.platform as ScriptChunkPlatformUTF8,
           profileId: post.profileId,
           ranking: post.ranking.toString(),
+          firstVoted: post.firstVoted.toString(),
           satsPositive: post.satsPositive.toString(),
           satsNegative: post.satsNegative.toString(),
           votesPositive: post.votesPositive,
@@ -2835,7 +2844,7 @@ export class Database {
           },
         }
         if (post.data) {
-          postData.data = toCommentUTF8(post.data)
+          postData.data = BufferUtil.from(post.data).toString('utf-8')
           if (post.comment) {
             postData.inReplyToPlatform = post.comment
               .inReplyToPlatform as ScriptChunkPlatformUTF8
@@ -3005,7 +3014,8 @@ export class Database {
       id: rnkc.txid,
       platform: rnkc.post.platform as ScriptChunkPlatformUTF8,
       profileId: rnkc.post.profileId,
-      data: toCommentUTF8(rnkc.data),
+      data: BufferUtil.from(rnkc.data).toString('utf-8'),
+      firstVoted: rnkc.post.firstVoted.toString(),
       inReplyToPlatform: rnkc.inReplyToPlatform as ScriptChunkPlatformUTF8,
       inReplyToProfileId: rnkc.inReplyToProfileId,
       inReplyToPostId: rnkc.inReplyToPostId,
