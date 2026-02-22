@@ -236,6 +236,49 @@ export function computeBidirectionalSignals(
   return { sentimentRatio, controversyScore, totalEngagement, isControversial }
 }
 
+/**
+ * Computes the composite sort score for the controversial feed.
+ *
+ * This is the burn-weighted RANK equivalent of Reddit's `magnitude^balance`
+ * controversial sort. It rewards posts that have attracted significant costly
+ * signal on *both* sides, proportional to how evenly contested the burns are.
+ *
+ * Formula: controversySortScore = controversyScore × totalEngagement
+ *   where controversyScore = min(B_pos, B_neg) / max(B_pos, B_neg)  ∈ [0, 1]
+ *   and   totalEngagement  = log₂(1 + (B_pos + B_neg) / BASE)       (log-dampened)
+ *
+ * Properties:
+ * - Scores 0 when either side has no burns (no controversy without dissent)
+ * - Perfectly split posts (balance = 1.0) score at full totalEngagement
+ * - One-sided posts (balance → 0) score near 0 regardless of magnitude
+ * - Sybil-neutral: operates on aggregate sats, not vote counts
+ * - Whale-resistant: magnitude is log-dampened
+ *
+ * Posts below FEED_RANKING_CONTROVERSIAL_MIN_ENGAGEMENT are excluded (trivial burns).
+ *
+ * @param satsPositive - Total positive burns (satoshis)
+ * @param satsNegative - Total negative burns (satoshis)
+ * @returns Composite controversy sort score (higher = more controversial)
+ */
+export function computeControversySortScore(
+  satsPositive: bigint,
+  satsNegative: bigint,
+): number {
+  const pos = Number(satsPositive)
+  const neg = Number(satsNegative)
+  if (pos <= 0 || neg <= 0) {
+    return 0
+  }
+  const minSide = Math.min(pos, neg)
+  const maxSide = Math.max(pos, neg)
+  const controversyScore = minSide / maxSide
+  const totalEngagement = computePositiveFeedScore(
+    BigInt(Math.floor(pos + neg)),
+    FEED_RANKING_LOG_BASE_SATS,
+  )
+  return controversyScore * totalEngagement
+}
+
 // ─── R66: Burn Velocity Spike Dampening ──────────────────────────────────────
 
 /**

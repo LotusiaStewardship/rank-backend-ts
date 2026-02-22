@@ -576,16 +576,13 @@ export class API extends EventEmitter {
       '/stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
       this.GET.stats,
     )
-    this.router.get(
-      '/:platform/:profileId/:postId/:scriptPayload',
-      this.GET.post,
-    )
+    this.router.get('/:platform/:profileId/:postId', this.GET.post)
     this.router.get(
       '/:platform/:profileId/posts/:page?/:pageSize?',
       this.GET.profilePosts,
     )
     this.router.get('/:platform/:profileId/:postId', this.GET.post)
-    this.router.get('/:platform/:profileId', this.GET.profile)
+    this.router.get('/:platform/:profileId', this.GET.profile) // accepts `scriptPayload` query param
 
     // Router GET endpoint configuration (engagement)
     this.router.get('/wallet/engagement/:scriptPayload', this.GET.engagement)
@@ -678,16 +675,20 @@ export class API extends EventEmitter {
       const t0 = performance.now()
       try {
         const { platform, profileId } = req.params
+        const scriptPayload = req.query.scriptPayload as string
+        // TODO: Add signature validation for this request based on scriptPayload
         // ranking bigint converted to string before return
         const result = await this.db.apiGetPlatformProfile(
           platform as ScriptChunkPlatformUTF8,
           profileId,
+          scriptPayload,
         )
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.profile'],
           ['platform', `${platform}`],
           ['profileId', `${profileId}`],
+          ['scriptPayload', `${req.query.scriptPayload}`],
           ['elapsed', `${t1}ms`],
         ])
         return sendJSON(res, result, HTTP.OK)
@@ -721,12 +722,13 @@ export class API extends EventEmitter {
       const page = Number(req.params.page)
       const pageSize = Number(req.params.pageSize)
       try {
-        const result = await this.db.apiGetPlatformProfilePosts(
-          platform as ScriptChunkPlatformUTF8,
+        const result = await this.db.apiGetPlatformProfilePosts({
+          platform: platform as ScriptChunkPlatformUTF8,
           profileId,
+          scriptPayload: req.query.scriptPayload as string | undefined,
           page,
           pageSize,
-        )
+        })
         const t1 = (performance.now() - t0).toFixed(3)
         log([
           ['api', 'get.profilePosts'],
@@ -760,13 +762,13 @@ export class API extends EventEmitter {
     post: async (req: Request, res: Response) => {
       const t0 = performance.now()
       try {
-        const { platform, profileId, postId, scriptPayload } = req.params
+        const { platform, profileId, postId } = req.params
         // ranking bigint converted to string before return
         const result = await this.db.apiGetPlatformProfilePost(
           platform as ScriptChunkPlatformUTF8,
           profileId,
           postId,
-          scriptPayload,
+          req.query.scriptPayload as string | undefined,
         )
         log([
           ['api', 'get.post'],
@@ -1125,6 +1127,15 @@ export class API extends EventEmitter {
      */
     feedPosts: async (req: Request, res: Response) => {
       const t0 = performance.now()
+      const entries = [
+        ['api', 'get.feedPosts'],
+        [
+          'src',
+          (req.headers['x-forwarded-for'] as string) ??
+            req.socket.remoteAddress,
+        ],
+        ...toLogEntries(req.params),
+      ] as LogEntry[]
       try {
         const filters = {
           platform: req.query.platform as ScriptChunkPlatformUTF8,
@@ -1134,6 +1145,7 @@ export class API extends EventEmitter {
           pageSize: req.query.pageSize ? Number(req.query.pageSize) : undefined,
           scriptPayload: req.query.scriptPayload as string,
         }
+        entries.push(['filters', JSON.stringify(filters)])
 
         const result = await this.db.apiGetFeedPosts(filters)
         const t1 = (performance.now() - t0).toFixed(3)

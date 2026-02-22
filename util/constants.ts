@@ -20,6 +20,10 @@ export const API_FEED_MAX_PAGE_SIZE = 100
 export const API_FEED_CACHE_TTL_SECONDS = 60 // 1 minute cache for feed queries
 export const API_FEED_TRENDING_WINDOW_HOURS = 24 // Trending content from last 24h
 export const API_FEED_CONTROVERSIAL_MIN_VOTES = 5 // Minimum votes for controversy calculation
+/** R65: Minimum log-dampened total engagement for controversial feed inclusion.
+ *  Filters posts with trivially small burns on both sides.
+ *  At BASE=1_000_000 sats: log₂(1 + 100_000/1_000_000) ≈ 0.137 */
+export const FEED_RANKING_CONTROVERSIAL_MIN_ENGAGEMENT = 0.1
 /**
  * Feed ranking algorithm constants (R62–R66)
  * Implements burn-only, Sybil-neutral dampening for the off-chain feed layer.
