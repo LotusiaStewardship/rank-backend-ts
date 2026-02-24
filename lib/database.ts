@@ -133,7 +133,13 @@ type ProfileAPI = TargetEntityMetricsAPI & {
   id: string
   platform: ScriptChunkPlatformUTF8
   /** RANK transactions associated with the profile */
-  ranks?: IndexedTransactionRANK[]
+  ranks?: Array<{
+    txid: string
+    sats: string
+    sentiment: ScriptChunkSentimentUTF8
+    firstSeen: string
+    timestamp?: string // block timestamp, null if RANK tx is unconfirmed
+  }>
   /** Comments associated with the profile */
   comments?: PostAPI[]
   voters?: Voter[]
@@ -156,7 +162,13 @@ type PostAPI = TargetEntityMetricsAPI & {
   firstSeen?: string
   timestamp?: string
   /** RANK transactions associated with the post */
-  ranks?: IndexedTransactionRANK[]
+  ranks?: Array<{
+    txid: string
+    sats: string
+    sentiment: ScriptChunkSentimentUTF8
+    firstSeen: string
+    timestamp?: string // block timestamp, null if RANK tx is unconfirmed
+  }>
   /** Comments associated with the post, modified for `application/json` API response */
   comments?: PostAPI[]
   /**
@@ -226,7 +238,7 @@ const targetEntityMetricsSelect = {
  * @param timespan `day`, `week`, etc.
  * @returns {number} the UTC unix timestamp beginning the `Timespan`, in seconds
  */
-export const getTimestampUTC = (timespan: Timespan): number => {
+export const getTimestampUTC = (timespan: Timespan = 'month'): number => {
   const now = new Date(Date.now())
   const today = Math.floor(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1_000,
@@ -706,6 +718,7 @@ export class Database {
     const data: ProfileAPI = {
       platform,
       id: profileId,
+      ranks: null,
       ranking: '0',
       satsPositive: '0',
       satsNegative: '0',
@@ -754,7 +767,16 @@ export class Database {
           }
         }
         // Add voter metadata; useful when client polls for profile directly
-        data.profileMeta = this.buildProfileMetadata(profile.ranks)
+        if (profile.ranks) {
+          data.profileMeta = this.buildProfileMetadata(profile.ranks)
+          data.ranks = profile?.ranks.map(rank => ({
+            txid: rank.txid,
+            sats: rank.sats.toString(),
+            sentiment: rank.sentiment as ScriptChunkSentimentUTF8,
+            firstSeen: (rank.firstSeen / 1_000n).toString(),
+            //timestamp: rank.timestamp.toString(),
+          }))
+        }
         // get the voter details for the profile if specified
         if (includeVoters) {
           data.voters = await this.getProfileVoterDetails(
@@ -794,6 +816,7 @@ export class Database {
             data: '',
             firstVoted: null,
             lastVoted: null,
+            ranks: null,
             inReplyToPlatform: null,
             inReplyToProfileId: null,
             inReplyToPostId: null,
@@ -820,6 +843,7 @@ export class Database {
             profileId,
             firstVoted: null,
             lastVoted: null,
+            ranks: null,
             ranking: '0',
             satsPositive: '0',
             satsNegative: '0',
@@ -910,8 +934,8 @@ export class Database {
         // Add indexed post data to return data
         Object.assign(data, this.serializeEntityMetrics(post))
         // Add timestamps
-        data.firstVoted = post.firstVoted.toString()
-        data.lastVoted = post.lastVoted.toString()
+        data.firstVoted = post.firstVoted?.toString() ?? null
+        data.lastVoted = post.lastVoted?.toString() ?? null
         // if this is a Lotusia post, add the comment data to the return data
         // All RNKC fields will be available if the `data` relation is not null
         if (post.data && post.comment) {
@@ -944,9 +968,16 @@ export class Database {
             data.comments.push(replyAPI)
           }
         }
-        // set up post metadata
+        // set up post metadata and recent vote history (week or month)
         if (post.ranks?.length) {
           data.postMeta = await this.buildPostMeta(post.ranks)
+          data.ranks = post.ranks.map(rank => ({
+            txid: rank.txid,
+            sats: rank.sats.toString(),
+            sentiment: rank.sentiment as ScriptChunkSentimentUTF8,
+            firstSeen: (rank.firstSeen / 1_000n).toString(),
+            //timestamp: rank.timestamp.toString(),
+          }))
         }
         // add the profile data to the return data
         data.profile = this.serializeEntityMetrics(post.profile)
@@ -1219,7 +1250,7 @@ export class Database {
         for (const post of posts) {
           const postData = {
             id: post.id,
-            firstVoted: post.firstVoted.toString(),
+            firstVoted: post.firstVoted?.toString(),
             ranking: post.ranking.toString(),
             satsPositive: post.satsPositive.toString(),
             satsNegative: post.satsNegative.toString(),
@@ -1863,7 +1894,11 @@ export class Database {
             ? {
                 connectOrCreate: postComments.map(comment => ({
                   where: {
-                    txid: comment.txid,
+                    txid_scriptPayload_data: {
+                      txid: comment.txid,
+                      scriptPayload: comment.scriptPayload,
+                      data: comment.data,
+                    },
                   },
                   create: comment,
                 })),
@@ -2680,8 +2715,8 @@ export class Database {
             id: post.id,
             platform: post.platform as ScriptChunkPlatformUTF8,
             profileId: post.profileId,
-            firstVoted: post.firstVoted.toString(),
-            lastVoted: post.lastVoted.toString(),
+            firstVoted: post.firstVoted?.toString(),
+            lastVoted: post.lastVoted?.toString(),
             ...this.serializeEntityMetrics(post),
             profile: this.serializeEntityMetrics(post.profile),
             // R62: logarithmically dampened net score
@@ -2955,8 +2990,8 @@ export class Database {
           id: post.id,
           platform: post.platform as ScriptChunkPlatformUTF8,
           profileId: post.profileId,
-          firstVoted: post.firstVoted.toString(),
-          lastVoted: post.lastVoted.toString(),
+          firstVoted: post.firstVoted?.toString() ?? null,
+          lastVoted: post.lastVoted?.toString() ?? null,
           ...this.serializeEntityMetrics(post),
           profile: this.serializeEntityMetrics(post.profile),
           feedScore: signals.feedScore,
@@ -3184,8 +3219,8 @@ export class Database {
           id: post.id,
           platform: post.platform as ScriptChunkPlatformUTF8,
           profileId: post.profileId,
-          firstVoted: post.firstVoted.toString(),
-          lastVoted: post.lastVoted.toString(),
+          firstVoted: post.firstVoted?.toString() ?? null,
+          lastVoted: post.lastVoted?.toString() ?? null,
           ...this.serializeEntityMetrics(post),
           profile: this.serializeEntityMetrics(post.profile),
         }
@@ -3231,13 +3266,13 @@ export class Database {
       platform: rnkc.post.platform as ScriptChunkPlatformUTF8,
       profileId: rnkc.post.profileId,
       data: BufferUtil.from(rnkc.data).toString('utf-8'),
-      firstVoted: rnkc.post.firstVoted.toString(),
-      lastVoted: rnkc.post.lastVoted.toString(),
+      firstVoted: rnkc.post.firstVoted?.toString(),
+      lastVoted: rnkc.post.lastVoted?.toString(),
       inReplyToPlatform: rnkc.inReplyToPlatform as ScriptChunkPlatformUTF8,
       inReplyToProfileId: rnkc.inReplyToProfileId,
       inReplyToPostId: rnkc.inReplyToPostId,
       firstSeen: (rnkc.firstSeen / 1_000n).toString(),
-      timestamp: rnkc.timestamp.toString(),
+      timestamp: rnkc.timestamp?.toString(),
       ...this.serializeEntityMetrics(rnkc.post),
       profile: this.serializeEntityMetrics(rnkc.post.profile),
     }
@@ -3309,18 +3344,47 @@ export class Database {
    * @param scriptPayload - Optional wallet script payload
    * @returns Prisma include clause or undefined
    */
-  private buildIncludeRanksClause(scriptPayload: string | undefined) {
+  private buildIncludeRanksClause(
+    scriptPayload: string | undefined,
+    timespan?: Timespan,
+  ) {
     if (!scriptPayload) {
       return undefined
     }
-    return {
-      where: { scriptPayload, sentiment: { not: 'neutral' } },
+    const clause: Parameters<typeof this.db.rankTransaction.findMany>[0] = {
+      where: {
+        scriptPayload,
+        sentiment: { not: 'neutral' },
+        // TODO: This needs to be fixed in another way specifically for recent vote data
+        // Recent vote data is used in sentiment charts in lotus-web-wallet for profiles/posts
+        // The problem is that setting a filter here will fail to generate full postMeta for a profile/post
+        //timestamp: { gte: getTimestampUTC(timespan) }, // timespan defaults to 'week'
+      },
       select: {
         txid: true,
         sats: true,
         sentiment: true,
+        timestamp: true, // null if tx is unconfirmed
+        firstSeen: true, // first time seen by indexer; good practice to defer to block timestamp for old txs
       },
+      orderBy: [
+        {
+          timestamp: 'desc',
+        },
+        {
+          firstSeen: 'desc',
+        },
+      ],
     }
+
+    // Add timespan filter if provided, otherwise fetches all ranks
+    if (timespan) {
+      clause.where.timestamp = {
+        gte: getTimestampUTC(timespan),
+      }
+    }
+
+    return clause
   }
   /**
    * Populates Lotusia-specific RNKC fields on a `PostAPI` object in-place.
