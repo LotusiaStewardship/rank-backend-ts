@@ -1869,8 +1869,12 @@ export class Database {
                 votesNegative: postVotesNegative,
               },
               // post exists: update lastVoted to the most recent tx timestamp in this batch
+              // Include data in update so that Posts previously created by RANK txs
+              // (with data: null) get their data set when the RNKC tx is processed,
+              // satisfying the RankComment FK constraint [txid, scriptPayload, data]
               update: {
                 ...postIncrements,
+                ...(data !== undefined && { data }),
                 lastVoted: postLastVoted,
               },
             }),

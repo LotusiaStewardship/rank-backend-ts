@@ -1380,6 +1380,10 @@ export class Indexer extends EventEmitter {
         firstVoted: rnkc.timestamp ?? rnkc.firstSeen / 1_000n,
         lastVoted: rnkc.timestamp ?? rnkc.firstSeen / 1_000n,
       })
+    } else if (!post.data && data) {
+      // If the post was created by a RANK tx (without data), set the data
+      // from the RNKC tx so the Post.data matches RankComment.data for the FK
+      post.data = data
     }
     // Increment post ranking and satsPositive for the RNKC tx
     // This is effectively a self-vote on the post
