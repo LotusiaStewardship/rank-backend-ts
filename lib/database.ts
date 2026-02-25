@@ -177,6 +177,15 @@ type PostAPI = TargetEntityMetricsAPI & {
    * Enables Twitter-style "view full conversation" rendering on the detail page.
    */
   ancestors?: PostAPI[]
+  /**
+   * Ancestor profile data for profile-level comments (when inReplyToProfileId is set
+   * but inReplyToPostId is null). Contains the profile's ranking metrics and vote metadata.
+   */
+  ancestorProfile?: {
+    platform: ScriptChunkPlatformUTF8
+    id: string
+    profileMeta?: VoterProfileMetadata | null
+  } & TargetEntityMetricsAPI
   /** Metadata about the post's voter, included in authorized API responses */
   postMeta?: VoterPostMetadata
   /**
@@ -952,6 +961,39 @@ export class Database {
               scriptPayload,
             )
           }
+          // For profile-level comments (inReplyToProfileId set but inReplyToPostId null),
+          // fetch the ancestor profile's ranking data and attach it to data.ancestorProfile.
+          // Exclude standalone posts where inReplyToProfileId === post.profileId
+          else if (
+            post.comment.inReplyToProfileId &&
+            post.comment.inReplyToProfileId !== post.profileId
+          ) {
+            const ancestorProfile = await tx.profile.findUnique({
+              where: {
+                platform_id: {
+                  platform: post.comment.inReplyToPlatform,
+                  id: post.comment.inReplyToProfileId,
+                },
+              },
+              select: {
+                ranking: true,
+                satsPositive: true,
+                satsNegative: true,
+                votesPositive: true,
+                votesNegative: true,
+                ranks: this.buildIncludeRanksClause(scriptPayload),
+              },
+            })
+            if (ancestorProfile) {
+              data.ancestorProfile = {
+                platform: post.comment
+                  .inReplyToPlatform as ScriptChunkPlatformUTF8,
+                id: post.comment.inReplyToProfileId,
+                ...this.serializeEntityMetrics(ancestorProfile),
+                profileMeta: this.buildProfileMetadata(ancestorProfile.ranks),
+              }
+            }
+          }
         }
         // if this post has replies, add them to the return data
         if (post.comments) {
@@ -1243,20 +1285,70 @@ export class Database {
             satsNegative: true,
             votesPositive: true,
             votesNegative: true,
+            data: true, // needed for Lotusia posts
             ranks: this.buildIncludeRanksClause(scriptPayload),
+            // needed for Lotusia posts
+            comment: {
+              select: {
+                data: true,
+                inReplyToPlatform: true,
+                inReplyToProfileId: true,
+                inReplyToPostId: true,
+                timestamp: true,
+                firstSeen: true,
+              },
+            },
           },
         })
         const postsWithMeta = []
         for (const post of posts) {
           const postData = {
             id: post.id,
-            firstVoted: post.firstVoted?.toString(),
+            firstVoted: post.firstVoted.toString(),
             ranking: post.ranking.toString(),
             satsPositive: post.satsPositive.toString(),
             satsNegative: post.satsNegative.toString(),
             votesPositive: post.votesPositive,
             votesNegative: post.votesNegative,
           } as PostAPI
+
+          // Add Lotusia post data if this is an RNKC comment
+          if (post.comment) {
+            this.populateLotusiaPostFields(postData, post.data, post.comment)
+            // For profile-level comments, fetch ancestor profile data.
+            // Exclude standalone posts where inReplyToProfileId === profileId (from function param)
+            if (
+              post.comment.inReplyToProfileId &&
+              !post.comment.inReplyToPostId &&
+              post.comment.inReplyToProfileId !== profileId
+            ) {
+              const ancestorProfile = await tx.profile.findUnique({
+                where: {
+                  platform_id: {
+                    platform: post.comment.inReplyToPlatform,
+                    id: post.comment.inReplyToProfileId,
+                  },
+                },
+                select: {
+                  ranking: true,
+                  satsPositive: true,
+                  satsNegative: true,
+                  votesPositive: true,
+                  votesNegative: true,
+                  ranks: this.buildIncludeRanksClause(scriptPayload),
+                },
+              })
+              if (ancestorProfile) {
+                postData.ancestorProfile = {
+                  platform: post.comment
+                    .inReplyToPlatform as ScriptChunkPlatformUTF8,
+                  id: post.comment.inReplyToProfileId,
+                  ...this.serializeEntityMetrics(ancestorProfile),
+                  profileMeta: this.buildProfileMetadata(ancestorProfile.ranks),
+                }
+              }
+            }
+          }
 
           // set up the postMeta property if the scriptPayload was provided
           // and this scriptPayload has voted on the posts
@@ -2746,6 +2838,39 @@ export class Database {
                 scriptPayload,
               )
             }
+            // For profile-level comments (inReplyToProfileId set but inReplyToPostId null),
+            // fetch the ancestor profile's ranking data.
+            // Exclude standalone posts where inReplyToProfileId === post.profileId
+            else if (
+              post.comment.inReplyToProfileId &&
+              post.comment.inReplyToProfileId !== post.profileId
+            ) {
+              const ancestorProfile = await tx.profile.findUnique({
+                where: {
+                  platform_id: {
+                    platform: post.comment.inReplyToPlatform,
+                    id: post.comment.inReplyToProfileId,
+                  },
+                },
+                select: {
+                  ranking: true,
+                  satsPositive: true,
+                  satsNegative: true,
+                  votesPositive: true,
+                  votesNegative: true,
+                  ranks: this.buildIncludeRanksClause(scriptPayload),
+                },
+              })
+              if (ancestorProfile) {
+                postData.ancestorProfile = {
+                  platform: post.comment
+                    .inReplyToPlatform as ScriptChunkPlatformUTF8,
+                  id: post.comment.inReplyToProfileId,
+                  ...this.serializeEntityMetrics(ancestorProfile),
+                  profileMeta: this.buildProfileMetadata(ancestorProfile.ranks),
+                }
+              }
+            }
           }
           // Add reply threads (RNKC comments on this post)
           if (post.comments?.length) {
@@ -3410,10 +3535,23 @@ export class Database {
     },
   ): void {
     postData.data = BufferUtil.from(rawData).toString('utf-8')
-    postData.inReplyToPlatform =
-      comment.inReplyToPlatform as ScriptChunkPlatformUTF8
-    postData.inReplyToProfileId = comment.inReplyToProfileId
-    postData.inReplyToPostId = comment.inReplyToPostId
+
+    // Detect standalone posts: when inReplyToProfileId equals the post's profileId,
+    // this is a standalone Lotusia post, not a reply to the user's own profile.
+    // In this case, set reply fields to null to avoid rendering as a self-reply.
+    const isStandalonePost = comment.inReplyToProfileId === postData.profileId
+
+    if (isStandalonePost) {
+      postData.inReplyToPlatform = null
+      postData.inReplyToProfileId = null
+      postData.inReplyToPostId = null
+    } else {
+      postData.inReplyToPlatform =
+        comment.inReplyToPlatform as ScriptChunkPlatformUTF8
+      postData.inReplyToProfileId = comment.inReplyToProfileId
+      postData.inReplyToPostId = comment.inReplyToPostId
+    }
+
     const firstSeenSeconds = comment.firstSeen / 1_000n
     postData.firstSeen = firstSeenSeconds.toString()
     postData.timestamp =

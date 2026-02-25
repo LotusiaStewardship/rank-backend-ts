@@ -960,6 +960,9 @@ export class Indexer extends EventEmitter {
       rnkc: null,
     }
     // Get script payload for the transaction
+    // NOTE: P2TR inputs not yet supported because prevTx data is not available
+    // The scriptPayload (33-byte commitment) only exists in the output script
+    // We need a more robust indexing solution to support P2TR scriptPayloads
     const scriptPayload = this.getScriptPayload(tx)
     // Return null if script payload does not meet our requirements in `getScriptPayload`
     if (!scriptPayload) {
