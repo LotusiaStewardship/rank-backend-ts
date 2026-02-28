@@ -1,5 +1,5 @@
 import { BufferUtil, Output, Transaction } from 'xpi-ts/lib/bitcore'
-import { Builder, ByteBuffer } from 'flatbuffers'
+import type { ByteBuffer } from 'flatbuffers'
 //import { isIP } from 'validator'
 //import { resolve } from 'node:path/posix'
 //import { Worker } from 'node:worker_threads'
@@ -18,15 +18,9 @@ import { Database } from './database'
 import { Temporal } from './temporal'
 import { FAUCET_MILESTONE_VOTES, FAUCET_DRIP_AMOUNTS } from '../util/constants'
 import type {
-  TransactionOutputRANK,
-  TransactionOutputRNKC,
-  TransactionRNKC,
-  TransactionRANK,
-  Transaction as IndexedTransaction,
-  ProfileMap,
-  Profile,
-  Post,
   ScriptChunkLokadUTF8,
+  ScriptChunkSentimentUTF8,
+  ScriptChunkPlatformUTF8,
 } from 'xpi-ts/lib/rank'
 import { ScriptProcessor } from 'xpi-ts/lib/rank'
 import { isOpReturn } from 'xpi-ts/lib/rank/script'
@@ -46,6 +40,132 @@ import { ERR } from '../util/constants'
 import { log, type LogEntry } from '../util/functions'
 import config from '../config'
 import type { Buffer } from 'buffer/'
+
+/**
+ * Output data specific to RANK transactions
+ * Contains sentiment and target information for ranking votes
+ */
+export interface TransactionOutputRANK {
+  /** The sentiment of the vote (positive or negative) */
+  sentiment: ScriptChunkSentimentUTF8
+  /** The platform where the target entity exists */
+  platform: ScriptChunkPlatformUTF8
+  /** The profile ID being voted on */
+  profileId: string
+  /** Optional post ID if voting on a specific post */
+  postId?: string
+}
+
+/**
+ * Output data specific to RNKC (Rank Comment) transactions
+ * Contains comment data and reply target information
+ */
+export interface TransactionOutputRNKC {
+  /** The comment data as raw bytes */
+  data: Uint8Array
+  /** The fee rate for the transaction */
+  feeRate: number
+  /** The platform of the entity being replied to */
+  inReplyToPlatform: ScriptChunkPlatformUTF8
+  /** The profile ID being replied to */
+  inReplyToProfileId?: string
+  /** The post ID being replied to */
+  inReplyToPostId?: string
+}
+
+/**
+ * Base indexed transaction data common to all LOKAD transactions
+ * Contains blockchain-specific metadata
+ */
+export interface IndexedTransaction {
+  /** The transaction ID */
+  txid: string
+  /** The output index within the transaction */
+  outIdx: number
+  /** The amount in satoshis */
+  sats: bigint
+  /** Unix timestamp (ms) when the transaction was first seen */
+  firstSeen: bigint
+  /** The script payload (voter's public key hash) */
+  scriptPayload: string
+  /** Optional instance ID for multi-instance deployments */
+  instanceId?: string
+  /** Block height if confirmed, undefined if in mempool */
+  height?: number
+  /** Block timestamp if confirmed */
+  timestamp?: bigint
+}
+
+/**
+ * Complete RANK transaction combining output data with indexed metadata
+ */
+export type TransactionRANK = TransactionOutputRANK & IndexedTransaction
+
+/**
+ * Complete RNKC transaction combining output data with indexed metadata
+ */
+export type TransactionRNKC = TransactionOutputRNKC & IndexedTransaction
+
+/**
+ * Base interface for entities that can be ranked (profiles and posts)
+ * Contains ranking metrics and associated transactions
+ */
+export interface TargetEntity {
+  /** Unique identifier for the entity */
+  id: string
+  /** Platform where the entity exists */
+  platform: string
+  /** Net ranking score (positive - negative sats) */
+  ranking: bigint
+  /** Array of RANK transactions targeting this entity */
+  ranks: Omit<TransactionRANK, 'profileId' | 'platform'>[]
+  /** Array of RNKC comments on this entity */
+  comments: Omit<TransactionRNKC, 'inReplyToProfileId' | 'inReplyToPlatform'>[]
+  /** Total positive satoshis received */
+  satsPositive: bigint
+  /** Total negative satoshis received */
+  satsNegative: bigint
+  /** Count of positive votes received */
+  votesPositive: number
+  /** Count of negative votes received */
+  votesNegative: number
+}
+
+/**
+ * Map of profile IDs to Profile objects
+ * Used for batch processing and caching
+ */
+export type ProfileMap = Map<string, Profile>
+
+/**
+ * Map of post IDs to Post objects
+ * Used for organizing posts within a profile
+ */
+export type PostMap = Map<string, Post>
+
+/**
+ * Represents a user profile that can be ranked
+ * Extends TargetEntity with posts collection
+ */
+export interface Profile extends TargetEntity {
+  /** Map of posts created by this profile */
+  posts?: PostMap
+}
+
+/**
+ * Represents a post that can be ranked
+ * Extends TargetEntity with post-specific metadata
+ */
+export interface Post extends TargetEntity {
+  /** The profile ID that created this post */
+  profileId: string
+  /** Optional post content data */
+  data?: Uint8Array
+  /** Unix timestamp (seconds) when the post was first voted on */
+  firstVoted: bigint
+  /** Unix timestamp (seconds) when the post was most recently voted on (for R64 temporal decay) */
+  lastVoted: bigint
+}
 /**
  * Runtime cache for quickly reconciling missing LOKAD txs with blocks
  *
@@ -840,6 +960,9 @@ export class Indexer extends EventEmitter {
       rnkc: null,
     }
     // Get script payload for the transaction
+    // NOTE: P2TR inputs not yet supported because prevTx data is not available
+    // The scriptPayload (33-byte commitment) only exists in the output script
+    // We need a more robust indexing solution to support P2TR scriptPayloads
     const scriptPayload = this.getScriptPayload(tx)
     // Return null if script payload does not meet our requirements in `getScriptPayload`
     if (!scriptPayload) {
@@ -1196,6 +1319,8 @@ export class Indexer extends EventEmitter {
         post.satsNegative += satsNegative
         post.votesPositive += votesPositive
         post.votesNegative += votesNegative
+        // Update lastVoted to the most recent timestamp
+        post.lastVoted = partialRANK.timestamp ?? partialRANK.firstSeen / 1_000n
         post.ranks.push(partialRANK)
       } else {
         profile.posts.set(postId, {
@@ -1204,6 +1329,10 @@ export class Indexer extends EventEmitter {
           profileId,
           ranks: [partialRANK],
           comments: undefined,
+          // use the block timestamp for firstVoted/lastVoted, otherwise use
+          // the first-seen timestamp for mempool time (convert to seconds first)
+          firstVoted: partialRANK.timestamp ?? partialRANK.firstSeen / 1_000n,
+          lastVoted: partialRANK.timestamp ?? partialRANK.firstSeen / 1_000n,
           ranking,
           satsPositive,
           satsNegative,
@@ -1249,7 +1378,15 @@ export class Indexer extends EventEmitter {
         platform: 'lotusia',
         profileId,
         data,
+        // use the block timestamp for firstVoted, otherwise use
+        // the first-seen timestamp for mempool time (convert to seconds first)
+        firstVoted: rnkc.timestamp ?? rnkc.firstSeen / 1_000n,
+        lastVoted: rnkc.timestamp ?? rnkc.firstSeen / 1_000n,
       })
+    } else if (!post.data && data) {
+      // If the post was created by a RANK tx (without data), set the data
+      // from the RNKC tx so the Post.data matches RankComment.data for the FK
+      post.data = data
     }
     // Increment post ranking and satsPositive for the RNKC tx
     // This is effectively a self-vote on the post
@@ -1311,6 +1448,10 @@ export class Indexer extends EventEmitter {
         platform: inReplyToPlatform,
         profileId: inReplyToProfileId,
         comments: [partialRNKC],
+        // use the block timestamp for firstVoted/lastVoted, otherwise use
+        // the first-seen timestamp for mempool time (convert to seconds first)
+        firstVoted: rnkc.timestamp ?? rnkc.firstSeen / 1_000n,
+        lastVoted: rnkc.timestamp ?? rnkc.firstSeen / 1_000n,
       })
     }
     profile.posts.set(inReplyToPostId, post)
@@ -1329,6 +1470,10 @@ export class Indexer extends EventEmitter {
       ranks: post?.ranks,
       data: post?.data,
       comments: post?.comments || [],
+      // Use the provided firstVoted/lastVoted timestamp, otherwise use
+      // the current timestamp as a fallback
+      firstVoted: post?.firstVoted ?? BigInt(Date.now()),
+      lastVoted: post?.lastVoted ?? post?.firstVoted ?? BigInt(Date.now()),
       ranking: post?.ranking || 0n,
       satsPositive: post?.satsPositive || 0n,
       satsNegative: post?.satsNegative || 0n,

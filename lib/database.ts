@@ -7,7 +7,6 @@ import {
   type RankTransaction as PrismaRANK,
 } from '../prisma/prisma-client-js'
 import { randomUUID } from 'crypto'
-import { toCommentUTF8 } from 'xpi-ts/lib/rank'
 import { type Block } from 'lotus-nng-client'
 import {
   PushSubscription,
@@ -19,22 +18,33 @@ import {
   API_SEARCH_RESULT_COUNT,
   API_WALLET_RESULT_COUNT,
   ERR,
+  FEED_RANKING_VELOCITY_WINDOW_HOURS,
+  FEED_RANKING_CONTROVERSIAL_MIN_ENGAGEMENT,
 } from '../util/constants'
-import type { Outpoint } from './indexer'
+import {
+  computeCompositeFeedScore,
+  applyZScoreCapping,
+  computeVelocityDampening,
+  computeControversySortScore,
+} from '../util/feedRanking'
 import type {
-  ProfileMap,
+  Outpoint,
   Post,
+  ProfileMap,
+  IndexedTransaction,
   TargetEntity,
-  ScriptChunkPlatformUTF8,
-  ScriptChunkSentimentUTF8,
-  Transaction,
   TransactionRANK,
   TransactionRNKC,
+} from './indexer'
+import type {
+  ScriptChunkPlatformUTF8,
+  ScriptChunkSentimentUTF8,
 } from 'xpi-ts/lib/rank'
 import { toAsyncIterable } from '../util/functions'
+import { BufferUtil } from 'xpi-ts/lib/bitcore'
 
-export type IndexedTransactionRANK = Transaction & PrismaRANK
-export type IndexedTransactionRNKC = Transaction &
+export type IndexedTransactionRANK = IndexedTransaction & PrismaRANK
+export type IndexedTransactionRNKC = IndexedTransaction &
   PrismaRNKC & {
     post: PrismaPost & {
       profile: PrismaProfile | TargetEntityMetrics
@@ -86,7 +96,7 @@ export type VoterActivitySummary = {
 /** Feed filter parameters for unified post feed queries */
 export type FeedFilterParams = {
   platform?: ScriptChunkPlatformUTF8
-  sortBy?: 'ranking' | 'recent' | 'controversial'
+  sortBy?: 'ranking' | 'curated' | 'recent' | 'controversial'
   startTime?: Timespan
   page?: number
   pageSize?: number
@@ -123,7 +133,13 @@ type ProfileAPI = TargetEntityMetricsAPI & {
   id: string
   platform: ScriptChunkPlatformUTF8
   /** RANK transactions associated with the profile */
-  ranks?: IndexedTransactionRANK[]
+  ranks?: Array<{
+    txid: string
+    sats: string
+    sentiment: ScriptChunkSentimentUTF8
+    firstSeen: string
+    timestamp?: string // block timestamp, null if RANK tx is unconfirmed
+  }>
   /** Comments associated with the profile */
   comments?: PostAPI[]
   voters?: Voter[]
@@ -137,6 +153,8 @@ type PostAPI = TargetEntityMetricsAPI & {
   profile: TargetEntityMetricsAPI & {
     profileMeta?: VoterProfileMetadata
   }
+  firstVoted: string
+  lastVoted: string
   data?: string
   inReplyToPlatform?: ScriptChunkPlatformUTF8
   inReplyToProfileId?: string
@@ -144,11 +162,48 @@ type PostAPI = TargetEntityMetricsAPI & {
   firstSeen?: string
   timestamp?: string
   /** RANK transactions associated with the post */
-  ranks?: IndexedTransactionRANK[]
+  ranks?: Array<{
+    txid: string
+    sats: string
+    sentiment: ScriptChunkSentimentUTF8
+    firstSeen: string
+    timestamp?: string // block timestamp, null if RANK tx is unconfirmed
+  }>
   /** Comments associated with the post, modified for `application/json` API response */
   comments?: PostAPI[]
+  /**
+   * Ancestor chain for RNKC replies — ordered from genesis post (index 0) to
+   * immediate parent (last index). Only populated when the post has inReplyToPostId set.
+   * Enables Twitter-style "view full conversation" rendering on the detail page.
+   */
+  ancestors?: PostAPI[]
+  /**
+   * Ancestor profile data for profile-level comments (when inReplyToProfileId is set
+   * but inReplyToPostId is null). Contains the profile's ranking metrics and vote metadata.
+   */
+  ancestorProfile?: {
+    platform: ScriptChunkPlatformUTF8
+    id: string
+    profileMeta?: VoterProfileMetadata | null
+  } & TargetEntityMetricsAPI
   /** Metadata about the post's voter, included in authorized API responses */
   postMeta?: VoterPostMetadata
+  /**
+   * Feed ranking signals (R62–R66). Present on feed responses; absent on
+   * individual post lookups. All derived from aggregate burns only.
+   */
+  /** R62: Logarithmically dampened net feed score */
+  feedScore?: number
+  /** R63: Z-score-normalized feed score (capped at FEED_RANKING_ZSCORE_MAX) */
+  feedScoreNormalized?: number
+  /** R65: Fraction of total burns that are positive (0–1) */
+  sentimentRatio?: number
+  /** R65: How evenly contested the burns are (0 = one-sided, 1 = perfectly split) */
+  controversyScore?: number
+  /** R65: Log-dampened total of all burns (pos + neg), used as tiebreaker */
+  totalEngagement?: number
+  /** R65: Whether this post exceeds the controversy threshold */
+  isControversial?: boolean
 }
 /** Parameters for querying a post from API */
 type PostQueryParameters = {
@@ -192,7 +247,7 @@ const targetEntityMetricsSelect = {
  * @param timespan `day`, `week`, etc.
  * @returns {number} the UTC unix timestamp beginning the `Timespan`, in seconds
  */
-export const getTimestampUTC = (timespan: Timespan): number => {
+export const getTimestampUTC = (timespan: Timespan = 'month'): number => {
   const now = new Date(Date.now())
   const today = Math.floor(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1_000,
@@ -666,16 +721,19 @@ export class Database {
   async apiGetPlatformProfile(
     platform: ScriptChunkPlatformUTF8,
     profileId: string,
+    scriptPayload?: string,
     includeVoters: boolean = false,
   ) {
     const data: ProfileAPI = {
       platform,
       id: profileId,
+      ranks: null,
       ranking: '0',
       satsPositive: '0',
       satsNegative: '0',
       votesPositive: 0,
       votesNegative: 0,
+      profileMeta: null,
       comments: null,
     }
     return await this.db.$transaction(async tx => {
@@ -685,6 +743,7 @@ export class Database {
             platform_id: { platform, id: profileId },
           },
           include: {
+            ranks: scriptPayload !== undefined,
             comments: {
               include: {
                 post: {
@@ -707,18 +766,25 @@ export class Database {
             },
           },
         })
-        // Add indexed post data to return data
-        data.ranking = profile.ranking.toString()
-        data.satsPositive = profile.satsPositive.toString()
-        data.satsNegative = profile.satsNegative.toString()
-        data.votesPositive = profile.votesPositive
-        data.votesNegative = profile.votesNegative
+        // Add indexed profile data to return data
+        Object.assign(data, this.serializeEntityMetrics(profile))
         // add the comments to the return data, or empty array if no comments
         if (profile.comments) {
           data.comments = []
           for (const comment of profile.comments) {
             data.comments.push(this.convertRankCommentToPostAPI(comment))
           }
+        }
+        // Add voter metadata; useful when client polls for profile directly
+        if (profile.ranks) {
+          data.profileMeta = this.buildProfileMetadata(profile.ranks)
+          data.ranks = profile?.ranks.map(rank => ({
+            txid: rank.txid,
+            sats: rank.sats.toString(),
+            sentiment: rank.sentiment as ScriptChunkSentimentUTF8,
+            firstSeen: (rank.firstSeen / 1_000n).toString(),
+            //timestamp: rank.timestamp.toString(),
+          }))
         }
         // get the voter details for the profile if specified
         if (includeVoters) {
@@ -757,6 +823,9 @@ export class Database {
             platform,
             profileId,
             data: '',
+            firstVoted: null,
+            lastVoted: null,
+            ranks: null,
             inReplyToPlatform: null,
             inReplyToProfileId: null,
             inReplyToPostId: null,
@@ -781,6 +850,9 @@ export class Database {
             id: postId,
             platform,
             profileId,
+            firstVoted: null,
+            lastVoted: null,
+            ranks: null,
             ranking: '0',
             satsPositive: '0',
             satsNegative: '0',
@@ -796,16 +868,7 @@ export class Database {
               votesNegative: 0,
             },
           }
-    const includeRanks = !scriptPayload
-      ? undefined
-      : {
-          where: { scriptPayload, sentiment: { not: 'neutral' } },
-          select: {
-            txid: true,
-            sats: true,
-            sentiment: true,
-          },
-        }
+    const includeRanks = this.buildIncludeRanksClause(scriptPayload)
     const checkWalletDownvotedProfile = !scriptPayload
       ? undefined
       : {
@@ -878,78 +941,90 @@ export class Database {
           },
         })
         // Add indexed post data to return data
-        data.ranking = post.ranking.toString()
-        data.satsPositive = post.satsPositive.toString()
-        data.satsNegative = post.satsNegative.toString()
-        data.votesPositive = post.votesPositive
-        data.votesNegative = post.votesNegative
+        Object.assign(data, this.serializeEntityMetrics(post))
+        // Add timestamps
+        data.firstVoted = post.firstVoted?.toString() ?? null
+        data.lastVoted = post.lastVoted?.toString() ?? null
         // if this is a Lotusia post, add the comment data to the return data
         // All RNKC fields will be available if the `data` relation is not null
-        if (post.data) {
-          const {
-            data: postData,
-            comment: {
-              inReplyToPlatform,
-              inReplyToProfileId,
-              inReplyToPostId,
-              timestamp,
-              firstSeen,
-            },
-          } = post
-          data.data = toCommentUTF8(postData)
-          data.inReplyToPlatform = inReplyToPlatform as ScriptChunkPlatformUTF8
-          data.inReplyToProfileId = inReplyToProfileId
-          data.inReplyToPostId = inReplyToPostId
-          // set the timestamp to the firstSeen if it's before the
-          // block timestamp, otherwise set it to the block timestamp
-          const firstSeenSeconds = firstSeen / 1_000n
-          data.timestamp =
-            firstSeenSeconds < timestamp
-              ? firstSeenSeconds.toString()
-              : timestamp.toString()
+        if (post.data && post.comment) {
+          this.populateLotusiaPostFields(data, post.data, post.comment)
+          // Fetch ancestor chain for Twitter-style "view full conversation" rendering.
+          // Only populated when this post is a reply (inReplyToPostId is set).
+          if (post.comment.inReplyToPostId) {
+            data.ancestors = await this.fetchAncestorChain(
+              tx as PrismaClient,
+              post.comment.inReplyToPlatform,
+              post.comment.inReplyToProfileId,
+              post.comment.inReplyToPostId,
+              20,
+              scriptPayload,
+            )
+          }
+          // For profile-level comments (inReplyToProfileId set but inReplyToPostId null),
+          // fetch the ancestor profile's ranking data and attach it to data.ancestorProfile.
+          // Exclude standalone posts where inReplyToProfileId === post.profileId
+          else if (
+            post.comment.inReplyToProfileId &&
+            post.comment.inReplyToProfileId !== post.profileId
+          ) {
+            const ancestorProfile = await tx.profile.findUnique({
+              where: {
+                platform_id: {
+                  platform: post.comment.inReplyToPlatform,
+                  id: post.comment.inReplyToProfileId,
+                },
+              },
+              select: {
+                ranking: true,
+                satsPositive: true,
+                satsNegative: true,
+                votesPositive: true,
+                votesNegative: true,
+                ranks: this.buildIncludeRanksClause(scriptPayload),
+              },
+            })
+            if (ancestorProfile) {
+              data.ancestorProfile = {
+                platform: post.comment
+                  .inReplyToPlatform as ScriptChunkPlatformUTF8,
+                id: post.comment.inReplyToProfileId,
+                ...this.serializeEntityMetrics(ancestorProfile),
+                profileMeta: this.buildProfileMetadata(ancestorProfile.ranks),
+              }
+            }
+          }
         }
         // if this post has replies, add them to the return data
         if (post.comments) {
           data.comments = []
           const postRepliesIterable = toAsyncIterable(post.comments)
           for await (const reply of postRepliesIterable) {
-            data.comments.push(this.convertRankCommentToPostAPI(reply))
-            // TODO: add nested replies to the return data
+            const replyAPI = this.convertRankCommentToPostAPI(reply)
+            // Serialize level-2 nested replies (fetched by Prisma include above)
+            if (reply.post.comments?.length) {
+              replyAPI.comments = reply.post.comments.map(nested =>
+                this.convertRankCommentToPostAPI(nested),
+              )
+            }
+            data.comments.push(replyAPI)
           }
         }
-        // set up post metadata
+        // set up post metadata and recent vote history (week or month)
         if (post.ranks?.length) {
-          // convert the sats to strings for JSON serialization
-          data.postMeta = await this.convertRankTransactionsToPostMeta(
-            post.ranks,
-          )
+          data.postMeta = await this.buildPostMeta(post.ranks)
+          data.ranks = post.ranks.map(rank => ({
+            txid: rank.txid,
+            sats: rank.sats.toString(),
+            sentiment: rank.sentiment as ScriptChunkSentimentUTF8,
+            firstSeen: (rank.firstSeen / 1_000n).toString(),
+            //timestamp: rank.timestamp.toString(),
+          }))
         }
         // add the profile data to the return data
-        data.profile = {
-          ranking: post.profile.ranking.toString(),
-          satsPositive: post.profile.satsPositive.toString(),
-          satsNegative: post.profile.satsNegative.toString(),
-          votesPositive: post.profile.votesPositive,
-          votesNegative: post.profile.votesNegative,
-        }
+        data.profile = this.serializeEntityMetrics(post.profile)
         // set up profile metadata
-        if (post.profile.ranks?.length) {
-          const profileMeta = {
-            hasWalletUpvoted: false,
-            hasWalletDownvoted: false,
-          }
-          post.profile.ranks.forEach(rank => {
-            switch (rank.sentiment) {
-              case 'positive':
-                profileMeta.hasWalletUpvoted = true
-                break
-              case 'negative':
-                profileMeta.hasWalletDownvoted = true
-                break
-            }
-          })
-          data.profile.profileMeta = profileMeta
-        }
+        data.profile.profileMeta = this.buildProfileMetadata(post.profile.ranks)
       } catch (e) {
         // fetch the indexed profile if the post doesn't exist
         const profile = await tx.profile.findUniqueOrThrow({
@@ -965,31 +1040,8 @@ export class Database {
             ranks: checkWalletDownvotedProfile,
           },
         })
-        data.profile = {
-          ranking: profile.ranking.toString(),
-          satsPositive: profile.satsPositive.toString(),
-          satsNegative: profile.satsNegative.toString(),
-          votesPositive: profile.votesPositive,
-          votesNegative: profile.votesNegative,
-        }
-        // set up profile metadata
-        if (profile.ranks?.length) {
-          const profileMeta = {
-            hasWalletUpvoted: false,
-            hasWalletDownvoted: false,
-          }
-          profile.ranks.forEach(rank => {
-            switch (rank.sentiment) {
-              case 'positive':
-                profileMeta.hasWalletUpvoted = true
-                break
-              case 'negative':
-                profileMeta.hasWalletDownvoted = true
-                break
-            }
-          })
-          data.profile.profileMeta = profileMeta
-        }
+        data.profile = this.serializeEntityMetrics(profile)
+        data.profile.profileMeta = this.buildProfileMetadata(profile.ranks)
       } finally {
         // always return data, even if default profile data
         return data
@@ -1072,18 +1124,7 @@ export class Database {
    * @returns An object containing the profiles and the number of pages
    */
   async apiGetProfiles(page: number, pageSize: number) {
-    if (!page) {
-      page = 1
-    }
-    if (!pageSize) {
-      pageSize = 10
-    }
-    if (page < 1) {
-      page = 1
-    }
-    if (pageSize > 40) {
-      pageSize = 40
-    }
+    ;({ page, pageSize } = this.normalizePaginationParams(page, pageSize))
     try {
       return await this.db.$transaction(async tx => {
         const totalProfiles = await tx.profile.count()
@@ -1135,19 +1176,7 @@ export class Database {
     page?: number,
     pageSize?: number,
   ) {
-    // Make sure parameters are set
-    if (!page) {
-      page = 1
-    }
-    if (!pageSize) {
-      pageSize = 10
-    }
-    if (page < 1) {
-      page = 1
-    }
-    if (pageSize > 40) {
-      pageSize = 40
-    }
+    ;({ page, pageSize } = this.normalizePaginationParams(page, pageSize))
     try {
       return await this.db.$transaction(async tx => {
         const totalRanks = await tx.rankTransaction.count({
@@ -1216,24 +1245,20 @@ export class Database {
    * @param pageSize The number of posts per page
    * @returns An array of posts, sorted by ranking in descending order
    */
-  async apiGetPlatformProfilePosts(
-    platform: ScriptChunkPlatformUTF8,
-    profileId: string,
-    page?: number,
-    pageSize?: number,
-  ) {
-    if (!page) {
-      page = 1
-    }
-    if (!pageSize) {
-      pageSize = 10
-    }
-    if (page < 1) {
-      page = 1
-    }
-    if (pageSize > 40) {
-      pageSize = 40
-    }
+  async apiGetPlatformProfilePosts({
+    platform,
+    profileId,
+    scriptPayload,
+    page,
+    pageSize,
+  }: {
+    platform: ScriptChunkPlatformUTF8
+    profileId: string
+    scriptPayload?: string
+    page?: number
+    pageSize?: number
+  }) {
+    ;({ page, pageSize } = this.normalizePaginationParams(page, pageSize))
     try {
       return await this.db.$transaction(async tx => {
         const totalPosts = await tx.post.count({
@@ -1254,20 +1279,86 @@ export class Database {
           take: pageSize,
           select: {
             id: true,
+            firstVoted: true,
             ranking: true,
             satsPositive: true,
             satsNegative: true,
             votesPositive: true,
             votesNegative: true,
+            data: true, // needed for Lotusia posts
+            ranks: this.buildIncludeRanksClause(scriptPayload),
+            // needed for Lotusia posts
+            comment: {
+              select: {
+                data: true,
+                inReplyToPlatform: true,
+                inReplyToProfileId: true,
+                inReplyToPostId: true,
+                timestamp: true,
+                firstSeen: true,
+              },
+            },
           },
         })
-        return {
-          posts: posts.map(post => ({
-            ...post,
+        const postsWithMeta = []
+        for (const post of posts) {
+          const postData = {
+            id: post.id,
+            firstVoted: post.firstVoted.toString(),
             ranking: post.ranking.toString(),
             satsPositive: post.satsPositive.toString(),
             satsNegative: post.satsNegative.toString(),
-          })),
+            votesPositive: post.votesPositive,
+            votesNegative: post.votesNegative,
+          } as PostAPI
+
+          // Add Lotusia post data if this is an RNKC comment
+          if (post.comment) {
+            this.populateLotusiaPostFields(postData, post.data, post.comment)
+            // For profile-level comments, fetch ancestor profile data.
+            // Exclude standalone posts where inReplyToProfileId === profileId (from function param)
+            if (
+              post.comment.inReplyToProfileId &&
+              !post.comment.inReplyToPostId &&
+              post.comment.inReplyToProfileId !== profileId
+            ) {
+              const ancestorProfile = await tx.profile.findUnique({
+                where: {
+                  platform_id: {
+                    platform: post.comment.inReplyToPlatform,
+                    id: post.comment.inReplyToProfileId,
+                  },
+                },
+                select: {
+                  ranking: true,
+                  satsPositive: true,
+                  satsNegative: true,
+                  votesPositive: true,
+                  votesNegative: true,
+                  ranks: this.buildIncludeRanksClause(scriptPayload),
+                },
+              })
+              if (ancestorProfile) {
+                postData.ancestorProfile = {
+                  platform: post.comment
+                    .inReplyToPlatform as ScriptChunkPlatformUTF8,
+                  id: post.comment.inReplyToProfileId,
+                  ...this.serializeEntityMetrics(ancestorProfile),
+                  profileMeta: this.buildProfileMetadata(ancestorProfile.ranks),
+                }
+              }
+            }
+          }
+
+          // set up the postMeta property if the scriptPayload was provided
+          // and this scriptPayload has voted on the posts
+          if (post.ranks?.length) {
+            postData.postMeta = await this.buildPostMeta(post.ranks)
+          }
+          postsWithMeta.push(postData)
+        }
+        return {
+          posts: postsWithMeta,
           numPages: Math.ceil(totalPosts / pageSize),
         }
       })
@@ -1283,18 +1374,7 @@ export class Database {
    * @returns An object containing the votes and the number of pages
    */
   async apiGetVoteActivity(page: number, pageSize: number) {
-    if (!page) {
-      page = 1
-    }
-    if (!pageSize) {
-      pageSize = 10
-    }
-    if (page < 1) {
-      page = 1
-    }
-    if (pageSize > 40) {
-      pageSize = 40
-    }
+    ;({ page, pageSize } = this.normalizePaginationParams(page, pageSize))
     try {
       return await this.db.$transaction(async tx => {
         const totalVotes = await tx.rankTransaction.count()
@@ -1830,6 +1910,8 @@ export class Database {
             platform: postPlatform,
             profileId,
             data, // data is the comment text for Lotusia posts
+            firstVoted: postTimestamp,
+            lastVoted: postLastVoted,
             ranking: postRanking,
             satsPositive: postSatsPositive,
             satsNegative: postSatsNegative,
@@ -1870,15 +1952,22 @@ export class Database {
                 platform: postPlatform,
                 profileId,
                 data, // data is the comment text for Lotusia posts
+                firstVoted: postTimestamp,
+                lastVoted: postLastVoted,
                 ranking: postRanking,
                 satsPositive: postSatsPositive,
                 satsNegative: postSatsNegative,
                 votesPositive: postVotesPositive,
                 votesNegative: postVotesNegative,
               },
-              // post exists
+              // post exists: update lastVoted to the most recent tx timestamp in this batch
+              // Include data in update so that Posts previously created by RANK txs
+              // (with data: null) get their data set when the RNKC tx is processed,
+              // satisfying the RankComment FK constraint [txid, scriptPayload, data]
               update: {
                 ...postIncrements,
+                ...(data !== undefined && { data }),
+                lastVoted: postLastVoted,
               },
             }),
           )
@@ -1901,7 +1990,11 @@ export class Database {
             ? {
                 connectOrCreate: postComments.map(comment => ({
                   where: {
-                    txid: comment.txid,
+                    txid_scriptPayload_data: {
+                      txid: comment.txid,
+                      scriptPayload: comment.scriptPayload,
+                      data: comment.data,
+                    },
                   },
                   create: comment,
                 })),
@@ -2542,8 +2635,20 @@ export class Database {
    * includes their associated Profile metrics, RNKC comment metadata (for Lotusia
    * posts), and reply threads.
    *
-   * Supports filtering by platform, sorting by ranking/recency/controversy, and
+   * Supports filtering by platform, sorting by ranking/curated/recency/controversy, and
    * optional wallet-specific vote metadata via scriptPayload.
+   *
+   * sortBy='curated' applies the full R62–R65 burn-only dampening pipeline:
+   *   R62: aggregate logarithmic dampening (log₂(1+B_pos/BASE) - log₂(1+B_neg/BASE))
+   *   R63: cross-content z-score capping (prevents feed monopoly)
+   *   R65: bidirectional signal fields (sentimentRatio, controversyScore, isControversial)
+   *
+   * sortBy='controversial' applies the R65 burn-weighted controversy sort:
+   *   controversySortScore = controversyScore × totalEngagement
+   *   where controversyScore = min(B_pos, B_neg) / max(B_pos, B_neg)
+   *   and   totalEngagement  = log₂(1 + (B_pos + B_neg) / BASE)
+   *   Defaults to a 7-day window (same as 'curated') to surface currently contested
+   *   content rather than historical artifacts.
    *
    * @param filters - Feed filter parameters (platform, sortBy, time range, pagination, scriptPayload)
    * @returns Feed response with PostAPI[] and pagination metadata
@@ -2551,12 +2656,20 @@ export class Database {
   async apiGetFeedPosts(filters: FeedFilterParams = {}): Promise<FeedResponse> {
     const {
       platform,
-      sortBy = 'ranking',
+      sortBy = 'curated',
       startTime,
       page = 1,
       pageSize = 20,
       scriptPayload,
     } = filters
+
+    // For 'curated' and 'controversial' sorts, default to a 7-day window when no
+    // startTime is given. This ensures recency bias: curated operates on content
+    // with community signal within the past week; controversial surfaces content
+    // that is *currently* generating contested signal, not historical artifacts.
+    const effectiveStartTime: Timespan | undefined =
+      startTime ??
+      (sortBy === 'curated' || sortBy === 'controversial' ? 'week' : undefined)
 
     const normalizedPage = Math.max(1, page)
     const normalizedPageSize = Math.min(20, Math.max(1, pageSize))
@@ -2568,33 +2681,51 @@ export class Database {
         if (platform) {
           whereClause.platform = platform
         }
-        // Time-based filtering: find posts that received votes within the timespan
-        if (startTime && startTime !== 'all') {
-          whereClause.ranks = {
-            some: {
-              timestamp: { gte: getTimestampUTC(startTime) },
+        // Time-based filtering: find posts that received at least one vote within
+        // the timespan. Uses 'some' (not 'every') so a post qualifies if any of
+        // its votes fall in the window — not all of them.
+        // For Lotusia posts, also check RNKC comment timestamps (initial XPI burn)
+        if (effectiveStartTime && effectiveStartTime !== 'all') {
+          const timestampFilter = { gte: getTimestampUTC(effectiveStartTime) }
+          whereClause.OR = [
+            {
+              ranks: {
+                some: {
+                  timestamp: timestampFilter,
+                },
+              },
             },
-          }
+            {
+              comment: {
+                timestamp: timestampFilter,
+              },
+            },
+          ]
         }
 
-        // Build orderBy based on sort mode
+        // Build orderBy based on sort mode.
+        // 'curated' fetches by linear ranking first, then re-sorts in-memory
+        // after applying R62–R65 dampening (Prisma cannot order by relation fields).
         let orderBy: any
         switch (sortBy) {
           case 'recent':
             // Most recently voted-on posts first (by latest RANK tx)
             // Prisma doesn't support ordering by relation aggregates directly,
             // so we order by ranking desc as a proxy and filter by time
-            orderBy = [{ ranking: 'desc' }]
+            orderBy = [{ lastVoted: 'desc' }]
             break
           case 'controversial':
-            // Posts with high vote counts on both sides — order by total votes desc
-            // and filter for posts with both positive and negative votes
+            // Posts with significant burns on both sides. Filter on satsPositive
+            // and satsNegative (burn-based, Sybil-neutral) rather than vote counts.
+            // Fetch by total burns desc as a proxy; in-memory re-sort by
+            // controversySortScore (controversyScore × totalEngagement) follows.
             whereClause.AND = [
-              { votesPositive: { gt: 0 } },
-              { votesNegative: { gt: 0 } },
+              { satsPositive: { gt: 0n } },
+              { satsNegative: { gt: 0n } },
             ]
-            orderBy = [{ votesPositive: 'desc' }, { votesNegative: 'desc' }]
+            orderBy = [{ satsPositive: 'desc' }, { satsNegative: 'desc' }]
             break
+          case 'curated':
           case 'ranking':
           default:
             orderBy = [{ ranking: 'desc' }]
@@ -2602,24 +2733,28 @@ export class Database {
         }
 
         // Wallet-specific RANK vote filter (for Vote-to-Reveal postMeta)
-        const includeRanks = !scriptPayload
-          ? undefined
-          : {
-              where: { scriptPayload, sentiment: { not: 'neutral' } },
-              select: {
-                txid: true,
-                sats: true,
-                sentiment: true,
-              },
-            }
+        const includeRanks = this.buildIncludeRanksClause(scriptPayload)
+
+        // For 'curated' and 'controversial' sorts, fetch a larger candidate set
+        // so we can re-sort in-memory and then paginate.
+        const isDampened = sortBy === 'curated'
+        const isControversialSort = sortBy === 'controversial'
+        const fetchSize =
+          isDampened || isControversialSort
+            ? Math.min(normalizedPageSize * 5, 200)
+            : normalizedPageSize
+        const fetchSkip =
+          isDampened || isControversialSort
+            ? 0
+            : (normalizedPage - 1) * normalizedPageSize
 
         const [totalItems, posts] = await Promise.all([
           tx.post.count({ where: whereClause }),
           tx.post.findMany({
             where: whereClause,
             orderBy,
-            skip: (normalizedPage - 1) * normalizedPageSize,
-            take: normalizedPageSize,
+            skip: fetchSkip,
+            take: fetchSize,
             include: {
               profile: {
                 select: targetEntityMetricsSelect,
@@ -2654,40 +2789,87 @@ export class Database {
 
         const totalPages = Math.ceil(totalItems / normalizedPageSize)
 
-        // Convert each post to PostAPI shape
+        // Convert each post to PostAPI shape, computing R62/R65 signals
         const feedPosts: PostAPI[] = []
         for (const post of posts) {
+          // R64: decay anchor depends on sort mode.
+          // curated: firstVoted — prevents a trivial re-burn from resetting the
+          //   decay clock on old content (e.g. 100 XPI reviving a 2-week-old spam post).
+          // recent/other: lastVoted — re-emerging content with genuine new activity
+          //   surfaces correctly.
+          const decayAnchor = Number(post.firstVoted)
+
+          // R62/R63/R64/R66: compute composite feed score for this post
+          const signals = computeCompositeFeedScore(
+            post.satsPositive,
+            post.satsNegative,
+            decayAnchor,
+          )
+
+          // Build PostAPI object with computed signals
           const postData: PostAPI = {
             id: post.id,
             platform: post.platform as ScriptChunkPlatformUTF8,
             profileId: post.profileId,
-            ranking: post.ranking.toString(),
-            satsPositive: post.satsPositive.toString(),
-            satsNegative: post.satsNegative.toString(),
-            votesPositive: post.votesPositive,
-            votesNegative: post.votesNegative,
-            profile: {
-              ranking: post.profile.ranking.toString(),
-              satsPositive: post.profile.satsPositive.toString(),
-              satsNegative: post.profile.satsNegative.toString(),
-              votesPositive: post.profile.votesPositive,
-              votesNegative: post.profile.votesNegative,
-            },
+            firstVoted: post.firstVoted?.toString(),
+            lastVoted: post.lastVoted?.toString(),
+            ...this.serializeEntityMetrics(post),
+            profile: this.serializeEntityMetrics(post.profile),
+            // R62: logarithmically dampened net score
+            feedScore: signals.feedScore,
+            // R65: bidirectional signal fields
+            sentimentRatio: signals.sentimentRatio,
+            controversyScore: signals.controversyScore,
+            totalEngagement: signals.totalEngagement,
+            isControversial: signals.isControversial,
           }
           // Lotusia post: add RNKC comment data (text, inReplyTo, timestamps)
-          if (post.data) {
-            postData.data = toCommentUTF8(post.data)
-            if (post.comment) {
-              postData.inReplyToPlatform = post.comment
-                .inReplyToPlatform as ScriptChunkPlatformUTF8
-              postData.inReplyToProfileId = post.comment.inReplyToProfileId
-              postData.inReplyToPostId = post.comment.inReplyToPostId
-              const firstSeenSeconds = post.comment.firstSeen / 1_000n
-              postData.timestamp =
-                firstSeenSeconds < post.comment.timestamp
-                  ? firstSeenSeconds.toString()
-                  : (post.comment.timestamp?.toString() ?? null)
-              postData.firstSeen = firstSeenSeconds.toString()
+          if (post.data && post.comment) {
+            this.populateLotusiaPostFields(postData, post.data, post.comment)
+            // If this RNKC post is replying to another post, fetch that ancestor post
+            // if it is available and add it to the return data.
+            if (post.comment.inReplyToPostId) {
+              postData.ancestors = await this.fetchAncestorChain(
+                tx as PrismaClient,
+                post.comment.inReplyToPlatform,
+                post.comment.inReplyToProfileId,
+                post.comment.inReplyToPostId,
+                1,
+                scriptPayload,
+              )
+            }
+            // For profile-level comments (inReplyToProfileId set but inReplyToPostId null),
+            // fetch the ancestor profile's ranking data.
+            // Exclude standalone posts where inReplyToProfileId === post.profileId
+            else if (
+              post.comment.inReplyToProfileId &&
+              post.comment.inReplyToProfileId !== post.profileId
+            ) {
+              const ancestorProfile = await tx.profile.findUnique({
+                where: {
+                  platform_id: {
+                    platform: post.comment.inReplyToPlatform,
+                    id: post.comment.inReplyToProfileId,
+                  },
+                },
+                select: {
+                  ranking: true,
+                  satsPositive: true,
+                  satsNegative: true,
+                  votesPositive: true,
+                  votesNegative: true,
+                  ranks: this.buildIncludeRanksClause(scriptPayload),
+                },
+              })
+              if (ancestorProfile) {
+                postData.ancestorProfile = {
+                  platform: post.comment
+                    .inReplyToPlatform as ScriptChunkPlatformUTF8,
+                  id: post.comment.inReplyToProfileId,
+                  ...this.serializeEntityMetrics(ancestorProfile),
+                  profileMeta: this.buildProfileMetadata(ancestorProfile.ranks),
+                }
+              }
             }
           }
           // Add reply threads (RNKC comments on this post)
@@ -2703,11 +2885,72 @@ export class Database {
           }
           // Add wallet-specific vote metadata (Vote-to-Reveal R1)
           if (post.ranks?.length) {
-            postData.postMeta = await this.convertRankTransactionsToPostMeta(
-              post.ranks,
-            )
+            postData.postMeta = await this.buildPostMeta(post.ranks)
           }
           feedPosts.push(postData)
+        }
+
+        // R65: for 'controversial' sort, re-sort in-memory by controversySortScore
+        // (controversyScore × totalEngagement) and paginate. Filter out posts below
+        // the minimum engagement threshold to exclude trivially small burns.
+        if (isControversialSort) {
+          const scored = feedPosts
+            .map(p => ({
+              post: p,
+              score: computeControversySortScore(
+                BigInt(p.satsPositive ?? '0'),
+                BigInt(p.satsNegative ?? '0'),
+              ),
+            }))
+            .filter(
+              ({ score }) => score >= FEED_RANKING_CONTROVERSIAL_MIN_ENGAGEMENT,
+            )
+            .sort((a, b) => b.score - a.score)
+          const pageStart = (normalizedPage - 1) * normalizedPageSize
+          const paginated = scored
+            .slice(pageStart, pageStart + normalizedPageSize)
+            .map(({ post }) => post)
+          return {
+            posts: paginated,
+            pagination: {
+              page: normalizedPage,
+              pageSize: normalizedPageSize,
+              totalPages,
+              totalItems,
+              hasNext: normalizedPage < totalPages,
+              hasPrev: normalizedPage > 1,
+            },
+          }
+        }
+
+        // R63: apply z-score capping across the candidate set, then
+        // re-sort by dampened score and paginate for 'curated' mode.
+        if (isDampened) {
+          const rawScores = feedPosts.map(p => p.feedScore ?? 0)
+          const cappedScores = applyZScoreCapping(rawScores)
+          for (let i = 0; i < feedPosts.length; i++) {
+            feedPosts[i].feedScoreNormalized = cappedScores[i]
+          }
+          feedPosts.sort(
+            (a, b) =>
+              (b.feedScoreNormalized ?? 0) - (a.feedScoreNormalized ?? 0),
+          )
+          const pageStart = (normalizedPage - 1) * normalizedPageSize
+          const paginated = feedPosts.slice(
+            pageStart,
+            pageStart + normalizedPageSize,
+          )
+          return {
+            posts: paginated,
+            pagination: {
+              page: normalizedPage,
+              pageSize: normalizedPageSize,
+              totalPages,
+              totalItems,
+              hasNext: normalizedPage < totalPages,
+              hasPrev: normalizedPage > 1,
+            },
+          }
         }
 
         return {
@@ -2728,14 +2971,21 @@ export class Database {
   }
 
   /**
-   * Retrieves trending posts based on recent vote activity volume.
-   * Finds posts with the most RANK transaction activity within a time window,
-   * then fetches the full Post data with profile and comment relations.
+   * Retrieves trending posts based on recent burn activity, applying the full
+   * R62–R66 dampening pipeline:
+   *   R62: aggregate logarithmic dampening per post
+   *   R64: temporal conviction accumulation (exponential decay by age)
+   *   R65: bidirectional signal fields (sentimentRatio, controversyScore, isControversial)
+   *   R66: burn velocity spike dampening (sigmoid on window burns vs rolling median)
+   *
+   * Phase 1 fetches a larger candidate set sorted by aggregate window burns
+   * (Sybil-neutral: total sats, not vote count). Phase 2 applies dampening
+   * and re-sorts, then returns the top `limit` results.
    *
    * @param windowHours - Time window in hours (default 24h)
    * @param limit - Maximum number of results (default 20)
    * @param scriptPayload - Optional wallet for Vote-to-Reveal metadata
-   * @returns Array of PostAPI objects ordered by recent activity volume
+   * @returns Array of PostAPI objects ordered by dampened trending score
    */
   async apiGetTrendingPosts(
     windowHours: number = 24,
@@ -2743,9 +2993,15 @@ export class Database {
     scriptPayload?: string,
   ): Promise<PostAPI[]> {
     try {
-      const startTimestamp = Math.floor(Date.now() / 1000) - windowHours * 3600
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      const startTimestamp = nowSeconds - windowHours * 3600
+      const velocityWindowSeconds = FEED_RANKING_VELOCITY_WINDOW_HOURS * 3600
+      const velocityWindowStart = nowSeconds - velocityWindowSeconds
 
-      // Phase 1: Find post IDs with the most activity in the window
+      // Phase 1: Find post IDs with the most aggregate burn in the window.
+      // Sort by _sum.sats (total burned) rather than _count.txid (vote count)
+      // to avoid rewarding Sybil wallet splitting.
+      const candidateLimit = Math.min(limit * 5, 200)
       const trendingGroups = await this.db.rankTransaction.groupBy({
         by: ['platform', 'profileId', 'postId'],
         where: {
@@ -2754,25 +3010,46 @@ export class Database {
         },
         _count: { txid: true },
         _sum: { sats: true },
-        orderBy: { _count: { txid: 'desc' } },
-        take: limit,
+        orderBy: { _sum: { sats: 'desc' } },
+        take: candidateLimit,
       })
+
+      // Compute rolling median of window burns across all candidates for R66.
+      // This gives us a baseline to detect velocity spikes.
+      const windowBurns = trendingGroups
+        .map(g => Number(g._sum.sats ?? 0n))
+        .sort((a, b) => a - b)
+      const medianWindowBurns =
+        windowBurns.length > 0
+          ? windowBurns[Math.floor(windowBurns.length / 2)]
+          : 1
+
+      // Fetch velocity-window burns for each candidate (R66).
+      // This is the burn amount in the short detection window vs the full trend window.
+      const velocityGroups = await this.db.rankTransaction.groupBy({
+        by: ['platform', 'profileId', 'postId'],
+        where: {
+          timestamp: { gte: velocityWindowStart },
+          postId: { not: null },
+        },
+        _sum: { sats: true },
+      })
+      const velocityMap = new Map<string, bigint>()
+      for (const vg of velocityGroups) {
+        if (vg.postId) {
+          velocityMap.set(
+            `${vg.platform}:${vg.profileId}:${vg.postId}`,
+            vg._sum.sats ?? 0n,
+          )
+        }
+      }
 
       if (!trendingGroups.length) {
         return []
       }
 
       // Wallet-specific RANK vote filter
-      const includeRanks = !scriptPayload
-        ? undefined
-        : {
-            where: { scriptPayload, sentiment: { not: 'neutral' } },
-            select: {
-              txid: true,
-              sats: true,
-              sentiment: true,
-            },
-          }
+      const includeRanks = this.buildIncludeRanksClause(scriptPayload)
 
       // Phase 2: Fetch full Post data for each trending post
       const posts = await this.db.$transaction(
@@ -2813,41 +3090,47 @@ export class Database {
         ),
       )
 
-      // Phase 3: Convert to PostAPI shape, preserving trending order
+      // Phase 3: Convert to PostAPI shape, applying R62/R64/R65/R66 dampening
       const result: PostAPI[] = []
-      for (const post of posts) {
+      for (let i = 0; i < posts.length; i++) {
+        const post = posts[i]
         if (!post) continue
+        // R64: trending/recent feed uses lastVoted as the decay anchor so
+        // re-emerging content with genuine new activity surfaces correctly.
+        const decayAnchor = Number(post.lastVoted)
+
+        // R66: compute velocity dampening for this post
+        const velocityKey = `${post.platform}:${post.profileId}:${post.id}`
+        const velocityBurns = velocityMap.get(velocityKey) ?? 0n
+        const velocityDampening = computeVelocityDampening(
+          velocityBurns,
+          BigInt(Math.floor(medianWindowBurns)),
+        )
+
+        // R62 + R64 + R65/R66: composite score with temporal decay and velocity dampening
+        const signals = computeCompositeFeedScore(
+          post.satsPositive,
+          post.satsNegative,
+          decayAnchor,
+          velocityDampening,
+        )
+
         const postData: PostAPI = {
           id: post.id,
           platform: post.platform as ScriptChunkPlatformUTF8,
           profileId: post.profileId,
-          ranking: post.ranking.toString(),
-          satsPositive: post.satsPositive.toString(),
-          satsNegative: post.satsNegative.toString(),
-          votesPositive: post.votesPositive,
-          votesNegative: post.votesNegative,
-          profile: {
-            ranking: post.profile.ranking.toString(),
-            satsPositive: post.profile.satsPositive.toString(),
-            satsNegative: post.profile.satsNegative.toString(),
-            votesPositive: post.profile.votesPositive,
-            votesNegative: post.profile.votesNegative,
-          },
+          firstVoted: post.firstVoted?.toString() ?? null,
+          lastVoted: post.lastVoted?.toString() ?? null,
+          ...this.serializeEntityMetrics(post),
+          profile: this.serializeEntityMetrics(post.profile),
+          feedScore: signals.feedScore,
+          sentimentRatio: signals.sentimentRatio,
+          controversyScore: signals.controversyScore,
+          totalEngagement: signals.totalEngagement,
+          isControversial: signals.isControversial,
         }
-        if (post.data) {
-          postData.data = toCommentUTF8(post.data)
-          if (post.comment) {
-            postData.inReplyToPlatform = post.comment
-              .inReplyToPlatform as ScriptChunkPlatformUTF8
-            postData.inReplyToProfileId = post.comment.inReplyToProfileId
-            postData.inReplyToPostId = post.comment.inReplyToPostId
-            const firstSeenSeconds = post.comment.firstSeen / 1_000n
-            postData.timestamp =
-              firstSeenSeconds < post.comment.timestamp
-                ? firstSeenSeconds.toString()
-                : (post.comment.timestamp?.toString() ?? null)
-            postData.firstSeen = firstSeenSeconds.toString()
-          }
+        if (post.data && post.comment) {
+          this.populateLotusiaPostFields(postData, post.data, post.comment)
         }
         if (post.comments?.length) {
           postData.comments = []
@@ -2860,13 +3143,14 @@ export class Database {
           }
         }
         if (post.ranks?.length) {
-          postData.postMeta = await this.convertRankTransactionsToPostMeta(
-            post.ranks,
-          )
+          postData.postMeta = await this.buildPostMeta(post.ranks)
         }
         result.push(postData)
       }
-      return result
+
+      // Re-sort by dampened feedScore (R62+R64+R66) and return top `limit`
+      result.sort((a, b) => (b.feedScore ?? 0) - (a.feedScore ?? 0))
+      return result.slice(0, limit)
     } catch (e) {
       throw new Error(`db.apiGetTrendingPosts: ${e.message}`)
     }
@@ -2996,6 +3280,111 @@ export class Database {
     return Object.values(voterDetails)
   }
   /**
+   * Walks up the inReplyToPostId chain from a given post, collecting each
+   * ancestor as a PostAPI, until reaching the genesis post (no inReplyToPostId).
+   *
+   * Returns ancestors ordered from genesis (index 0) to immediate parent (last index).
+   * Caps traversal at 20 hops to prevent infinite loops from malformed data.
+   *
+   * @param tx - Prisma transaction client (this method is called within a transaction)
+   * @param inReplyToPlatform - Platform of the immediate parent
+   * @param inReplyToProfileId - ProfileId of the immediate parent
+   * @param inReplyToPostId - PostId of the immediate parent
+   * @param maxDepth - Maximum depth to traverse (default: 20)
+   * @param scriptPayload - Optional wallet script payload; when provided, populates `postMeta` on each ancestor
+   */
+  private async fetchAncestorChain(
+    tx: PrismaClient,
+    inReplyToPlatform: string,
+    inReplyToProfileId: string,
+    inReplyToPostId: string,
+    maxDepth: number = 20,
+    scriptPayload?: string,
+  ): Promise<PostAPI[]> {
+    const ancestors: PostAPI[] = []
+    const includeRanks = this.buildIncludeRanksClause(scriptPayload)
+
+    let currentPlatform = inReplyToPlatform
+    let currentProfileId = inReplyToProfileId
+    let currentPostId = inReplyToPostId
+
+    for (let i = 0; i < maxDepth; i++) {
+      try {
+        const post = await tx.post.findUnique({
+          where: {
+            platform_profileId_id: {
+              platform: currentPlatform,
+              profileId: currentProfileId,
+              id: currentPostId,
+            },
+          },
+          include: {
+            profile: {
+              select: {
+                ranking: true,
+                satsPositive: true,
+                satsNegative: true,
+                votesPositive: true,
+                votesNegative: true,
+              },
+            },
+            comment: {
+              select: {
+                data: true,
+                inReplyToPlatform: true,
+                inReplyToProfileId: true,
+                inReplyToPostId: true,
+                timestamp: true,
+                firstSeen: true,
+              },
+            },
+            ranks: includeRanks,
+          },
+        })
+
+        if (!post) break
+
+        const ancestorAPI: PostAPI = {
+          id: post.id,
+          platform: post.platform as ScriptChunkPlatformUTF8,
+          profileId: post.profileId,
+          firstVoted: post.firstVoted?.toString() ?? null,
+          lastVoted: post.lastVoted?.toString() ?? null,
+          ...this.serializeEntityMetrics(post),
+          profile: this.serializeEntityMetrics(post.profile),
+        }
+
+        // Populate RNKC-specific fields if this ancestor is a Lotusia comment
+        if (post.comment) {
+          this.populateLotusiaPostFields(ancestorAPI, post.data, post.comment)
+        }
+
+        // Populate wallet-specific vote metadata when scriptPayload is provided
+        if (post.ranks?.length) {
+          ancestorAPI.postMeta = await this.buildPostMeta(post.ranks)
+        }
+
+        // Prepend so final array is root-first
+        ancestors.unshift(ancestorAPI)
+
+        // Walk up to the next ancestor if this post is also a reply
+        if (post.comment?.inReplyToPostId) {
+          currentPlatform = post.comment.inReplyToPlatform
+          currentProfileId = post.comment.inReplyToProfileId
+          currentPostId = post.comment.inReplyToPostId
+        } else {
+          // Reached genesis post — stop
+          break
+        }
+      } catch {
+        break
+      }
+    }
+
+    return ancestors
+  }
+
+  /**
    * Converts a TransactionRNKC to a PostAPI
    * @param rnkc - The TransactionRNKC to convert
    * @returns The PostAPI
@@ -3005,32 +3394,177 @@ export class Database {
       id: rnkc.txid,
       platform: rnkc.post.platform as ScriptChunkPlatformUTF8,
       profileId: rnkc.post.profileId,
-      data: toCommentUTF8(rnkc.data),
+      data: BufferUtil.from(rnkc.data).toString('utf-8'),
+      firstVoted: rnkc.post.firstVoted?.toString(),
+      lastVoted: rnkc.post.lastVoted?.toString(),
       inReplyToPlatform: rnkc.inReplyToPlatform as ScriptChunkPlatformUTF8,
       inReplyToProfileId: rnkc.inReplyToProfileId,
       inReplyToPostId: rnkc.inReplyToPostId,
       firstSeen: (rnkc.firstSeen / 1_000n).toString(),
-      timestamp: rnkc.timestamp.toString(),
-      ranking: rnkc.post.ranking.toString(),
-      satsPositive: rnkc.post.satsPositive.toString(),
-      satsNegative: rnkc.post.satsNegative.toString(),
-      votesPositive: rnkc.post.votesPositive,
-      votesNegative: rnkc.post.votesNegative,
-      profile: {
-        ranking: rnkc.post.profile.ranking.toString(),
-        satsPositive: rnkc.post.profile.satsPositive.toString(),
-        satsNegative: rnkc.post.profile.satsNegative.toString(),
-        votesPositive: rnkc.post.profile.votesPositive,
-        votesNegative: rnkc.post.profile.votesNegative,
-      },
+      timestamp: rnkc.timestamp?.toString(),
+      ...this.serializeEntityMetrics(rnkc.post),
+      profile: this.serializeEntityMetrics(rnkc.post.profile),
     }
+  }
+  /**
+   * Normalizes pagination parameters to safe, bounded values.
+   * @param page - Raw page number (1-based)
+   * @param pageSize - Raw page size
+   * @param maxPageSize - Upper bound for pageSize (default 40)
+   * @returns Normalized { page, pageSize }
+   */
+  private normalizePaginationParams(
+    page: number,
+    pageSize: number,
+    maxPageSize: number = 40,
+  ): { page: number; pageSize: number } {
+    if (!page || page < 1) {
+      page = 1
+    }
+    if (!pageSize) {
+      pageSize = 10
+    }
+    if (pageSize > maxPageSize) {
+      pageSize = maxPageSize
+    }
+    return { page, pageSize }
+  }
+  /**
+   * Serializes a raw entity's BigInt metric fields to strings for API responses.
+   * @param entity - Object with ranking/satsPositive/satsNegative as bigint and votes as number
+   * @returns `TargetEntityMetricsAPI`
+   */
+  private serializeEntityMetrics(entity: {
+    ranking: bigint
+    satsPositive: bigint
+    satsNegative: bigint
+    votesPositive: number
+    votesNegative: number
+  }): TargetEntityMetricsAPI {
+    return {
+      ranking: entity.ranking.toString(),
+      satsPositive: entity.satsPositive.toString(),
+      satsNegative: entity.satsNegative.toString(),
+      votesPositive: entity.votesPositive,
+      votesNegative: entity.votesNegative,
+    }
+  }
+  /**
+   * Builds a `VoterProfileMetadata` object from a ranks array.
+   * Returns `null` when the ranks array is empty or undefined.
+   * @param ranks - Array of rank records with a `sentiment` field
+   * @returns `VoterProfileMetadata` or null
+   */
+  private buildProfileMetadata(
+    ranks: { sentiment: string }[] | undefined | null,
+  ): VoterProfileMetadata | null {
+    if (!ranks?.length) {
+      return null
+    }
+    return {
+      hasWalletUpvoted: ranks.some(r => r.sentiment === 'positive'),
+      hasWalletDownvoted: ranks.some(r => r.sentiment === 'negative'),
+    }
+  }
+  /**
+   * Builds the Prisma `include.ranks` clause used to fetch wallet-specific vote
+   * data for Vote-to-Reveal (postMeta). Returns `undefined` when no scriptPayload
+   * is provided so Prisma omits the relation entirely.
+   * @param scriptPayload - Optional wallet script payload
+   * @returns Prisma include clause or undefined
+   */
+  private buildIncludeRanksClause(
+    scriptPayload: string | undefined,
+    timespan?: Timespan,
+  ) {
+    if (!scriptPayload) {
+      return undefined
+    }
+    const clause: Parameters<typeof this.db.rankTransaction.findMany>[0] = {
+      where: {
+        scriptPayload,
+        sentiment: { not: 'neutral' },
+        // TODO: This needs to be fixed in another way specifically for recent vote data
+        // Recent vote data is used in sentiment charts in lotus-web-wallet for profiles/posts
+        // The problem is that setting a filter here will fail to generate full postMeta for a profile/post
+        //timestamp: { gte: getTimestampUTC(timespan) }, // timespan defaults to 'week'
+      },
+      select: {
+        txid: true,
+        sats: true,
+        sentiment: true,
+        timestamp: true, // null if tx is unconfirmed
+        firstSeen: true, // first time seen by indexer; good practice to defer to block timestamp for old txs
+      },
+      orderBy: [
+        {
+          timestamp: 'desc',
+        },
+        {
+          firstSeen: 'desc',
+        },
+      ],
+    }
+
+    // Add timespan filter if provided, otherwise fetches all ranks
+    if (timespan) {
+      clause.where.timestamp = {
+        gte: getTimestampUTC(timespan),
+      }
+    }
+
+    return clause
+  }
+  /**
+   * Populates Lotusia-specific RNKC fields on a `PostAPI` object in-place.
+   * Decodes the raw post data buffer, sets inReplyTo fields, and resolves the
+   * canonical timestamp (min of firstSeen and block timestamp).
+   * @param postData - The `PostAPI` object to mutate
+   * @param rawData - Raw post data buffer (from `post.data`)
+   * @param comment - The associated RankComment record
+   */
+  private populateLotusiaPostFields(
+    postData: PostAPI,
+    rawData: Buffer | Uint8Array,
+    comment: {
+      inReplyToPlatform: string
+      inReplyToProfileId: string
+      inReplyToPostId: string | null
+      timestamp: bigint
+      firstSeen: bigint
+    },
+  ): void {
+    postData.data = BufferUtil.from(rawData).toString('utf-8')
+
+    // Detect standalone posts: when inReplyToProfileId equals the post's profileId,
+    // this is a standalone Lotusia post, not a reply to the user's own profile.
+    // In this case, set reply fields to null to avoid rendering as a self-reply.
+    const isStandalonePost = comment.inReplyToProfileId === postData.profileId
+
+    if (isStandalonePost) {
+      postData.inReplyToPlatform = null
+      postData.inReplyToProfileId = null
+      postData.inReplyToPostId = null
+    } else {
+      postData.inReplyToPlatform =
+        comment.inReplyToPlatform as ScriptChunkPlatformUTF8
+      postData.inReplyToProfileId = comment.inReplyToProfileId
+      postData.inReplyToPostId = comment.inReplyToPostId
+    }
+
+    const firstSeenSeconds = comment.firstSeen / 1_000n
+    postData.firstSeen = firstSeenSeconds.toString()
+    postData.timestamp =
+      firstSeenSeconds < comment.timestamp
+        ? firstSeenSeconds.toString()
+        : (comment.timestamp?.toString() ?? null)
   }
   /**
    * Converts a list of rank transactions to a PostMeta
    * @param ranks - The list of rank transactions to convert
    * @returns The `VoterPostMetadata` object
    */
-  private async convertRankTransactionsToPostMeta(
+  private async buildPostMeta(
     ranks: Partial<PrismaRANK>[],
   ): Promise<VoterPostMetadata> {
     let hasWalletUpvoted = false
