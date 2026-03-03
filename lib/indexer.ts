@@ -1,4 +1,10 @@
-import { BufferUtil, Output, Transaction } from 'xpi-ts/lib/bitcore'
+import {
+  BufferUtil,
+  Opcode,
+  Output,
+  Script,
+  Transaction,
+} from 'xpi-ts/lib/bitcore'
 import type { ByteBuffer } from 'flatbuffers'
 //import { isIP } from 'validator'
 //import { resolve } from 'node:path/posix'
@@ -671,11 +677,12 @@ export class Indexer extends EventEmitter {
       NNGInterface.TransactionAddedToMempool.getRootAsTransactionAddedToMempool(
         bb,
       ).mempoolTx()
-    const rawArray = mempooltx.tx().rawArray()
+    const nngTx = mempooltx.tx()
+    const rawArray = nngTx.rawArray()
     const tx = new Transaction(BufferUtil.from(rawArray))
     // Process the transaction using the processTransaction function
     // block is null for mempool transactions
-    const processed = this.processTransaction(tx, null)
+    const processed = this.processTransaction(tx, nngTx, null)
     // Add RANK transactions to mempool cache for reconciliation
     // Also add profiles to queue for upserting
     if (processed.ranks) {
@@ -925,11 +932,12 @@ export class Indexer extends EventEmitter {
     // skip coinbase tx if processing block data
     for (let i = startIndex; i < txsLength; i++) {
       try {
-        const rawArray = data.txs(i).tx().rawArray()
+        const nngTx = data.txs(i).tx()
+        const rawArray = nngTx.rawArray()
         // Convert Uint8Array to Buffer else bitcore parse will fail
         const tx = new Transaction(BufferUtil.from(rawArray))
         // Process the transaction as either block or mempool tx
-        const processed = this.processTransaction(tx, block)
+        const processed = this.processTransaction(tx, nngTx, block)
         if (processed.ranks) {
           results.ranks.push(...processed.ranks)
         }
@@ -947,11 +955,13 @@ export class Indexer extends EventEmitter {
   /**
    * Process a single transaction to extract compatible LOKAD protocols
    * @param tx `Transaction` object
+   * @param nngTx `NNGInterface.Tx` object containing spent_coins data for Taproot support
    * @param block `Block` object, if available
    * @returns {void}
    */
   private processTransaction(
     tx: Transaction,
+    nngTx: NNGInterface.Tx,
     block: Block | null,
   ): ProcessedTransaction {
     // Set up return object
@@ -959,12 +969,20 @@ export class Indexer extends EventEmitter {
       ranks: [],
       rnkc: null,
     }
-    // Get script payload for the transaction
-    // NOTE: P2TR inputs not yet supported because prevTx data is not available
-    // The scriptPayload (33-byte commitment) only exists in the output script
-    // We need a more robust indexing solution to support P2TR scriptPayloads
-    const scriptPayload = this.getScriptPayload(tx)
-    // Return null if script payload does not meet our requirements in `getScriptPayload`
+    // Extract spent_coins array from NNG Tx for Taproot support
+    const spentCoins: NNGInterface.Coin[] = []
+    const spentCoinsLength = nngTx.spentCoinsLength()
+    if (spentCoinsLength > 0) {
+      for (let i = 0; i < spentCoinsLength; i++) {
+        const coin = nngTx.spentCoins(i)
+        if (coin) {
+          spentCoins.push(coin)
+        }
+      }
+    }
+    // Get script payload for the transaction (now supports P2TR via spent_coins)
+    const scriptPayload = this.getScriptPayload(tx, spentCoins)
+    // Return early if script payload could not be extracted (invalid input script format)
     if (!scriptPayload) {
       return result
     }
@@ -1145,21 +1163,78 @@ export class Indexer extends EventEmitter {
    * Process `Transaction.Input` objects to get the `scriptPayload`
    * Only return the `scriptPayload` if all inputs are from the same address
    *
-   * NOTE: P2TR inputs do not contain the requisite data for constructing the
-   * hashBuffer of the address, so this method returns `null` for P2TR inputs.
+   * For P2TR (Taproot) inputs, extracts the scriptPayload from the previous
+   * output's scriptPubKey provided via spent_coins data from NNG interface.
+   * Lotus uses 33-byte compressed pubkeys for Taproot (not x-only 32-byte).
    * @param tx `Transaction` object
+   * @param spentCoins Array of `Coin` objects from NNG Tx.spent_coins, containing prevout data
    * @returns `scriptPayload` as a hex string or `null` if inputs are invalid
    */
-  private getScriptPayload(tx: Transaction): string | null {
-    // TODO: Add proper P2TR input support. This will require fetching the
-    // previous transaction(s) and extracting the scriptPubKey. For now, just
-    // return null, as this will require changes to lotus-nng-client to support
-    // transaction fetching, then a significant refactor of the scriptPayload
-    // fetching logic here
+  private getScriptPayload(
+    tx: Transaction,
+    spentCoins: NNGInterface.Coin[],
+  ): string | null {
+    // Handle Taproot (P2TR) inputs
     if (tx.inputs[0].script.isTaprootIn()) {
+      // Taproot requires prevout data from spent_coins
+      if (spentCoins.length === 0) {
+        return null // Cannot process Taproot without prevout data
+      }
+
+      // Extract scriptPubKey from first input's prevout and convert to
+      // bitcore Script object
+      const firstCoin = spentCoins[0]
+      const scriptPubKeyArray = firstCoin.txOut()?.scriptArray()
+      if (!scriptPubKeyArray || scriptPubKeyArray.length < 2) {
+        return null // Invalid scriptPubKey
+      }
+      const scriptPubKey = Script.fromBuffer(BufferUtil.from(scriptPubKeyArray))
+      if (!scriptPubKey.isTaprootOut()) {
+        return null // Not a valid Lotus P2TR scriptPubKey
+      }
+
+      // Extract 33-byte compressed pubkey commitment as scriptPayload
+      const scriptPayloadBuffer = scriptPubKey.getPayload().payload
+
+      // Verify all inputs spend from the same Taproot address
+      if (
+        tx.inputs.every((input, i) => {
+          // Check input script type
+          if (!input.script.isTaprootIn()) {
+            return false // Mixed input types not allowed
+          }
+          // Check spent_coins availability
+          if (i >= spentCoins.length) {
+            return false // Missing spent_coins data for input
+          }
+
+          // Get the output scriptPubKey as a Uint8Array and convert it to a
+          // bitcore Script object
+          const coin = spentCoins[i]
+          const scriptArray = coin.txOut()?.scriptArray()
+          if (!scriptArray) {
+            return false // coin txout is missing
+          }
+          const script = Script.fromBuffer(BufferUtil.from(scriptArray))
+
+          // Validate scriptPubKey format and extract commitment
+          if (!script.isTaprootOut()) {
+            return false // Invalid P2TR scriptPubKey
+          }
+
+          return (
+            // OK to coerce to Address here because we know it's a P2TR script
+            scriptPayloadBuffer.compare(script.toAddress()!.hashBuffer) === 0
+          )
+        })
+      ) {
+        return scriptPayloadBuffer.toString('hex')
+      }
+
       return null
     }
 
+    // Handle P2PKH/P2SH inputs (existing logic)
     const scriptPayloadBuffer = tx.inputs[0].script.toAddress().hashBuffer
     if (
       tx.inputs.every(

@@ -5,7 +5,13 @@ import {
 } from './constants'
 import { ScriptChunkPlatformUTF8 } from 'xpi-ts/lib/rank'
 import { Block } from 'lotus-nng-client'
-import { Address, BufferUtil, Message, Networks } from 'xpi-ts/lib/bitcore'
+import {
+  Address,
+  BufferUtil,
+  Message,
+  Networks,
+  Script,
+} from 'xpi-ts/lib/bitcore'
 import type { Request, Response } from 'express'
 import type { TopicCategory, Topic } from '../lib/push'
 import { AuthorizationPayload } from '../lib/api/authCache'
@@ -291,6 +297,7 @@ export const Validate = {
   /**
    * Validates that the provided `scriptPayload` is a valid script payload.
    * If invalid, responds with HTTP 400 and an error message.
+   * Accepts both P2PKH/P2SH (20 bytes) and Taproot (33 bytes) scriptPayloads.
    * @param scriptPayload - The script payload to validate
    * @returns The validated script payload
    */
@@ -301,12 +308,27 @@ export const Validate = {
         statusCode: HTTP.BAD_REQUEST,
       }
     }
-    return Buffer.from(scriptPayload, 'hex').byteLength === 20
-      ? { scriptPayload }
-      : {
+    const buffer = BufferUtil.from(scriptPayload, 'hex')
+    if (buffer.byteLength === 20 || buffer.byteLength === 33) {
+      // Valid scriptPayload length, now validate the format
+      try {
+        const script = Script.fromBuffer(buffer)
+        if (script.isValid()) {
+          return {
+            scriptPayload,
+          }
+        }
+      } catch (e) {
+        return {
           error: 'scriptPayload is invalid',
           statusCode: HTTP.BAD_REQUEST,
         }
+      }
+    }
+    return {
+      error: 'scriptPayload is invalid',
+      statusCode: HTTP.BAD_REQUEST,
+    }
   },
 
   /**
