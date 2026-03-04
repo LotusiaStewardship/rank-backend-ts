@@ -743,7 +743,11 @@ export class Database {
             platform_id: { platform, id: profileId },
           },
           include: {
-            ranks: scriptPayload !== undefined,
+            ranks: this.buildIncludeRanksClause({
+              scriptPayload,
+              platform,
+              profileId,
+            }),
             comments: {
               include: {
                 post: {
@@ -868,19 +872,12 @@ export class Database {
               votesNegative: 0,
             },
           }
-    const includeRanks = this.buildIncludeRanksClause(scriptPayload)
-    const checkWalletDownvotedProfile = !scriptPayload
-      ? undefined
-      : {
-          // we only need to check if the wallet has downvoted the profile once
-          take: 1,
-          where: { scriptPayload, sentiment: 'negative' },
-          select: {
-            txid: true,
-            sats: true,
-            sentiment: true,
-          },
-        }
+    const includeRanks = this.buildIncludeRanksClause({
+      scriptPayload,
+      platform,
+      profileId,
+      postId,
+    })
     return await this.db.$transaction(async tx => {
       try {
         const post = await tx.post.findUniqueOrThrow({
@@ -896,7 +893,7 @@ export class Database {
                 satsNegative: true,
                 votesPositive: true,
                 votesNegative: true,
-                ranks: checkWalletDownvotedProfile,
+                ranks: includeRanks,
               },
             },
             // Get the RANK transactions for the post that were voted on by the wallet,
@@ -954,7 +951,7 @@ export class Database {
           if (post.comment.inReplyToPostId) {
             data.ancestors = await this.fetchAncestorChain(
               tx as PrismaClient,
-              post.comment.inReplyToPlatform,
+              post.comment.inReplyToPlatform as ScriptChunkPlatformUTF8,
               post.comment.inReplyToProfileId,
               post.comment.inReplyToPostId,
               20,
@@ -981,7 +978,7 @@ export class Database {
                 satsNegative: true,
                 votesPositive: true,
                 votesNegative: true,
-                ranks: this.buildIncludeRanksClause(scriptPayload),
+                ranks: includeRanks,
               },
             })
             if (ancestorProfile) {
@@ -1037,7 +1034,7 @@ export class Database {
             satsNegative: true,
             votesPositive: true,
             votesNegative: true,
-            ranks: checkWalletDownvotedProfile,
+            ranks: includeRanks,
           },
         })
         data.profile = this.serializeEntityMetrics(profile)
@@ -1259,6 +1256,11 @@ export class Database {
     pageSize?: number
   }) {
     ;({ page, pageSize } = this.normalizePaginationParams(page, pageSize))
+    const includeRanks = this.buildIncludeRanksClause({
+      scriptPayload,
+      platform,
+      profileId,
+    })
     try {
       return await this.db.$transaction(async tx => {
         const totalPosts = await tx.post.count({
@@ -1286,7 +1288,7 @@ export class Database {
             votesPositive: true,
             votesNegative: true,
             data: true, // needed for Lotusia posts
-            ranks: this.buildIncludeRanksClause(scriptPayload),
+            ranks: includeRanks,
             // needed for Lotusia posts
             comment: {
               select: {
@@ -1335,7 +1337,7 @@ export class Database {
                   satsNegative: true,
                   votesPositive: true,
                   votesNegative: true,
-                  ranks: this.buildIncludeRanksClause(scriptPayload),
+                  ranks: includeRanks,
                 },
               })
               if (ancestorProfile) {
@@ -2733,7 +2735,7 @@ export class Database {
         }
 
         // Wallet-specific RANK vote filter (for Vote-to-Reveal postMeta)
-        const includeRanks = this.buildIncludeRanksClause(scriptPayload)
+        const includeRanks = this.buildIncludeRanksClause({ scriptPayload })
 
         // For 'curated' and 'controversial' sorts, fetch a larger candidate set
         // so we can re-sort in-memory and then paginate.
@@ -2831,7 +2833,7 @@ export class Database {
             if (post.comment.inReplyToPostId) {
               postData.ancestors = await this.fetchAncestorChain(
                 tx as PrismaClient,
-                post.comment.inReplyToPlatform,
+                post.comment.inReplyToPlatform as ScriptChunkPlatformUTF8,
                 post.comment.inReplyToProfileId,
                 post.comment.inReplyToPostId,
                 1,
@@ -2858,7 +2860,7 @@ export class Database {
                   satsNegative: true,
                   votesPositive: true,
                   votesNegative: true,
-                  ranks: this.buildIncludeRanksClause(scriptPayload),
+                  ranks: includeRanks,
                 },
               })
               if (ancestorProfile) {
@@ -3049,7 +3051,7 @@ export class Database {
       }
 
       // Wallet-specific RANK vote filter
-      const includeRanks = this.buildIncludeRanksClause(scriptPayload)
+      const includeRanks = this.buildIncludeRanksClause({ scriptPayload })
 
       // Phase 2: Fetch full Post data for each trending post
       const posts = await this.db.$transaction(
@@ -3295,14 +3297,19 @@ export class Database {
    */
   private async fetchAncestorChain(
     tx: PrismaClient,
-    inReplyToPlatform: string,
+    inReplyToPlatform: ScriptChunkPlatformUTF8,
     inReplyToProfileId: string,
     inReplyToPostId: string,
     maxDepth: number = 20,
     scriptPayload?: string,
   ): Promise<PostAPI[]> {
     const ancestors: PostAPI[] = []
-    const includeRanks = this.buildIncludeRanksClause(scriptPayload)
+    const includeRanks = this.buildIncludeRanksClause({
+      scriptPayload,
+      platform: inReplyToPlatform,
+      profileId: inReplyToProfileId,
+      postId: inReplyToPostId,
+    })
 
     let currentPlatform = inReplyToPlatform
     let currentProfileId = inReplyToProfileId
@@ -3369,7 +3376,8 @@ export class Database {
 
         // Walk up to the next ancestor if this post is also a reply
         if (post.comment?.inReplyToPostId) {
-          currentPlatform = post.comment.inReplyToPlatform
+          currentPlatform = post.comment
+            .inReplyToPlatform as ScriptChunkPlatformUTF8
           currentProfileId = post.comment.inReplyToProfileId
           currentPostId = post.comment.inReplyToPostId
         } else {
@@ -3473,10 +3481,19 @@ export class Database {
    * @param scriptPayload - Optional wallet script payload
    * @returns Prisma include clause or undefined
    */
-  private buildIncludeRanksClause(
-    scriptPayload: string | undefined,
-    timespan?: Timespan,
-  ) {
+  private buildIncludeRanksClause({
+    scriptPayload,
+    timespan,
+    platform,
+    profileId,
+    postId,
+  }: {
+    scriptPayload: string | undefined
+    timespan?: Timespan
+    platform?: ScriptChunkPlatformUTF8
+    profileId?: string
+    postId?: string
+  }) {
     if (!scriptPayload) {
       return undefined
     }
@@ -3484,6 +3501,9 @@ export class Database {
       where: {
         scriptPayload,
         sentiment: { not: 'neutral' },
+        platform,
+        profileId,
+        postId,
         // TODO: This needs to be fixed in another way specifically for recent vote data
         // Recent vote data is used in sentiment charts in lotus-web-wallet for profiles/posts
         // The problem is that setting a filter here will fail to generate full postMeta for a profile/post
