@@ -42,6 +42,7 @@ import type {
 } from 'xpi-ts/lib/rank'
 import { toAsyncIterable } from '../util/functions'
 import { BufferUtil } from 'xpi-ts/lib/bitcore'
+import { computeEPBreakdown, computeTierFromEP } from './engagement'
 
 export type IndexedTransactionRANK = IndexedTransaction & PrismaRANK
 export type IndexedTransactionRNKC = IndexedTransaction &
@@ -2477,6 +2478,152 @@ export class Database {
       })
     } catch (e) {
       throw new Error(`db.upsertWalletEngagement: ${e.message}`)
+    }
+  }
+
+  /**
+   * Incrementally updates a WalletEngagement record when a new RANK vote is indexed.
+   * Performs 1 read + pure math + 1 write instead of 8 aggregate queries.
+   *
+   * @param scriptPayload - The voter's scriptPayload
+   * @param satsBurned - The sats burned in this RANK transaction
+   * @param voteCount - Number of RANK outputs in this transaction for this voter (usually 1)
+   */
+  async incrementWalletEngagementForVote(
+    scriptPayload: string,
+    satsBurned: bigint,
+    voteCount: number = 1,
+  ) {
+    try {
+      // 1. Read existing record (or create with defaults)
+      const existing = await this.db.walletEngagement.upsert({
+        where: { scriptPayload },
+        create: { scriptPayload },
+        update: {},
+      })
+
+      // 2. Increment counters
+      const lifetimeVotes = existing.lifetimeVotes + voteCount
+      const totalBurnedSats = existing.totalBurnedSats + satsBurned
+      const now = new Date()
+      now.setUTCHours(0, 0, 0, 0)
+      const firstVoteDate = existing.firstVoteDate ?? now
+
+      // 3. Compute streak from lastVoteDate vs today (pure date math)
+      let currentStreak = existing.currentStreak
+      if (existing.lastVoteDate) {
+        const lastVote = new Date(existing.lastVoteDate)
+        lastVote.setUTCHours(0, 0, 0, 0)
+        const diffDays = Math.floor(
+          (now.getTime() - lastVote.getTime()) / 86_400_000,
+        )
+        if (diffDays === 0) {
+          // Same day — streak unchanged
+        } else if (diffDays === 1) {
+          // Consecutive day — extend streak
+          currentStreak += 1
+        } else {
+          // Gap > 1 day — streak resets to 1 (today counts)
+          currentStreak = 1
+        }
+      } else {
+        // First ever vote
+        currentStreak = 1
+      }
+      const longestStreak = Math.max(currentStreak, existing.longestStreak)
+
+      // 4. Compute account age from firstVoteDate
+      const diffMs = now.getTime() - firstVoteDate.getTime()
+      const accountAgeMonths = Math.floor(diffMs / (30.44 * 86_400_000))
+
+      // 5. Recompute EP from stored counters (pure math, 0 DB queries)
+      const epBreakdown = computeEPBreakdown(
+        lifetimeVotes,
+        existing.lifetimeReferrals,
+        existing.lifetimeComments,
+        totalBurnedSats,
+        currentStreak,
+        accountAgeMonths,
+      )
+      const tier = computeTierFromEP(epBreakdown.total)
+
+      // 6. Write back
+      return await this.db.walletEngagement.update({
+        where: { scriptPayload },
+        data: {
+          tier,
+          engagementPoints: epBreakdown.total,
+          epBreakdown,
+          lifetimeVotes,
+          totalBurnedSats,
+          firstVoteDate,
+          currentStreak,
+          longestStreak,
+          lastVoteDate: new Date(),
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.incrementWalletEngagementForVote: ${e.message}`)
+    }
+  }
+
+  /**
+   * Incrementally updates a WalletEngagement record when a new RNKC comment is indexed.
+   * Performs 1 read + pure math + 1 write instead of 8 aggregate queries.
+   *
+   * @param scriptPayload - The commenter's scriptPayload
+   * @param satsBurned - The sats burned in this RNKC transaction
+   */
+  async incrementWalletEngagementForComment(
+    scriptPayload: string,
+    satsBurned: bigint,
+  ) {
+    try {
+      // 1. Read existing record (or create with defaults)
+      const existing = await this.db.walletEngagement.upsert({
+        where: { scriptPayload },
+        create: { scriptPayload },
+        update: {},
+      })
+
+      // 2. Increment counters
+      const lifetimeComments = existing.lifetimeComments + 1
+      const totalBurnedSats = existing.totalBurnedSats + satsBurned
+
+      // 3. Compute account age from firstVoteDate (comments don't affect streak or firstVoteDate)
+      const now = new Date()
+      now.setUTCHours(0, 0, 0, 0)
+      const accountAgeMonths = existing.firstVoteDate
+        ? Math.floor(
+            (now.getTime() - existing.firstVoteDate.getTime()) /
+              (30.44 * 86_400_000),
+          )
+        : 0
+
+      // 4. Recompute EP from stored counters (pure math, 0 DB queries)
+      const epBreakdown = computeEPBreakdown(
+        existing.lifetimeVotes,
+        existing.lifetimeReferrals,
+        lifetimeComments,
+        totalBurnedSats,
+        existing.currentStreak,
+        accountAgeMonths,
+      )
+      const tier = computeTierFromEP(epBreakdown.total)
+
+      // 5. Write back
+      return await this.db.walletEngagement.update({
+        where: { scriptPayload },
+        data: {
+          tier,
+          engagementPoints: epBreakdown.total,
+          epBreakdown,
+          lifetimeComments,
+          totalBurnedSats,
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.incrementWalletEngagementForComment: ${e.message}`)
     }
   }
 
