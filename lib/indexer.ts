@@ -735,19 +735,69 @@ export class Indexer extends EventEmitter {
         //  })
         //}
         this.profileQueue.clear()
-        // Check faucet milestones for each distinct voter in this tx
+        // Check faucet milestones and update engagement for each distinct voter
         if (processed.ranks?.length > 0) {
-          const voterPayloads = processed.ranks.map(r => r.scriptPayload)
-          for (const scriptPayload of voterPayloads) {
-            this.checkFaucetMilestone(scriptPayload).catch(e => {
+          // Aggregate sats per voter (a tx may have multiple RANK outputs from the same voter)
+          const voterSats = new Map<string, { sats: bigint; count: number }>()
+          for (const rank of processed.ranks) {
+            const existing = voterSats.get(rank.scriptPayload)
+            if (existing) {
+              existing.sats += rank.sats
+              existing.count += 1
+            } else {
+              voterSats.set(rank.scriptPayload, {
+                sats: rank.sats,
+                count: 1,
+              })
+            }
+          }
+          for (const [scriptPayload, { sats, count }] of voterSats) {
+            // TODO: the checkFaucetMilestone needs to be reworked to NOT query ALL transactions
+            // for a scriptPayload. Milestones should be another indexed field in WalletEngagement model
+            /* try {
+              await this.checkFaucetMilestone(scriptPayload)
+            } catch (e) {
               log([
                 ['nng', 'warn'],
                 ['action', 'checkFaucetMilestone'],
                 ['scriptPayload', scriptPayload],
+                ['message', `"${e.message}"`],
+              ])
+            } */
+
+            // Incrementally update WalletEngagement for this voter
+            try {
+              await this.db.incrementWalletEngagementForVote(
+                scriptPayload,
+                sats,
+                count,
+              )
+            } catch (e) {
+              log([
+                ['nng', 'warn'],
+                ['action', 'incrementEngagement.vote'],
+                ['scriptPayload', scriptPayload],
+                ['message', `"${e.message}"`],
+              ])
+            }
+          }
+        }
+
+        // Update engagement for RNKC comment submitter
+        if (processed.rnkc) {
+          this.db
+            .incrementWalletEngagementForComment(
+              processed.rnkc.scriptPayload,
+              processed.rnkc.sats,
+            )
+            .catch(e => {
+              log([
+                ['nng', 'warn'],
+                ['action', 'incrementEngagement.comment'],
+                ['scriptPayload', processed.rnkc.scriptPayload],
                 ['message', `"${String(e)}"`],
               ])
             })
-          }
         }
         const t1 = (performance.now() - t0).toFixed(3)
         log([
