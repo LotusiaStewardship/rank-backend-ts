@@ -67,8 +67,8 @@ export interface TransactionOutputRANK {
  * Contains comment data and reply target information
  */
 export interface TransactionOutputRNKC {
-  /** The comment data as raw bytes */
-  data: Uint8Array
+  /** The comment data as raw bytes, casted to match Prisma 6.19 interface */
+  data: Uint8Array<ArrayBuffer>
   /** The fee rate for the transaction */
   feeRate: number
   /** The platform of the entity being replied to */
@@ -1085,6 +1085,7 @@ export class Indexer extends EventEmitter {
           sats: BigInt(tx.outputs[0].satoshis),
           timestamp: block?.timestamp, // undefined until block is connected
           ...rnkc,
+          data: rnkc.data as Uint8Array<ArrayBuffer>,
         }
         break
       }

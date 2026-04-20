@@ -1953,7 +1953,8 @@ export class Database {
                 id: postId,
                 platform: postPlatform,
                 profileId,
-                data, // data is the comment text for Lotusia posts
+                // NOTE: Latest Prisma 6.19 changed Uint8Array type constraints, so we cast it here
+                data: data as Uint8Array<ArrayBuffer>, // data is the comment text for Lotusia posts
                 firstVoted: postTimestamp,
                 lastVoted: postLastVoted,
                 ranking: postRanking,
@@ -1968,7 +1969,10 @@ export class Database {
               // satisfying the RankComment FK constraint [txid, scriptPayload, data]
               update: {
                 ...postIncrements,
-                ...(data !== undefined && { data }),
+                ...(data !== undefined && {
+                  // NOTE: Latest Prisma 6.19 changed Uint8Array type constraints, so we cast it here
+                  data: data as Uint8Array<ArrayBuffer>,
+                }),
                 lastVoted: postLastVoted,
               },
             }),
