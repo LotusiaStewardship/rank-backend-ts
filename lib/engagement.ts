@@ -311,6 +311,8 @@ export async function computeFullEngagement(
   currentStreak: number
   longestStreak: number
   lastVoteDate: Date | null
+  totalBurnedSats: bigint
+  firstVoteDate: Date | null
 }> {
   // Gather all raw metrics in parallel
   const [
@@ -361,6 +363,15 @@ export async function computeFullEngagement(
     ? new Date(Number(latestTimestamp) * 1_000)
     : null
 
+  // Compute first vote date (normalized to UTC midnight) from earliestTimestamp
+  const firstVoteDate = earliestTimestamp
+    ? (() => {
+        const d = new Date(Number(earliestTimestamp) * 1_000)
+        d.setUTCHours(0, 0, 0, 0)
+        return d
+      })()
+    : null
+
   return {
     tier,
     engagementPoints: epBreakdown.total,
@@ -371,5 +382,7 @@ export async function computeFullEngagement(
     currentStreak,
     longestStreak,
     lastVoteDate,
+    totalBurnedSats,
+    firstVoteDate,
   }
 }
