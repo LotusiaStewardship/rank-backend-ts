@@ -1,4 +1,4 @@
-# RANK Protocol Backend Services – v0.5.0
+# RANK Protocol Backend Services – v0.5.1
 
 ### **Tested on openSUSE Tumbleweed x86_64 with NodeJS 20.18.0+**
 

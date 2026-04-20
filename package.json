@@ -1,6 +1,6 @@
 {
   "name": "@lotusia/rank-backend-ts",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Core backend services implementing the Lotus RANK protocol",
   "main": ".output/index.js",
   "scripts": {
