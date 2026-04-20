@@ -43,14 +43,20 @@ import {
   sendJSON,
   sendAuthChallenge,
   toLogEntries,
-  isValidInstanceId,
+  recomputeInstanceId,
   log,
-  Validate,
   type LogEntry,
 } from '../util/functions'
 import type { AuthorizationCache } from './api/authCache'
 import type { FeedFilterParams, Timespan } from './database'
 import { Temporal } from './temporal'
+import {
+  validateAdminSecret,
+  validateInstanceId,
+  validateReferralCode,
+  validateScriptPayload,
+  validateSearchType,
+} from '../util/validators'
 
 /**
  * Represents a profile's ranking information including total and change metrics
@@ -343,7 +349,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     next: NextFunction,
     searchType: string,
   ) => {
-    const validated = Validate.searchType(searchType as 'profile' | 'post')
+    const validated = validateSearchType(searchType as 'profile' | 'post')
     if (validated.error) {
       return sendJSON(res, { error: validated.error }, validated.statusCode)
     }
@@ -362,7 +368,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     next: NextFunction,
     scriptPayload: string | undefined,
   ) => {
-    const result = Validate.scriptPayload(scriptPayload)
+    const result = validateScriptPayload(scriptPayload)
     if (!result.scriptPayload) {
       return sendJSON(
         res,
@@ -457,7 +463,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     next: NextFunction,
     instanceId: string | undefined,
   ) => {
-    const result = Validate.instanceId(instanceId)
+    const result = validateInstanceId(instanceId)
     if (result.error) {
       return sendJSON(res, { ...result }, result.statusCode)
     }
@@ -1035,7 +1041,7 @@ export class API extends EventEmitter {
       // REQUEST IS NOW AUTHORIZED
 
       // validate the scriptPayload GET parameter
-      const validationResult = Validate.scriptPayload(req.params.scriptPayload)
+      const validationResult = validateScriptPayload(req.params.scriptPayload)
       if (validationResult.error) {
         const t1 = (performance.now() - t0).toFixed(3)
         entries.push(['elapsed', `${t1}ms`])
@@ -1467,19 +1473,19 @@ export class API extends EventEmitter {
           error?: string
           statusCode?: number
         }
-        validated = Validate.instanceId(body.instanceId)
+        validated = validateInstanceId(body.instanceId)
         if (!validated.instanceId) {
           throw new Error(validated.error)
         }
-        validated = Validate.scriptPayload(body.scriptPayload)
+        validated = validateScriptPayload(body.scriptPayload)
         if (!validated.scriptPayload) {
           throw new Error('scriptPayload must be specified')
         }
         if (!Date.parse(body.createdAt)) {
           throw new Error(`createdAt date format is invalid`)
         }
-        // validate instanceId matches input and meets/exceeds difficulty
-        if (!(await isValidInstanceId(body))) {
+        // recompute instanceId to match input body and diff check
+        if (!(await recomputeInstanceId(body))) {
           throw new Error(`instanceId does not match input data`)
         }
         // verify message signature
@@ -1557,7 +1563,7 @@ export class API extends EventEmitter {
           signature: string
         }
         // Validate scriptPayload
-        const validated = Validate.scriptPayload(body.scriptPayload)
+        const validated = validateScriptPayload(body.scriptPayload)
         if (!validated.scriptPayload) {
           return sendJSON(res, { error: validated.error }, validated.statusCode)
         }
@@ -1670,7 +1676,7 @@ export class API extends EventEmitter {
           signature: string
         }
         // Validate referral code format
-        const validatedCode = Validate.referralCode(body.code)
+        const validatedCode = validateReferralCode(body.code)
         if (!validatedCode.code) {
           return sendJSON(
             res,
@@ -1679,7 +1685,7 @@ export class API extends EventEmitter {
           )
         }
         // Validate scriptPayload
-        const validated = Validate.scriptPayload(body.scriptPayload)
+        const validated = validateScriptPayload(body.scriptPayload)
         if (!validated.scriptPayload) {
           return sendJSON(res, { error: validated.error }, validated.statusCode)
         }
@@ -1846,7 +1852,7 @@ export class API extends EventEmitter {
       try {
         // Validate admin secret
         const adminHeader = req.headers['x-admin-secret'] as string | undefined
-        const adminValidated = Validate.adminSecret(
+        const adminValidated = validateAdminSecret(
           adminHeader,
           config.admin.secret,
         )
