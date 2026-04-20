@@ -289,6 +289,18 @@ export const getTimestampUTC = (timespan: Timespan = 'month'): number => {
   }
 }
 
+/**
+ * Database class that provides a unified interface for all database operations.
+ * Handles RANK and RNKC transaction storage, block management, entity metrics,
+ * referral codes, wallet engagement tracking, and API query methods.
+ *
+ * @example
+ * ```typescript
+ * const db = new Database(process.env.DATABASE_URL)
+ * await db.connect()
+ * const checkpoint = await db.getCheckpoint()
+ * ```
+ */
 export class Database {
   private db: PrismaClient
 
