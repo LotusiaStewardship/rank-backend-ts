@@ -2841,6 +2841,7 @@ export class Database {
     try {
       return await this.db.$transaction(async tx => {
         // Build where clause for Post model
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const whereClause: any = {}
         if (platform) {
           whereClause.platform = platform
@@ -2870,6 +2871,7 @@ export class Database {
         // Build orderBy based on sort mode.
         // 'curated' fetches by linear ranking first, then re-sorts in-memory
         // after applying R62–R65 dampening (Prisma cannot order by relation fields).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let orderBy: any
         switch (sortBy) {
           case 'recent':
