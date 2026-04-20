@@ -227,6 +227,10 @@ type TargetEntityMetricsAPI = {
   votesPositive: number
   votesNegative: number
 }
+/**
+ * Valid time period values for filtering and aggregating data.
+ * Used throughout the API for date range queries.
+ */
 export type Timespan =
   | 'now'
   | 'today'
@@ -235,6 +239,11 @@ export type Timespan =
   | 'month'
   | 'quarter'
   | 'all'
+
+/**
+ * Prisma select object for retrieving entity ranking metrics.
+ * Used to consistently fetch ranking-related fields across queries.
+ */
 const targetEntityMetricsSelect = {
   ranking: true,
   satsPositive: true,
