@@ -42,6 +42,7 @@ import type {
 } from 'xpi-ts/lib/rank'
 import { toAsyncIterable } from '../util/functions'
 import { BufferUtil } from 'xpi-ts/lib/bitcore'
+import { computeEPBreakdown, computeTierFromEP } from './engagement'
 
 export type IndexedTransactionRANK = IndexedTransaction & PrismaRANK
 export type IndexedTransactionRNKC = IndexedTransaction &
@@ -227,6 +228,10 @@ type TargetEntityMetricsAPI = {
   votesPositive: number
   votesNegative: number
 }
+/**
+ * Valid time period values for filtering and aggregating data.
+ * Used throughout the API for date range queries.
+ */
 export type Timespan =
   | 'now'
   | 'today'
@@ -235,6 +240,11 @@ export type Timespan =
   | 'month'
   | 'quarter'
   | 'all'
+
+/**
+ * Prisma select object for retrieving entity ranking metrics.
+ * Used to consistently fetch ranking-related fields across queries.
+ */
 const targetEntityMetricsSelect = {
   ranking: true,
   satsPositive: true,
@@ -279,6 +289,18 @@ export const getTimestampUTC = (timespan: Timespan = 'month'): number => {
   }
 }
 
+/**
+ * Database class that provides a unified interface for all database operations.
+ * Handles RANK and RNKC transaction storage, block management, entity metrics,
+ * referral codes, wallet engagement tracking, and API query methods.
+ *
+ * @example
+ * ```typescript
+ * const db = new Database(process.env.DATABASE_URL)
+ * await db.connect()
+ * const checkpoint = await db.getCheckpoint()
+ * ```
+ */
 export class Database {
   private db: PrismaClient
 
@@ -1953,7 +1975,8 @@ export class Database {
                 id: postId,
                 platform: postPlatform,
                 profileId,
-                data, // data is the comment text for Lotusia posts
+                // NOTE: Latest Prisma 6.19 changed Uint8Array type constraints, so we cast it here
+                data: data as Uint8Array<ArrayBuffer>, // data is the comment text for Lotusia posts
                 firstVoted: postTimestamp,
                 lastVoted: postLastVoted,
                 ranking: postRanking,
@@ -1968,7 +1991,10 @@ export class Database {
               // satisfying the RankComment FK constraint [txid, scriptPayload, data]
               update: {
                 ...postIncrements,
-                ...(data !== undefined && { data }),
+                ...(data !== undefined && {
+                  // NOTE: Latest Prisma 6.19 changed Uint8Array type constraints, so we cast it here
+                  data: data as Uint8Array<ArrayBuffer>,
+                }),
                 lastVoted: postLastVoted,
               },
             }),
@@ -2453,6 +2479,8 @@ export class Database {
       currentStreak: number
       longestStreak: number
       lastVoteDate: Date | null
+      totalBurnedSats?: bigint
+      firstVoteDate?: Date | null
       lifetimeRewards: bigint
     },
   ) {
@@ -2464,6 +2492,152 @@ export class Database {
       })
     } catch (e) {
       throw new Error(`db.upsertWalletEngagement: ${e.message}`)
+    }
+  }
+
+  /**
+   * Incrementally updates a WalletEngagement record when a new RANK vote is indexed.
+   * Performs 1 read + pure math + 1 write instead of 8 aggregate queries.
+   *
+   * @param scriptPayload - The voter's scriptPayload
+   * @param satsBurned - The sats burned in this RANK transaction
+   * @param voteCount - Number of RANK outputs in this transaction for this voter (usually 1)
+   */
+  async incrementWalletEngagementForVote(
+    scriptPayload: string,
+    satsBurned: bigint,
+    voteCount: number = 1,
+  ) {
+    try {
+      // 1. Read existing record (or create with defaults)
+      const existing = await this.db.walletEngagement.upsert({
+        where: { scriptPayload },
+        create: { scriptPayload },
+        update: {},
+      })
+
+      // 2. Increment counters
+      const lifetimeVotes = existing.lifetimeVotes + voteCount
+      const totalBurnedSats = existing.totalBurnedSats + satsBurned
+      const now = new Date()
+      now.setUTCHours(0, 0, 0, 0)
+      const firstVoteDate = existing.firstVoteDate ?? now
+
+      // 3. Compute streak from lastVoteDate vs today (pure date math)
+      let currentStreak = existing.currentStreak
+      if (existing.lastVoteDate) {
+        const lastVote = new Date(existing.lastVoteDate)
+        lastVote.setUTCHours(0, 0, 0, 0)
+        const diffDays = Math.floor(
+          (now.getTime() - lastVote.getTime()) / 86_400_000,
+        )
+        if (diffDays === 0) {
+          // Same day — streak unchanged
+        } else if (diffDays === 1) {
+          // Consecutive day — extend streak
+          currentStreak += 1
+        } else {
+          // Gap > 1 day — streak resets to 1 (today counts)
+          currentStreak = 1
+        }
+      } else {
+        // First ever vote
+        currentStreak = 1
+      }
+      const longestStreak = Math.max(currentStreak, existing.longestStreak)
+
+      // 4. Compute account age from firstVoteDate
+      const diffMs = now.getTime() - firstVoteDate.getTime()
+      const accountAgeMonths = Math.floor(diffMs / (30.44 * 86_400_000))
+
+      // 5. Recompute EP from stored counters (pure math, 0 DB queries)
+      const epBreakdown = computeEPBreakdown(
+        lifetimeVotes,
+        existing.lifetimeReferrals,
+        existing.lifetimeComments,
+        totalBurnedSats,
+        currentStreak,
+        accountAgeMonths,
+      )
+      const tier = computeTierFromEP(epBreakdown.total)
+
+      // 6. Write back
+      return await this.db.walletEngagement.update({
+        where: { scriptPayload },
+        data: {
+          tier,
+          engagementPoints: epBreakdown.total,
+          epBreakdown,
+          lifetimeVotes,
+          totalBurnedSats,
+          firstVoteDate,
+          currentStreak,
+          longestStreak,
+          lastVoteDate: new Date(),
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.incrementWalletEngagementForVote: ${e.message}`)
+    }
+  }
+
+  /**
+   * Incrementally updates a WalletEngagement record when a new RNKC comment is indexed.
+   * Performs 1 read + pure math + 1 write instead of 8 aggregate queries.
+   *
+   * @param scriptPayload - The commenter's scriptPayload
+   * @param satsBurned - The sats burned in this RNKC transaction
+   */
+  async incrementWalletEngagementForComment(
+    scriptPayload: string,
+    satsBurned: bigint,
+  ) {
+    try {
+      // 1. Read existing record (or create with defaults)
+      const existing = await this.db.walletEngagement.upsert({
+        where: { scriptPayload },
+        create: { scriptPayload },
+        update: {},
+      })
+
+      // 2. Increment counters
+      const lifetimeComments = existing.lifetimeComments + 1
+      const totalBurnedSats = existing.totalBurnedSats + satsBurned
+
+      // 3. Compute account age from firstVoteDate (comments don't affect streak or firstVoteDate)
+      const now = new Date()
+      now.setUTCHours(0, 0, 0, 0)
+      const accountAgeMonths = existing.firstVoteDate
+        ? Math.floor(
+            (now.getTime() - existing.firstVoteDate.getTime()) /
+              (30.44 * 86_400_000),
+          )
+        : 0
+
+      // 4. Recompute EP from stored counters (pure math, 0 DB queries)
+      const epBreakdown = computeEPBreakdown(
+        existing.lifetimeVotes,
+        existing.lifetimeReferrals,
+        lifetimeComments,
+        totalBurnedSats,
+        existing.currentStreak,
+        accountAgeMonths,
+      )
+      const tier = computeTierFromEP(epBreakdown.total)
+
+      // 5. Write back
+      return await this.db.walletEngagement.update({
+        where: { scriptPayload },
+        data: {
+          tier,
+          engagementPoints: epBreakdown.total,
+          epBreakdown,
+          lifetimeComments,
+          totalBurnedSats,
+        },
+      })
+    } catch (e) {
+      throw new Error(`db.incrementWalletEngagementForComment: ${e.message}`)
     }
   }
 
@@ -2679,6 +2853,7 @@ export class Database {
     try {
       return await this.db.$transaction(async tx => {
         // Build where clause for Post model
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const whereClause: any = {}
         if (platform) {
           whereClause.platform = platform
@@ -2708,6 +2883,7 @@ export class Database {
         // Build orderBy based on sort mode.
         // 'curated' fetches by linear ranking first, then re-sorts in-memory
         // after applying R62–R65 dampening (Prisma cannot order by relation fields).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let orderBy: any
         switch (sortBy) {
           case 'recent':
@@ -2791,7 +2967,38 @@ export class Database {
 
         const totalPages = Math.ceil(totalItems / normalizedPageSize)
 
-        // Convert each post to PostAPI shape, computing R62/R65 signals
+        // R66: compute velocity-window burns for candidate posts (curated + controversial).
+        // This detects flash-attack spikes within the short detection window vs baseline.
+        const velocityWindowSeconds = FEED_RANKING_VELOCITY_WINDOW_HOURS * 3600
+        const velocityWindowStart =
+          Math.floor(Date.now() / 1000) - velocityWindowSeconds
+        const velocityGroups = await tx.rankTransaction.groupBy({
+          by: ['platform', 'profileId', 'postId'],
+          where: {
+            timestamp: { gte: velocityWindowStart },
+            postId: { not: null },
+          },
+          _sum: { sats: true },
+        })
+        const velocityMap = new Map<string, bigint>()
+        for (const vg of velocityGroups) {
+          if (vg.postId) {
+            velocityMap.set(
+              `${vg.platform}:${vg.profileId}:${vg.postId}`,
+              vg._sum.sats ?? 0n,
+            )
+          }
+        }
+        // Compute rolling median of window burns across all candidates for R66 baseline.
+        const allWindowBurns = [...velocityMap.values()]
+          .map(v => Number(v))
+          .sort((a, b) => a - b)
+        const medianWindowBurns =
+          allWindowBurns.length > 0
+            ? allWindowBurns[Math.floor(allWindowBurns.length / 2)]
+            : 1
+
+        // Convert each post to PostAPI shape, computing R62/R65/R66 signals
         const feedPosts: PostAPI[] = []
         for (const post of posts) {
           // R64: decay anchor depends on sort mode.
@@ -2801,11 +3008,20 @@ export class Database {
           //   surfaces correctly.
           const decayAnchor = Number(post.firstVoted)
 
+          // R66: compute velocity dampening for this post
+          const velocityKey = `${post.platform}:${post.profileId}:${post.id}`
+          const velocityBurns = velocityMap.get(velocityKey) ?? 0n
+          const velocityDampening = computeVelocityDampening(
+            velocityBurns,
+            BigInt(Math.floor(medianWindowBurns)),
+          )
+
           // R62/R63/R64/R66: compute composite feed score for this post
           const signals = computeCompositeFeedScore(
             post.satsPositive,
             post.satsNegative,
             decayAnchor,
+            velocityDampening,
           )
 
           // Build PostAPI object with computed signals

@@ -11,14 +11,11 @@
     ],
     "outDir": "./.output",
     "paths": {
-      "lotus-lib": [
-        "./submodules/lotus-lib"
-      ],
       "lotus-nng-client": [
         "./submodules/lotus-nng-client"
       ],
-      "lotus-nng-client/lib/nng-interface": [
-        "./submodules/lotus-nng-client/lib/nng-interface"
+      "lotus-nng-client/*": [
+        "./submodules/lotus-nng-client/*"
       ]
     },
     "declaration": false,

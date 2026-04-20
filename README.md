@@ -2,102 +2,177 @@
 
 ### **Tested on openSUSE Tumbleweed x86_64 with NodeJS 20.18.0+**
 
-`rank-backend-ts` connects to the Lotus blockchain daemon using NNG (via npm `nanomsg` library) in order to index all transactions containing a valid RANK output. RANK outputs are indexed into a PostgreSQL database. Retrieving records from this database is made possible by the built-in REST API library.
+`rank-backend-ts` connects to the Lotus blockchain daemon using NNG (via `nanomsg`) in order to index transactions containing valid RANK/RNKC outputs into PostgreSQL. That indexed state is then exposed through HTTP APIs for wallet/extension/app consumers.
 
-`rank-backend-ts` is _fast_. Benchmarks performed on moderate hardware show a transaction processing rate of over 6,900 RANK tx/s during initial sync. During runtime, the indexer will queue NNG messages and process them in the order they were received, ensuring the state of the index remains intact.
+`rank-backend-ts` is designed for high-throughput indexing. During runtime, NNG messages are queued and processed in order to preserve index consistency.
 
-As of v0.1.0, `rank-backend-ts` is considered **stable** and **performant**. Implementing parallelization through `worker_threads` isn't planned at this time, but we will revist `worker_threads` in the future if the RANK protocol evolves and requires the indexer to evolve with it.
+As of v0.1.0, `rank-backend-ts` has been considered stable/performant. `worker_threads` parallelization is intentionally not used right now, but can be revisited if protocol/runtime needs evolve.
 
-**\*\*\*** **For best indexing performance, run lotusd, PostgreSQL, and `rank-backend-ts` on the same host**
+**For best indexing performance, run `lotusd`, PostgreSQL, and `rank-backend-ts` on the same host.**
 
-# Prerequisites
+---
 
-- Configure lotusd – refer to [`raipay/chronik` setup instructions](https://github.com/raipay/chronik#setting-up-ecash-or-lotus-node-for-chronik)
-- Clone `rank-backend-ts` repo:
+## What runs at runtime
 
-  ```
-  git clone --recurse-submodules https://github.com/LotusiaStewardship/rank-backend-ts.git
-  ```
+The process boots and runs these modules together:
 
-### PostgreSQL - Linux
+1. **Indexer**
+   - Reconciles checkpoint state with chain tip
+   - Syncs historical blocks + mempool
+   - Subscribes to runtime NNG channels:
+     - `mempooltxadd`
+     - `mempooltxrem`
+     - `blkconnected`
+     - `blkdisconctd`
 
-**NOTE: These instructions were tested on openSUSE Tumbleweed and are working as of October 23, 2024**
+2. **REST API**
+   - Express server at `/api/v1`
+   - Listens on port `10655`
 
-1. Install `postgresql-server` using your system's package manager (package name may differ depending on your distribution)
-2. Open a terminal **with `root` privileges** and change to the directory where you cloned `rank-backend-ts`
-3. Enable password authentication on PostgreSQL for localhost (if not already enabled):
+3. **Push API**
+   - Express server at `/push`
+   - Listens on port `3001`
 
-   ```
-   sudo -u postgres sed -rn -i.bak 'p; s/(host\s+all.*127\.0\.0\.1\/32\s+)password!/\1password/p' /var/lib/pgsql/data/pg_hba.conf
-   ```
+4. **Temporal integration**
+   - Initialized at startup
+   - Some features are workflow/query-backed and require a working Temporal config/server
 
-4. Start (or restart) PostgreSQL service:
+Startup order is:
 
-   ```
-   systemctl restart postgresql.service
-   ```
+1. DB connect → 2. push cache init → 3. indexer init/sync → 4. REST API init → 5. push API init → 6. Temporal init.
 
-   You should see that the sevice is `active (running)`
+Graceful shutdown is handled on `SIGINT` / `SIGTERM`.
 
-   ```
-   ● postgresql.service - PostgreSQL database server
-       Loaded: loaded (/usr/lib/systemd/system/postgresql.service; enabled; preset: disabled)
-       Active: active (running) since Fri 2024-10-18 10:18:46 CDT; 4 days ago
-   ```
+---
 
-5. Execute the database setup script:
-   ```
-   sudo -u postgres psql -f install/rank-index.sql
-   ```
+## Prerequisites
 
-\*\*\* **IMPORTANT: The location of `pg_hba.conf` will vary depending on your distribution**
+- Configure lotusd (NNG sockets enabled) (refer to [`raipay/chronik` setup instructions](https://github.com/raipay/chronik#setting-up-ecash-or-lotus-node-for-chronik))
+- Node.js 20+
+- PostgreSQL
+- Optional: Temporal server (required for workflow-backed features)
 
-# Install – Docker
+Clone with submodules:
 
-**COMING SOON**
-
-# Install – Linux / macOS
-
-**NOTE: There is currently no plan to support Windows**
-
-1. Open a terminal and change to the directory where you cloned `rank-backend-ts`
-2. Install prod and dev dependencies:
-
-   ```
-   npm install --include=dev
-   ```
-
-3. Apply Prisma schema to PostgreSQL and generate runtime client artifacts:
-
-   ```
-   npx prisma db push
-   ```
-
-4. Clean install to remove dev dependencies (`omit=dev` is defined in `.npmrc`):
-
-   ```
-   npm clean-install
-   ```
-
-5. Start the indexer:
-
-   ```
-   npx tsc && node scripts/start [pub socket path] [rpc socket path]
-   ```
-
-   Example:
-
-   ```
-   npx tsc && node scripts/start ~/.lotus/pub.pipe ~/.lotus/rpc.pipe
-   ```
-
-   **NOTE: If no command-line arguments are provided, the indexer will attempt to connect to `ipc://~/.lotus/pub.pipe` and `ipc://~/.lotus/rpc.pipe`**
-
-# Runtime
-
-Once the indexer is running, you will begin to see scrolling messages with `init=syncBlocks`. After the initial block sync, the mempool will be synced and the NNG sub socket will begin listening for new events.
-
+```bash
+git clone --recurse-submodules https://github.com/LotusiaStewardship/rank-backend-ts.git
+cd rank-backend-ts
 ```
+
+---
+
+## PostgreSQL setup (Linux example)
+
+> These are historical openSUSE instructions preserved from prior docs. Adapt paths/service names for your distro.
+
+1. Install `postgresql-server` using your package manager.
+2. Enable password auth on localhost if needed (edit `pg_hba.conf`).
+3. Start/restart PostgreSQL.
+4. Execute bootstrap SQL:
+
+```bash
+sudo -u postgres psql -f install/rank-index.sql
+```
+
+`install/rank-index.sql` creates a `lotusrank` role/db/schema. You can also provision DB/role manually.
+
+Then apply Prisma schema:
+
+```bash
+npx prisma db push
+```
+
+---
+
+## Install / Build / Start
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Build TypeScript output to `.output/`:
+
+```bash
+npm run build:dev
+```
+
+Production build flow:
+
+```bash
+npm run build:prod
+```
+
+Start service (`.env` loaded by `dotenv-cli` in the start script):
+
+```bash
+npm start
+```
+
+Start with explicit NNG socket paths:
+
+```bash
+npm start -- /absolute/path/to/pub.pipe /absolute/path/to/rpc.pipe
+```
+
+If no CLI args are provided, defaults are:
+
+- `~/.lotus/pub.pipe`
+- `~/.lotus/rpc.pipe`
+
+---
+
+## Environment variables
+
+Configured via `.env` (see `.env.example` in local checkout).
+
+### Core
+
+| Variable              | Description                                               |
+| --------------------- | --------------------------------------------------------- |
+| `DATABASE_URL`        | PostgreSQL connection string                              |
+| `RANK_GENESIS_HEIGHT` | Genesis height used when DB checkpoint does not yet exist |
+| `RANK_GENESIS_HASH`   | Genesis hash paired with `RANK_GENESIS_HEIGHT`            |
+
+### Referral / admin
+
+| Variable          | Description                                   |
+| ----------------- | --------------------------------------------- |
+| `REFERRAL_SECRET` | HMAC secret used for referral code generation |
+| `ADMIN_SECRET`    | Shared secret for admin referral endpoints    |
+
+### Push notifications
+
+| Variable            | Description                |
+| ------------------- | -------------------------- |
+| `VAPID_SUBJECT`     | Web Push VAPID subject     |
+| `VAPID_PUBLIC_KEY`  | Web Push VAPID public key  |
+| `VAPID_PRIVATE_KEY` | Web Push VAPID private key |
+| `GCM_API_KEY`       | Optional legacy GCM key    |
+
+### Temporal
+
+| Variable                                         | Description                                    |
+| ------------------------------------------------ | ---------------------------------------------- |
+| `TEMPORAL_HOST`                                  | Temporal address (e.g. `localhost:7233`)       |
+| `TEMPORAL_NAMESPACE`                             | Temporal namespace                             |
+| `TEMPORAL_TASKQUEUE`                             | Worker task queue                              |
+| `TEMPORAL_COMMAND_WORKFLOW_TYPE`                 | Workflow type for command signaling            |
+| `TEMPORAL_COMMAND_WORKFLOW_ID`                   | Workflow ID for command signaling              |
+| `TEMPORAL_COMMAND_WORKFLOW_SIGNAL`               | Signal name for command signaling              |
+| `TEMPORAL_API_CHARTS_WALLET_ACTIVITY`            | Workflow ID queried for wallet activity charts |
+| `TEMPORAL_API_CHARTS_WALLET_ACTIVITY_QUERY_TYPE` | Query type prefix used for chart query names   |
+
+> Temporal-backed endpoints/features require this config and a reachable Temporal server.
+
+---
+
+## Runtime logs and event examples
+
+Once the indexer is running, you'll see init messages (`syncBlocks`, `syncMempool`, subscriptions, API listeners):
+
+```text
 .. snip ..
 2024-11-23T11:21:21.301Z init=syncBlocks status=finished totalBlocks=0 totalRanks=0 elapsed=0.000s
 2024-11-23T11:21:21.326Z init=syncMempool txsLength=27 ranksLength=27 action=upsertProfiles elapsed=24.528ms
@@ -107,7 +182,7 @@ Once the indexer is running, you will begin to see scrolling messages with `init
 
 ### Example NNG events
 
-```
+```text
 # mempooltxadd
 2024-11-23T11:23:10.265Z nng=mempooltxadd txid=dabd3946ecf0a01af3792357e6f3c9bf7e98041428c87d32b478f6189b15eaa5 timestamp=1732360990 sats=1000000 sentiment=negative platform=twitter profileId=caincurrency postId=1859129590142153145 action=upsertProfiles elapsed=3.177ms
 
@@ -121,20 +196,41 @@ Once the indexer is running, you will begin to see scrolling messages with `init
 2024-11-11T13:20:59.918Z nng=blkdisconctd hash=000000000205072f83f59100bda1dd1c29763c703a447ae22b75a7ef4ec62683 height=895465 timestamp=1731331231 ranksLength=0 txsLength=0 action=rewindBlock elapsed=1.872ms
 ```
 
-### NNG Event Field Index
+### NNG Event Field Index (current runtime)
 
-| Field          | Description                                                     |
-| -------------- | --------------------------------------------------------------- |
-| `nng=`         | Indicates an NNG event and which type                           |
-| `txid=`        | txid containing the RANK output                                 |
-| `hash=`        | Block hash                                                      |
-| `height=`      | Block height                                                    |
-| `ranksLength=` | Number of RANK outputs in the block                             |
-| `txsLength=`   | Number of total transactions in the block                       |
-| `timestamp=`   | If mempool, current time; if block, timestamp in block header   |
-| `platform=`    | String indicating target platform (e.g. `twitter`)              |
-| `profileId=`   | String of profile name, decoded from hex                        |
-| `sentiment=`   | String indicating sentiment (e.g. `positive`, `negative`, etc.) |
-| `sats=`        | Number of satoshis burned in the RANK output                    |
-| `action=`      | Indexer action taken for the init stage or received NNG message |
-| `elapsed=`     | Time taken to process the `action=`                             |
+> Note: `nng=*` log fields are event-specific; not every field appears on every event.
+
+| Field              | Appears in                                     | Description                                                                                                            |
+| ------------------ | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `nng=`             | all NNG logs                                   | NNG event type (`mempooltxadd`, `mempooltxrem`, `blkconnected`, `blkdisconctd`, or `warn`)                             |
+| `txid=`            | `mempooltxadd`, `mempooltxrem`                 | Transaction ID tied to the mempool event                                                                               |
+| `hash=`            | `blkconnected`, `blkdisconctd`                 | Block hash                                                                                                             |
+| `height=`          | `blkconnected`, `blkdisconctd`                 | Block height                                                                                                           |
+| `timestamp=`       | `blkconnected`, `blkdisconctd`                 | Block header timestamp                                                                                                 |
+| `ranksLength=`     | `mempooltxadd`, `blkconnected`, `blkdisconctd` | Count of parsed RANK outputs for that event context                                                                    |
+| `rnkcsLength=`     | `blkconnected`, `blkdisconctd`                 | Count of parsed RNKC outputs for that block context                                                                    |
+| `isComment=`       | `mempooltxadd`                                 | Whether an RNKC comment payload was detected in the tx (`true`/`false`)                                                |
+| `outpointsLength=` | `mempooltxrem`                                 | Number of cached outpoints removed for that txid                                                                       |
+| `txsLength=`       | `blkdisconctd`                                 | Number of transactions rewound when disconnecting the block                                                            |
+| `action=`          | all NNG logs                                   | Handler action performed (e.g. `upsertProfiles`, `rewindProfiles`, `saveBlock`, `rewindBlock`, `checkFaucetMilestone`) |
+| `elapsed=`         | success-path NNG handlers                      | Processing time for the logged action                                                                                  |
+| `scriptPayload=`   | `nng=warn` (faucet milestone check)            | Wallet script payload associated with the warning                                                                      |
+| `message=`         | `nng=warn`                                     | Warning/error message text                                                                                             |
+
+---
+
+## API / specs / utility scripts
+
+- HTTP API reference: [`docs/API.md`](./docs/API.md)
+- Protocol specs:
+  - [`docs/spec/RANK.md`](./docs/spec/RANK.md)
+  - [`docs/spec/RNKC.md`](./docs/spec/RNKC.md)
+  - [`docs/spec/RNKE.md`](./docs/spec/RNKE.md)
+
+Backfill wallet engagement data:
+
+```bash
+npx tsx scripts/backfill-engagement.ts
+```
+
+(Backfill script is idempotent and safe to re-run.)

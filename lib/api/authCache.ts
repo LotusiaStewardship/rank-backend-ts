@@ -1,5 +1,6 @@
-import { log, processAuthorizationHeader, Validate } from '../../util/functions'
+import { log, processAuthorizationHeader } from '../../util/functions'
 import { API_AUTH_CACHE_ENTRY_TTL } from '../../util/constants'
+import { validateSignature } from '../../util/validators'
 import type { RuntimeState } from '../state'
 
 /**
@@ -202,6 +203,6 @@ export class AuthorizationCache {
     data: string
     signature: string
   }): boolean {
-    return !!Validate.signature(payload).signature
+    return !!validateSignature(payload).signature
   }
 }

@@ -1,3 +1,38 @@
+/**
+ * Engagement Points (EP) System
+ *
+ * This module implements the RANK engagement scoring and tier progression system.
+ * It provides functions to compute Engagement Points (EP) from wallet activity metrics,
+ * assign tier levels based on EP thresholds, and calculate bonus multipliers for
+ * streak maintenance and referral rewards.
+ *
+ * The EP formula incorporates multiple signals to create a holistic engagement score:
+ * - Lifetime RANK votes (linear weight)
+ * - Redeemed referrals (high weight to incentivize growth)
+ * - RNKC comments (moderate weight)
+ * - Total XPI burned (sub-linear sqrt scaling to prevent whale dominance)
+ * - Consecutive voting streak (bonus for consistency)
+ * - Account age (capped at 12 months to prevent Sybil advantage)
+ *
+ * Tier progression provides multiplicative bonuses to daily payout rewards:
+ * - Tier 0 (Newcomer): 0-19 EP, +0% bonus
+ * - Tier 1 (Voter): 20-99 EP, +5% bonus
+ * - Tier 2 (Regular): 100-499 EP, +10% bonus
+ * - Tier 3 (Advocate): 500-1999 EP, +15% bonus
+ * - Tier 4 (Champion): 2000-9999 EP, +35% bonus
+ * - Tier 5 (Steward): 10000+ EP, +50% bonus
+ *
+ * Streak bonuses apply on top of tier bonuses for consecutive daily voting:
+ * - 3+ days: +5%
+ * - 7+ days: +10%
+ * - 14+ days: +20%
+ * - 30+ days: +30%
+ * - 60+ days: +50%
+ *
+ * @module engagement
+ * @see {@link https://lotusia.org/docs/rank/engagement RANK Engagement Documentation}
+ */
+
 import type { Database } from './database'
 
 /**
@@ -24,21 +59,21 @@ export const EP_WEIGHTS = {
  * Tiers are assigned based on cumulative EP score.
  *
  * | Tier | Name      | EP Required | Bonus |
- * |------|-----------|------------|-------|
- * | 0    | Newcomer  | 0-19       | +0    |
- * | 1    | Voter     | 20-99      | +0.5  |
- * | 2    | Regular   | 100-499    | +1    |
- * | 3    | Advocate  | 500-1999   | +1.5  |
- * | 4    | Champion  | 2000-9999  | +2    |
- * | 5    | Steward   | 10000+     | +3    |
+ * |------|-----------|-------------|-------|
+ * | 0    | Newcomer  | 0-19        | +0%   |
+ * | 1    | Voter     | 20-99       | +5%   |
+ * | 2    | Regular   | 100-499     | +10%  |
+ * | 3    | Advocate  | 500-1999    | +15%  |
+ * | 4    | Champion  | 2000-9999   | +35%  |
+ * | 5    | Steward   | 10000+      | +50%  |
  */
 export const TIER_THRESHOLDS = [
   { tier: 0, name: 'Newcomer', minEP: 0, bonus: 0 },
-  { tier: 1, name: 'Voter', minEP: 20, bonus: 0.5 },
-  { tier: 2, name: 'Regular', minEP: 100, bonus: 1 },
-  { tier: 3, name: 'Advocate', minEP: 500, bonus: 1.5 },
-  { tier: 4, name: 'Champion', minEP: 2_000, bonus: 2 },
-  { tier: 5, name: 'Steward', minEP: 10_000, bonus: 3 },
+  { tier: 1, name: 'Voter', minEP: 20, bonus: 0.05 },
+  { tier: 2, name: 'Regular', minEP: 100, bonus: 0.1 },
+  { tier: 3, name: 'Advocate', minEP: 500, bonus: 0.15 },
+  { tier: 4, name: 'Champion', minEP: 2_000, bonus: 0.35 },
+  { tier: 5, name: 'Steward', minEP: 10_000, bonus: 0.5 },
 ] as const
 
 /**
@@ -47,11 +82,11 @@ export const TIER_THRESHOLDS = [
  */
 export const STREAK_BONUS_THRESHOLDS = [
   { minDays: 0, bonus: 0 },
-  { minDays: 3, bonus: 0.25 },
-  { minDays: 7, bonus: 0.5 },
-  { minDays: 14, bonus: 1.0 },
-  { minDays: 30, bonus: 1.5 },
-  { minDays: 60, bonus: 2.0 },
+  { minDays: 3, bonus: 0.05 },
+  { minDays: 7, bonus: 0.1 },
+  { minDays: 14, bonus: 0.2 },
+  { minDays: 30, bonus: 0.3 },
+  { minDays: 60, bonus: 0.5 },
 ] as const
 
 /**
@@ -217,9 +252,7 @@ export function computeStreakFromDates(voteDates: string[]): number {
   const firstDateMs = firstDate.getTime()
 
   // If the most recent vote is not today or yesterday, streak is broken
-  const daysSinceLastVote = Math.floor(
-    (todayMs - firstDateMs) / 86_400_000,
-  )
+  const daysSinceLastVote = Math.floor((todayMs - firstDateMs) / 86_400_000)
   if (daysSinceLastVote > 1) return 0
 
   let streak = 1
@@ -278,6 +311,8 @@ export async function computeFullEngagement(
   currentStreak: number
   longestStreak: number
   lastVoteDate: Date | null
+  totalBurnedSats: bigint
+  firstVoteDate: Date | null
 }> {
   // Gather all raw metrics in parallel
   const [
@@ -328,6 +363,15 @@ export async function computeFullEngagement(
     ? new Date(Number(latestTimestamp) * 1_000)
     : null
 
+  // Compute first vote date (normalized to UTC midnight) from earliestTimestamp
+  const firstVoteDate = earliestTimestamp
+    ? (() => {
+        const d = new Date(Number(earliestTimestamp) * 1_000)
+        d.setUTCHours(0, 0, 0, 0)
+        return d
+      })()
+    : null
+
   return {
     tier,
     engagementPoints: epBreakdown.total,
@@ -338,5 +382,7 @@ export async function computeFullEngagement(
     currentStreak,
     longestStreak,
     lastVoteDate,
+    totalBurnedSats,
+    firstVoteDate,
   }
 }

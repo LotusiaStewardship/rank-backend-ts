@@ -275,17 +275,34 @@ model FaucetClaim {
 // tier, streak, and lifetime statistics. Updated daily during payout
 // and on-demand via the engagement API endpoint.
 model WalletEngagement {
+  // Primary key: the P2PKH script payload (wallet address)
   scriptPayload     String    @id
+  // Current engagement tier (0-4, determines reward multiplier)
   tier              Int       @default(0)
+  // Composite engagement points score (0-100 scale)
   engagementPoints  Float     @default(0)
+  // JSON breakdown of EP components (votes, referrals, comments, streaks)
   epBreakdown       Json      @default("{}")
+  // Total number of votes cast by this wallet
   lifetimeVotes     Int       @default(0)
+  // Total number of successful referrals made by this wallet
   lifetimeReferrals Int       @default(0)
+  // Total number of comments posted by this wallet
   lifetimeComments  Int       @default(0)
+  // Current consecutive days with voting activity
   currentStreak     Int       @default(0)
+  // Longest streak ever achieved by this wallet
   longestStreak     Int       @default(0)
+  // Date of the most recent vote (for streak calculation)
   lastVoteDate      DateTime?
+  // Running total of sats burned across all RANK transactions (for burn EP calculation)
+  totalBurnedSats   BigInt    @default(0)
+  // Date of the earliest vote (for account age EP calculation)
+  firstVoteDate     DateTime?
+  // Total rewards earned by this wallet (in satoshis)
   lifetimeRewards   BigInt    @default(0)
+  // Timestamp of last engagement update
   updatedAt         DateTime  @updatedAt
+  // Timestamp when this engagement record was created
   createdAt         DateTime  @default(now())
 }

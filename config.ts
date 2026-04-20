@@ -5,6 +5,10 @@ type TemporalWorkflowQuery = {
 }
 type ParsedConfig = {
   datasourceUrl: string
+  api: {
+    rateLimitWindowMinutes: number
+    rateLimitMaxRequests: number
+  }
   genesis: {
     height: number
     hash: string
@@ -53,6 +57,14 @@ class Config {
   private parseConfig(): ParsedConfig {
     return {
       datasourceUrl: this.env.parsed?.DATABASE_URL,
+      api: {
+        rateLimitWindowMinutes: parseInt(
+          this.env?.parsed?.API_RATE_LIMIT_WINDOW_MINUTES || '1',
+        ),
+        rateLimitMaxRequests: parseInt(
+          this.env?.parsed?.API_RATE_LIMIT_MAX_REQUESTS || '1000',
+        ),
+      },
       genesis: {
         height: parseInt(this.env.parsed?.RANK_GENESIS_HEIGHT),
         hash: this.env.parsed?.RANK_GENESIS_HASH,

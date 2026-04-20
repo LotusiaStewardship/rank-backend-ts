@@ -9,6 +9,7 @@ import express, {
   NextFunction,
   json,
 } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import { Address, BufferUtil, Message, Networks } from 'xpi-ts/lib/bitcore'
 import {
   PlatformConfiguration,
@@ -18,12 +19,7 @@ import {
 } from 'xpi-ts/lib/rank'
 import type { RuntimeState } from './state'
 import { Database } from './database'
-import {
-  computeFullEngagement,
-  getTierName,
-  getTierBonus,
-  computeStreakBonus,
-} from './engagement'
+import { getTierName, getTierBonus, computeStreakBonus } from './engagement'
 import config from '../config'
 import {
   API_SERVER_PORT,
@@ -41,16 +37,23 @@ import {
 } from '../util/constants'
 import {
   sendJSON,
+  sendRateLimitExceededJSON,
   sendAuthChallenge,
   toLogEntries,
-  isValidInstanceId,
+  recomputeInstanceId,
   log,
-  Validate,
   type LogEntry,
 } from '../util/functions'
 import type { AuthorizationCache } from './api/authCache'
 import type { FeedFilterParams, Timespan } from './database'
 import { Temporal } from './temporal'
+import {
+  validateAdminSecret,
+  validateInstanceId,
+  validateReferralCode,
+  validateScriptPayload,
+  validateSearchType,
+} from '../util/validators'
 
 /**
  * Represents a profile's ranking information including total and change metrics
@@ -169,12 +172,12 @@ export type ChartType = 'wallet'
 export type ChartDataType = 'summary' | 'activity'
 
 /** Mapping of stats route paths to their corresponding database method names */
-export enum StatsRoutes {
-  'profiles/top-ranked' = 'getStatsPlatformRanked',
-  'profiles/lowest-ranked' = 'getStatsPlatformRanked',
-  'posts/top-ranked' = 'getStatsPlatformRanked',
-  'posts/lowest-ranked' = 'getStatsPlatformRanked',
-}
+export const StatsRoutes = {
+  'profiles/top-ranked': 'getStatsPlatformRanked',
+  'profiles/lowest-ranked': 'getStatsPlatformRanked',
+  'posts/top-ranked': 'getStatsPlatformRanked',
+  'posts/lowest-ranked': 'getStatsPlatformRanked',
+} as const
 /** Valid stats route path strings */
 export type StatsRoute = keyof typeof StatsRoutes
 
@@ -343,7 +346,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     next: NextFunction,
     searchType: string,
   ) => {
-    const validated = Validate.searchType(searchType as 'profile' | 'post')
+    const validated = validateSearchType(searchType as 'profile' | 'post')
     if (validated.error) {
       return sendJSON(res, { error: validated.error }, validated.statusCode)
     }
@@ -362,15 +365,13 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     next: NextFunction,
     scriptPayload: string | undefined,
   ) => {
-    const result = Validate.scriptPayload(scriptPayload)
+    const result = validateScriptPayload(scriptPayload)
     if (!result.scriptPayload) {
-      return sendJSON(
-        res,
-        { error: `invalid script payload specified` },
-        HTTP.BAD_REQUEST,
-      )
+      return sendJSON(res, { error: result.error }, result.statusCode)
     }
     // TODO: handle signature validation here
+
+    // scriptPayload is validated so add to req params
     req.params.scriptPayload = result.scriptPayload
     next()
   },
@@ -457,7 +458,7 @@ const Parameters: Record<EndpointParameter, EndpointParameterHandler> = {
     next: NextFunction,
     instanceId: string | undefined,
   ) => {
-    const result = Validate.instanceId(instanceId)
+    const result = validateInstanceId(instanceId)
     if (result.error) {
       return sendJSON(res, { ...result }, result.statusCode)
     }
@@ -531,7 +532,6 @@ export class API extends EventEmitter {
     this.state = state
     this.db = db
     this.temporal = temporal
-    //this.app = express()
     this.authCache = authCache
     this.router = Router({
       caseSensitive: false,
@@ -539,7 +539,9 @@ export class API extends EventEmitter {
       strict: true,
     })
 
+    // ============================================================
     // Router parameter configuration
+    // ============================================================
     this.router.param('platform', Parameters.platform)
     this.router.param('profileId', Parameters.profileId)
     this.router.param('postId', Parameters.postId)
@@ -552,11 +554,15 @@ export class API extends EventEmitter {
     this.router.param('searchType', Parameters.searchType)
     this.router.param('txid', Parameters.txid)
 
+    // ============================================================
     // Router GET endpoint configuration (DEEPEST ROUTES FIRST!)
+    // ============================================================
     this.router.get(
       '/wallet/summary/:instanceId/:scriptPayload/:startTime?/:endTime?',
       this.GET.wallet,
     )
+    // Router GET endpoint configuration (engagement)
+    this.router.get('/wallet/engagement/:scriptPayload', this.GET.engagement!)
     this.router.get(
       '/wallet/:instanceId/:scriptPayload/:startTime?/:endTime?',
       this.GET.wallet,
@@ -565,18 +571,18 @@ export class API extends EventEmitter {
       '/feed/trending/:windowHours?/:limit?',
       this.GET.feedTrending,
     )
-    this.router.get('/feed/posts', this.GET.feedPosts)
-    this.router.get('/feed/leaderboard/:period/:limit?', this.GET.leaderboard)
-    this.router.get('/votes/:page?/:pageSize?', this.GET.voteActivity)
+    this.router.get('/feed/posts', this.GET.feedPosts!)
+    this.router.get('/feed/leaderboard/:period/:limit?', this.GET.leaderboard!)
+    this.router.get('/votes/:page?/:pageSize?', this.GET.voteActivity!)
     this.router.get('/txs/:platform/:profileId/:page?/:pageSize?', this.GET.txs)
-    this.router.get('/charts/:chartType/:dataType/:timespan?', this.GET.charts)
-    this.router.get('/profiles/:page?/:pageSize?', this.GET.profiles)
-    this.router.get('/search/:searchType/:query', this.GET.search)
+    this.router.get('/charts/:chartType/:dataType/:timespan?', this.GET.charts!)
+    this.router.get('/profiles/:page?/:pageSize?', this.GET.profiles!)
+    this.router.get('/search/:searchType/:query', this.GET.search!)
     this.router.get(
       '/stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?',
       this.GET.stats,
     )
-    this.router.get('/:platform/:profileId/:postId', this.GET.post)
+    this.router.get('/:platform/:profileId/:postId', this.GET.post!)
     this.router.get(
       '/:platform/:profileId/posts/:page?/:pageSize?',
       this.GET.profilePosts,
@@ -584,25 +590,41 @@ export class API extends EventEmitter {
     this.router.get('/:platform/:profileId/:postId', this.GET.post)
     this.router.get('/:platform/:profileId', this.GET.profile) // accepts `scriptPayload` query param
 
-    // Router GET endpoint configuration (engagement)
-    this.router.get('/wallet/engagement/:scriptPayload', this.GET.engagement)
-
+    // ============================================================
     // Router POST endpoint configuration (DEEPEST ROUTES FIRST!)
-    this.router.post('/admin/referral/genesis', this.POST.referralGenesis)
-    this.router.post('/referral/generate', this.POST.referralGenerate)
-    this.router.post('/referral/redeem', this.POST.referralRedeem)
+    // ============================================================
+    this.router.post('/admin/referral/genesis', this.POST.referralGenesis!)
+    this.router.post('/referral/generate', this.POST.referralGenerate!)
+    this.router.post('/referral/redeem', this.POST.referralRedeem!)
     // Router POST endpoint for retrieving multiple posts by platform.
     // Used by the extension when a user is scrolling their feed
     // and needs to load their vote history for all posts in the feed
-    this.router.post('/posts/:platform/:scriptPayload', this.POST.posts)
+    this.router.post('/posts/:platform/:scriptPayload', this.POST.posts!)
 
+    // ============================================================
     // Router PATCH endpoint configuration (DEEPEST ROUTES FIRST!)
-    //this.router.patch('/:platform/:profileId/:postId', this.PATCH.post)
+    // ============================================================
+    //this.router.patch('/:platform/:profileId/:postId', this.PATCH.post!)
 
     // App/Server setup
     this.app = express()
     this.app.use(json())
     this.app.use('/api/v1', this.router)
+
+    // Add API rate limiting config
+    this.app.use(
+      rateLimit({
+        windowMs: config.api.rateLimitWindowMinutes * 60 * 1000,
+        limit: config.api.rateLimitMaxRequests, // `max` was renamed to `limit` in express-rate-limit v7
+        standardHeaders: true,
+        legacyHeaders: false,
+        skip: () => {
+          // return "false" to NOT skip rate limiting quota for each client
+          return false
+        },
+        handler: sendRateLimitExceededJSON,
+      }),
+    )
   }
 
   /**
@@ -1012,6 +1034,7 @@ export class API extends EventEmitter {
         ...toLogEntries(req.params),
       ] as LogEntry[]
 
+      // Get Authorization header to process authorization
       const authorizationHeader = req.headers['authorization']
       if (!authorizationHeader) {
         const t1 = (performance.now() - t0).toFixed(3)
@@ -1035,7 +1058,7 @@ export class API extends EventEmitter {
       // REQUEST IS NOW AUTHORIZED
 
       // validate the scriptPayload GET parameter
-      const validationResult = Validate.scriptPayload(req.params.scriptPayload)
+      const validationResult = validateScriptPayload(req.params.scriptPayload)
       if (validationResult.error) {
         const t1 = (performance.now() - t0).toFixed(3)
         entries.push(['elapsed', `${t1}ms`])
@@ -1266,61 +1289,61 @@ export class API extends EventEmitter {
     },
 
     /**
-     * Retrieves engagement profile for a wallet
+     * Retrieves engagement profile for a wallet from pre-computed WalletEngagement table.
+     * Data is updated incrementally during indexing (nngMempoolTxAdd).
      * @param req Express Request object containing `scriptPayload` parameter
      * @param res Express Response object to send back engagement data
      * @returns JSON response with engagement data or error message
      */
     engagement: async (req: Request, res: Response) => {
       const t0 = performance.now()
+      const entries = [
+        ['api', 'get.engagement'],
+        ['action', 'engagement'],
+        [
+          'src',
+          (req.headers['x-forwarded-for'] as string) ??
+            req.socket.remoteAddress,
+        ],
+        ...toLogEntries(req.params),
+      ] as LogEntry[]
+
+      // gather and validate query params
       const { scriptPayload } = req.params
-      const validated = Validate.scriptPayload(scriptPayload)
+      const validated = validateScriptPayload(scriptPayload)
+
       if (!validated.scriptPayload) {
         return sendJSON(res, { error: validated.error }, validated.statusCode)
       }
+
       try {
-        // Compute the full engagement profile (gathers all metrics from DB)
-        const engagement = await computeFullEngagement(
-          this.db,
+        // Read pre-computed engagement data (single DB query)
+        const record = await this.db.getOrCreateWalletEngagement(
           validated.scriptPayload,
-        )
-        // Persist the computed engagement data
-        const record = await this.db.upsertWalletEngagement(
-          validated.scriptPayload,
-          {
-            ...engagement,
-            lifetimeRewards:
-              (
-                await this.db.getOrCreateWalletEngagement(
-                  validated.scriptPayload,
-                )
-              ).lifetimeRewards ?? 0n,
-          },
         )
         const t1 = (performance.now() - t0).toFixed(3)
-        log([
-          ['api', 'get.engagement'],
-          ['scriptPayload', validated.scriptPayload],
-          ['tier', `${engagement.tier}`],
-          ['ep', `${engagement.engagementPoints}`],
+        entries.push(
+          ['tier', `${record.tier}`],
+          ['ep', `${record.engagementPoints}`],
           ['elapsed', `${t1}ms`],
-        ])
+        )
+        log(entries)
         return sendJSON(
           res,
           {
             scriptPayload: validated.scriptPayload,
-            tier: engagement.tier,
-            tierName: getTierName(engagement.tier),
-            tierBonus: getTierBonus(engagement.tier),
-            engagementPoints: engagement.engagementPoints,
-            epBreakdown: engagement.epBreakdown,
-            streakBonus: computeStreakBonus(engagement.currentStreak),
-            lifetimeVotes: engagement.lifetimeVotes,
-            lifetimeReferrals: engagement.lifetimeReferrals,
-            lifetimeComments: engagement.lifetimeComments,
-            currentStreak: engagement.currentStreak,
-            longestStreak: engagement.longestStreak,
-            lastVoteDate: engagement.lastVoteDate?.toISOString() ?? null,
+            tier: record.tier,
+            tierName: getTierName(record.tier),
+            tierBonus: getTierBonus(record.tier),
+            engagementPoints: record.engagementPoints,
+            epBreakdown: record.epBreakdown,
+            streakBonus: computeStreakBonus(record.currentStreak),
+            lifetimeVotes: record.lifetimeVotes,
+            lifetimeReferrals: record.lifetimeReferrals,
+            lifetimeComments: record.lifetimeComments,
+            currentStreak: record.currentStreak,
+            longestStreak: record.longestStreak,
+            lastVoteDate: record.lastVoteDate?.toISOString() ?? null,
             lifetimeRewards: record.lifetimeRewards.toString(),
             updatedAt: record.updatedAt.toISOString(),
           },
@@ -1467,19 +1490,19 @@ export class API extends EventEmitter {
           error?: string
           statusCode?: number
         }
-        validated = Validate.instanceId(body.instanceId)
+        validated = validateInstanceId(body.instanceId)
         if (!validated.instanceId) {
           throw new Error(validated.error)
         }
-        validated = Validate.scriptPayload(body.scriptPayload)
+        validated = validateScriptPayload(body.scriptPayload)
         if (!validated.scriptPayload) {
           throw new Error('scriptPayload must be specified')
         }
         if (!Date.parse(body.createdAt)) {
           throw new Error(`createdAt date format is invalid`)
         }
-        // validate instanceId matches input and meets/exceeds difficulty
-        if (!(await isValidInstanceId(body))) {
+        // recompute instanceId to match input body and diff check
+        if (!(await recomputeInstanceId(body))) {
           throw new Error(`instanceId does not match input data`)
         }
         // verify message signature
@@ -1557,7 +1580,7 @@ export class API extends EventEmitter {
           signature: string
         }
         // Validate scriptPayload
-        const validated = Validate.scriptPayload(body.scriptPayload)
+        const validated = validateScriptPayload(body.scriptPayload)
         if (!validated.scriptPayload) {
           return sendJSON(res, { error: validated.error }, validated.statusCode)
         }
@@ -1670,7 +1693,7 @@ export class API extends EventEmitter {
           signature: string
         }
         // Validate referral code format
-        const validatedCode = Validate.referralCode(body.code)
+        const validatedCode = validateReferralCode(body.code)
         if (!validatedCode.code) {
           return sendJSON(
             res,
@@ -1679,7 +1702,7 @@ export class API extends EventEmitter {
           )
         }
         // Validate scriptPayload
-        const validated = Validate.scriptPayload(body.scriptPayload)
+        const validated = validateScriptPayload(body.scriptPayload)
         if (!validated.scriptPayload) {
           return sendJSON(res, { error: validated.error }, validated.statusCode)
         }
@@ -1846,7 +1869,7 @@ export class API extends EventEmitter {
       try {
         // Validate admin secret
         const adminHeader = req.headers['x-admin-secret'] as string | undefined
-        const adminValidated = Validate.adminSecret(
+        const adminValidated = validateAdminSecret(
           adminHeader,
           config.admin.secret,
         )
