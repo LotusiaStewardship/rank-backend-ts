@@ -9,6 +9,7 @@ import express, {
   NextFunction,
   json,
 } from 'express'
+import { rateLimit } from 'express-rate-limit'
 import { Address, BufferUtil, Message, Networks } from 'xpi-ts/lib/bitcore'
 import {
   PlatformConfiguration,
@@ -41,6 +42,7 @@ import {
 } from '../util/constants'
 import {
   sendJSON,
+  sendRateLimitExceededJSON,
   sendAuthChallenge,
   toLogEntries,
   recomputeInstanceId,
@@ -609,6 +611,21 @@ export class API extends EventEmitter {
     this.app = express()
     this.app.use(json())
     this.app.use('/api/v1', this.router)
+
+    // Add API rate limiting config
+    this.app.use(
+      rateLimit({
+        windowMs: config.api.rateLimitWindowMinutes * 60 * 1000,
+        limit: config.api.rateLimitMaxRequests, // `max` was renamed to `limit` in express-rate-limit v7
+        standardHeaders: true,
+        legacyHeaders: false,
+        skip: () => {
+          // return "false" to NOT skip rate limiting quota for each client
+          return false
+        },
+        handler: sendRateLimitExceededJSON,
+      }),
+    )
   }
 
   /**

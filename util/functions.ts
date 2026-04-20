@@ -122,6 +122,16 @@ export function sendJSON(res: Response, data: object, statusCode?: number) {
     .json(data)
 }
 /**
+ * Sends a rate limit JSON error response to the client
+ * @param req Express Request object (unused but required for express-rate-limit handler signature)
+ * @param res Express Response object to send the error response
+ */
+export function sendRateLimitExceededJSON(_req: Request, res: Response) {
+  res.contentType('application/json').status(HTTP.FORBIDDEN).json({
+    error: '401 Too many requests, please try again later.',
+  })
+}
+/**
  * Sends an error JSON response and logs the error
  * @param res Express Response object to send the JSON response
  * @param error The error message to send
