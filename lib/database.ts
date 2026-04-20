@@ -2467,6 +2467,8 @@ export class Database {
       currentStreak: number
       longestStreak: number
       lastVoteDate: Date | null
+      totalBurnedSats?: bigint
+      firstVoteDate?: Date | null
       lifetimeRewards: bigint
     },
   ) {
