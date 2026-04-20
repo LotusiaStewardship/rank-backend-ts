@@ -2967,7 +2967,38 @@ export class Database {
 
         const totalPages = Math.ceil(totalItems / normalizedPageSize)
 
-        // Convert each post to PostAPI shape, computing R62/R65 signals
+        // R66: compute velocity-window burns for candidate posts (curated + controversial).
+        // This detects flash-attack spikes within the short detection window vs baseline.
+        const velocityWindowSeconds = FEED_RANKING_VELOCITY_WINDOW_HOURS * 3600
+        const velocityWindowStart =
+          Math.floor(Date.now() / 1000) - velocityWindowSeconds
+        const velocityGroups = await tx.rankTransaction.groupBy({
+          by: ['platform', 'profileId', 'postId'],
+          where: {
+            timestamp: { gte: velocityWindowStart },
+            postId: { not: null },
+          },
+          _sum: { sats: true },
+        })
+        const velocityMap = new Map<string, bigint>()
+        for (const vg of velocityGroups) {
+          if (vg.postId) {
+            velocityMap.set(
+              `${vg.platform}:${vg.profileId}:${vg.postId}`,
+              vg._sum.sats ?? 0n,
+            )
+          }
+        }
+        // Compute rolling median of window burns across all candidates for R66 baseline.
+        const allWindowBurns = [...velocityMap.values()]
+          .map(v => Number(v))
+          .sort((a, b) => a - b)
+        const medianWindowBurns =
+          allWindowBurns.length > 0
+            ? allWindowBurns[Math.floor(allWindowBurns.length / 2)]
+            : 1
+
+        // Convert each post to PostAPI shape, computing R62/R65/R66 signals
         const feedPosts: PostAPI[] = []
         for (const post of posts) {
           // R64: decay anchor depends on sort mode.
@@ -2977,11 +3008,20 @@ export class Database {
           //   surfaces correctly.
           const decayAnchor = Number(post.firstVoted)
 
+          // R66: compute velocity dampening for this post
+          const velocityKey = `${post.platform}:${post.profileId}:${post.id}`
+          const velocityBurns = velocityMap.get(velocityKey) ?? 0n
+          const velocityDampening = computeVelocityDampening(
+            velocityBurns,
+            BigInt(Math.floor(medianWindowBurns)),
+          )
+
           // R62/R63/R64/R66: compute composite feed score for this post
           const signals = computeCompositeFeedScore(
             post.satsPositive,
             post.satsNegative,
             decayAnchor,
+            velocityDampening,
           )
 
           // Build PostAPI object with computed signals
