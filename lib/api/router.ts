@@ -28,6 +28,8 @@ import { createFeedRouter } from './routes/feed'
 import { createWalletRouter } from './routes/wallet'
 import { createReferralRouter } from './routes/referral'
 import { createSystemRouter } from './routes/system'
+import { createPushRouter } from './routes/push'
+import { SubscriptionManager } from '../push'
 
 /** Available parameter names that can be validated in API endpoints */
 export type EndpointParameter =
@@ -243,12 +245,14 @@ export class API extends EventEmitter {
     state,
     db,
     temporal,
+    subscriptionManager,
   }: {
     authCache: AuthorizationCache
     routers: [string, Router][]
     state: RuntimeState
     db: Database
     temporal: Temporal
+    subscriptionManager: SubscriptionManager
   }) {
     super()
     this.state = state
@@ -280,6 +284,7 @@ export class API extends EventEmitter {
       ['/', createWalletRouter(db, authCache, state)],
       ['/', createReferralRouter(db, temporal)],
       ['/', createSystemRouter(db, temporal)],
+      ['/', createPushRouter({ db, authCache, state, subscriptionManager })],
       ...routers,
     ]
     for (const [prefix, subRouter] of subRouters) {

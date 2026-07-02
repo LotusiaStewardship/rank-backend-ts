@@ -161,15 +161,6 @@ export function createPushRouter(deps: {
       return sendAuthChallenge(res, state.checkpoint)
     }
 
-    if (!SubscriptionManager.validateTopic(topic)) {
-      return sendAndLogError(
-        res,
-        'invalid topic',
-        [...entries, ['elapsed', `${(performance.now() - t0).toFixed(3)}ms`]],
-        HTTP.BAD_REQUEST,
-      )
-    }
-
     try {
       await subscriptionManager.subscribeTopic({ instanceId, topic })
       const t1 = (performance.now() - t0).toFixed(3)
@@ -191,8 +182,21 @@ export function createPushRouter(deps: {
   // ============================================================
   router.delete('/subscription/:subscriptionId/topic/:topic', async (req: Request, res: Response) => {
     const t0 = performance.now()
+    const entries: LogEntry[] = [
+      ['push-api', 'delete.unsubscribeTopic'],
+      ['subscriptionId', req.params.subscriptionId],
+      ['topic', String(req.query.topic)],
+    ]
     const { subscriptionId } = req.params
     const { topic } = req.query
+    const instanceId = req.body?.instanceId
+
+    if (!authCache.isRequestAuthorized(instanceId, req.headers['authorization'])) {
+      const t1 = (performance.now() - t0).toFixed(3)
+      entries.push(['elapsed', `${t1}ms`])
+      log(entries)
+      return sendAuthChallenge(res, state.checkpoint)
+    }
 
     try {
       const topicsToRemove = topic ? [topic as Topic] : undefined
