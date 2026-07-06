@@ -18,7 +18,7 @@ import {
   validateInstanceId,
   validateSearchType,
 } from '../../util/validators'
-import type { ChartType } from './types'
+import type { ChartType, EndpointParameter, EndpointParameterHandler } from './types'
 import { StatsRoutes } from './types'
 import config from '../../config'
 import type { Request, Response, NextFunction } from 'express'
@@ -30,29 +30,6 @@ import { createReferralRouter } from './routes/referral'
 import { createSystemRouter } from './routes/system'
 import { createPushRouter } from './routes/push'
 import { SubscriptionManager } from '../push'
-
-/** Available parameter names that can be validated in API endpoints */
-export type EndpointParameter =
-  | 'platform'
-  | 'profileId'
-  | 'postId'
-  | 'scriptPayload'
-  | 'statsRoute'
-  | 'pageNum'
-  | 'pageSize'
-  | 'instanceId'
-  | 'chartType'
-  | 'dataType'
-  | 'searchType'
-  | 'txid'
-
-/** Handler function type for validating and processing endpoint parameters */
-export type EndpointParameterHandler = (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-  param: string | ScriptChunkPlatformUTF8 | ChartType,
-) => void
 
 /**
  * Checks that the provided parameters are valid and sets the request parameters
