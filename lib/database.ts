@@ -10,7 +10,6 @@ import { randomUUID } from 'crypto'
 import { type Block } from 'lotus-nng-client'
 import {
   PushSubscription,
-  PushSubscriptionPayload,
   TopicSubscription,
 } from './push'
 import {

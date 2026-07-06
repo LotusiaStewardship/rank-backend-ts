@@ -64,16 +64,11 @@ export interface PushSubscription extends PushSubscriptionRequest {
   userAgent?: string
 }
 
-export interface PushSubscriptionPayload extends PushSubscription {
-  scriptPayload: string
-  lastSeen: Date
-}
 /**
  * A topic subscription request that was processed and assigned the ID of the
  * parent Push subscription
  */
 export interface TopicSubscription {
-  subscriptionId: string
   instanceId: string
   topic: Topic
   isActive: boolean
@@ -452,7 +447,6 @@ export class SubscriptionManager extends EventEmitter {
     // get the subscription ID of the parent Push subscription
     const now = new Date()
     const topicSubscription: TopicSubscription = {
-      subscriptionId,
       instanceId,
       topic,
       isActive: true,
@@ -511,7 +505,6 @@ export class SubscriptionManager extends EventEmitter {
     }
 
     const topicSubscription = {
-      subscriptionId,
       instanceId: subscription.instanceId,
       topic,
       isActive: false,

@@ -284,7 +284,7 @@ export class API extends EventEmitter {
       ['/', createWalletRouter(db, authCache, state)],
       ['/', createReferralRouter(db, temporal)],
       ['/', createSystemRouter(db, temporal)],
-      ['/', createPushRouter({ db, authCache, state, subscriptionManager })],
+      ['/push', createPushRouter({ db, authCache, state, subscriptionManager })],
       ...routers,
     ]
     for (const [prefix, subRouter] of subRouters) {

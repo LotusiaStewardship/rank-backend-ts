@@ -154,6 +154,15 @@ export function createPushRouter(deps: {
 
     const { instanceId, topic } = req.body as PushSubscriptionPayload
 
+    if (!SubscriptionManager.validateTopic(topic)) {
+      return sendAndLogError(
+        res,
+        'invalid topic',
+        [...entries, ['elapsed', `${(performance.now() - t0).toFixed(3)}ms`]],
+        HTTP.BAD_REQUEST,
+      )
+    }
+
     if (!authCache.isRequestAuthorized(instanceId, req.headers['authorization'])) {
       const t1 = (performance.now() - t0).toFixed(3)
       entries.push(['elapsed', `${t1}ms`])
