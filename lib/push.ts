@@ -64,16 +64,11 @@ export interface PushSubscription extends PushSubscriptionRequest {
   userAgent?: string
 }
 
-export interface PushSubscriptionPayload extends PushSubscription {
-  scriptPayload: string
-  lastSeen: Date
-}
 /**
  * A topic subscription request that was processed and assigned the ID of the
  * parent Push subscription
  */
 export interface TopicSubscription {
-  subscriptionId: string
   instanceId: string
   topic: Topic
   isActive: boolean
@@ -132,19 +127,6 @@ export interface SubscriptionStats {
   subscriptionsByInstance: Record<string, number>
 }
 
-// Queue message for batched notification processing
-export interface QueuedNotification {
-  id: string
-  topics: Topic[]
-  message: PushNotification
-  instanceIds?: string[]
-  options?: PushNotificationOptions
-  createdAt: Date
-  priority?: 'low' | 'normal' | 'high'
-}
-
-// Map for queued notifications (key is notification ID)
-export type NotificationQueue = Map<string, QueuedNotification>
 /**
  * Categories for push notification subscriptions.
  *
@@ -177,46 +159,7 @@ export enum TopicCategorySocial {
   //'commentDownvoted',
 }
 /**
- * PushSubscriptionManager class for managing push subscriptions
- *
- * QUEUE SYSTEM USAGE:
- *
- * The SubscriptionManager now includes a queue system for batched notification processing,
- * similar to the profileQueue system in the Indexer class. This allows other modules to
- * queue notifications for efficient batch processing.
- *
- * Example usage from other modules:
- *
- * ```typescript
- * // Queue a notification for later processing
- * const queueId = subscriptionManager.queueNotification({
- *   topics: ['s', 'w'], // stewardship and wallet topics
- *   message: {
- *     title: 'New Activity',
- *     body: 'You have new activity on your profile',
- *     url: 'https://example.com/profile'
- *   },
- *   priority: 'high'
- * });
- *
- * // Process all queued notifications
- * const results = await subscriptionManager.processNotificationQueue();
- * console.log(`Sent ${results.sent} notifications, ${results.failed} failed`);
- *
- * // Or queue and process immediately
- * const results = await subscriptionManager.queueAndProcessNotification({
- *   topics: ['s'],
- *   message: { title: 'Alert', body: 'Important message' }
- * });
- *
- * // Use existing methods with queue option
- * await subscriptionManager.sendNotificationToTopics({
- *   topics: ['w'],
- *   message: { title: 'Wallet Update', body: 'Balance changed' },
- *   useQueue: true,
- *   priority: 'normal'
- * });
- * ```
+ * SubscriptionManager class for managing push subscriptions.
  */
 export class SubscriptionManager extends EventEmitter {
   /**
@@ -302,13 +245,11 @@ export class SubscriptionManager extends EventEmitter {
       new URL(endpoint.url)
       // Validate p256dh key format (base64, 65 bytes when decoded)
       const p256dhBuffer = Buffer.from(endpoint.keys.p256dh, 'base64')
-      console.log('p256dhBuffer', p256dhBuffer)
       if (p256dhBuffer.length !== 65) {
         return false
       }
       // Validate auth key format (base64, 16 bytes when decoded)
       const authBuffer = Buffer.from(endpoint.keys.auth, 'base64')
-      console.log('authBuffer', authBuffer)
       if (authBuffer.length !== 16) {
         return false
       }
@@ -339,17 +280,6 @@ export class SubscriptionManager extends EventEmitter {
    * Each instance has only one subscription ID
    */
   private instanceSubscriptions: Map<string, string>
-  /**
-   * Map of profile IDs to instance IDs.
-   * Used to track which social media profiles belong to which users.
-   * Key is `profileId` and value is `instanceId`
-   */
-  private profileInstances: Map<string, string>
-  /**
-   * Queue for batched notification processing.
-   * Used to accumulate notifications from other modules before processing.
-   */
-  private notificationQueue: NotificationQueue
   /**
    * VAPID configuration for Web Push authentication.
    */
@@ -383,7 +313,6 @@ export class SubscriptionManager extends EventEmitter {
     this.subscriptions = new Map()
     this.topicSubscriptions = new Map()
     this.instanceSubscriptions = new Map()
-    this.notificationQueue = new Map()
     // runtime config
     this.vapidConfig = config.push.vapid
     this.gcmConfig = config.push.gcm
@@ -456,33 +385,6 @@ export class SubscriptionManager extends EventEmitter {
       clearInterval(this.cleanupInterval)
       this.cleanupInterval = null
     }
-
-    // Process any remaining queued notifications before shutting down
-    if (this.notificationQueue.size > 0) {
-      try {
-        const results = await this.processNotificationQueue()
-        log([
-          ['push', 'shutdown'],
-          ['action', 'processNotificationQueue'],
-          ['processed', `${results.processed}`],
-          ['sent', `${results.sent}`],
-          ['failed', `${results.failed}`],
-        ])
-      } catch (error) {
-        log([
-          ['push', 'shutdown'],
-          ['action', 'processNotificationQueue'],
-          ['status', 'error'],
-          ['error', error.message],
-        ])
-      }
-    }
-
-    // TODO: commit all runtime caches to database
-
-    //for (const [, subscription] of this.subscriptions) {
-    //  this.removeSubscription(subscription.id)
-    //}
   }
   /**
    * Saves the Push subscription details to runtime caches and commits to database.
@@ -540,14 +442,11 @@ export class SubscriptionManager extends EventEmitter {
     topic: Topic
   }): Promise<string> {
     // get the parent subscription ID if we have it
-    const { id: subscriptionId } = this.subscriptions.get(instanceId) ?? {
-      id: undefined,
-    }
+    const subscriptionId = this.instanceSubscriptions.get(instanceId)
     if (!subscriptionId) return undefined
     // get the subscription ID of the parent Push subscription
     const now = new Date()
     const topicSubscription: TopicSubscription = {
-      subscriptionId,
       instanceId,
       topic,
       isActive: true,
@@ -606,7 +505,6 @@ export class SubscriptionManager extends EventEmitter {
     }
 
     const topicSubscription = {
-      subscriptionId,
       instanceId: subscription.instanceId,
       topic,
       isActive: false,
@@ -689,33 +587,16 @@ export class SubscriptionManager extends EventEmitter {
     message,
     instanceIds,
     options,
-    useQueue = false,
-    priority = 'normal',
   }: {
     topics: Topic[]
     message: PushNotification
     instanceIds?: string[]
     options?: PushNotificationOptions
-    useQueue?: boolean
-    priority?: 'low' | 'normal' | 'high'
-  }): Promise<
-    | {
-        sent: number
-        failed: number
-        errors: Array<{ subscriptionId: string; error: Error }>
-      }
-    | string
-  > {
-    // If using queue, add to queue and return the queue ID
-    if (useQueue) {
-      return this.queueNotification({
-        topics,
-        message,
-        instanceIds,
-        options,
-        priority,
-      })
-    }
+  }): Promise<{
+    sent: number
+    failed: number
+    errors: Array<{ subscriptionId: string; error: Error }>
+  }> {
     const results = {
       sent: 0,
       failed: 0,
@@ -777,93 +658,23 @@ export class SubscriptionManager extends EventEmitter {
    * @param {string} instanceId The unique identifier of the user to send the message to.
    * @param {PushNotification} message The message to send.
    * @param {PushNotificationOptions} [options] Optional. Additional options for the message.
-   * @param {boolean} [useQueue] Optional. If true, adds the notification to the queue instead of sending immediately. Defaults to false.
-   * @param {'low' | 'normal' | 'high'} [priority] Optional. Priority level for queued notifications. Defaults to 'normal'.
-   * @returns {Promise<string>} Returns the subscription ID or queue ID if using queue.
+   * @returns {Promise<SendResult>} Returns the send result.
    */
   public async sendNotificationToInstance({
     instanceId,
     message,
     options,
-    useQueue = false,
-    priority = 'normal',
   }: {
     instanceId: string
     message: PushNotification
     options?: PushNotificationOptions
-    useQueue?: boolean
-    priority?: 'low' | 'normal' | 'high'
   }): Promise<SendResult> {
-    // If using queue, we need to find the topics this instance is subscribed to
-    /* if (useQueue) {
-      const subscriptionId = this.instanceSubscriptions.get(instanceId)
-      if (!subscriptionId) {
-        throw new Error(`No subscription found for instance: ${instanceId}`)
-      }
-
-      // Find all topics this instance is subscribed to
-      const topics: Topic[] = []
-      for (const [topic, topicSubs] of this.topicSubscriptions) {
-        if (topicSubs.has(subscriptionId)) {
-          topics.push(topic as Topic)
-        }
-      }
-
-      if (topics.length === 0) {
-        throw new Error(
-          `Instance ${instanceId} is not subscribed to any topics`,
-        )
-      }
-
-      return this.queueNotification({
-        topics,
-        message,
-        instanceIds: [instanceId],
-        options,
-        priority,
-      })
-    } */
     const subscriptionId = this.instanceSubscriptions.get(instanceId)
     const subscription = this.subscriptions.get(subscriptionId)
     if (!subscription || !subscription.isActive) {
       return undefined
     }
-    /* const instanceSubs = this.instanceSubscriptions.get(instanceId)
-    if (!instanceSubs) {
-      return undefined
-    } */
 
-    /* const results = {
-      sent: 0,
-      failed: 0,
-      errors: [] as Array<{ subscriptionId: string; error: Error }>,
-    } */
-
-    // Send messages using promise-based execution for optimal performance
-    /* const promises: (() => Promise<void>)[] = []
-    for (const subscriptionId of instanceSubs) {
-      promises.push(async () => {
-        const subscription = this.subscriptions.get(subscriptionId)
-        if (!subscription || !subscription.isActive) {
-          return
-        }
-
-        try {
-          await this.sendNotification(subscription, message, options)
-          results.sent++
-          subscription.lastUsed = new Date()
-        } catch (error) {
-          results.failed++
-          results.errors.push({ subscriptionId, error })
-
-          if (error.statusCode === 410 || error.statusCode === 404) {
-            subscription.isActive = false
-          }
-        }
-      })
-    } */
-
-    //await Promise.allSettled(promises)
     return await this.sendNotification(subscription, message, options)
   }
   /**
@@ -1082,169 +893,5 @@ export class SubscriptionManager extends EventEmitter {
         ])
       }
     }, this.CLEANUP_INTERVAL_MS)
-  }
-
-  /**
-   * Adds a notification to the queue for batched processing.
-   *
-   * @param {Omit<QueuedNotification, 'id' | 'createdAt'>} notificationData The notification data to queue.
-   * @returns {string} The unique ID of the queued notification.
-   */
-  public queueNotification(
-    notificationData: Omit<QueuedNotification, 'id' | 'createdAt'>,
-  ): string {
-    const id = randomUUID()
-    const queuedNotification: QueuedNotification = {
-      ...notificationData,
-      id,
-      createdAt: new Date(),
-    }
-    this.notificationQueue.set(id, queuedNotification)
-    return id
-  }
-
-  /**
-   * Processes all queued notifications and sends them to subscribers.
-   * Similar to how the indexer processes the profileQueue.
-   *
-   * @returns {Promise<{ processed: number; sent: number; failed: number; errors: Array<{ notificationId: string; error: Error }> }>}
-   * Returns statistics about the processing operation.
-   */
-  public async processNotificationQueue(): Promise<{
-    processed: number
-    sent: number
-    failed: number
-    errors: Array<{ notificationId: string; error: Error }>
-  }> {
-    const results = {
-      processed: 0,
-      sent: 0,
-      failed: 0,
-      errors: [] as Array<{ notificationId: string; error: Error }>,
-    }
-
-    if (this.notificationQueue.size === 0) {
-      return results
-    }
-
-    // Sort notifications by priority (high -> normal -> low) and then by creation time
-    const sortedNotifications = Array.from(
-      this.notificationQueue.values(),
-    ).sort((a, b) => {
-      const priorityOrder = { high: 3, normal: 2, low: 1 }
-      const aPriority = priorityOrder[a.priority || 'normal']
-      const bPriority = priorityOrder[b.priority || 'normal']
-
-      if (aPriority !== bPriority) {
-        return bPriority - aPriority // Higher priority first
-      }
-
-      return a.createdAt.getTime() - b.createdAt.getTime() // Earlier first for same priority
-    })
-
-    // Process notifications in parallel for better performance
-    const processPromises = sortedNotifications.map(async notification => {
-      try {
-        const sendResults = await this.sendNotificationToTopics({
-          topics: notification.topics,
-          message: notification.message,
-          instanceIds: notification.instanceIds,
-          options: notification.options,
-          useQueue: false, // Always send immediately when processing the queue
-        })
-
-        // sendResults is guaranteed to be the result object since useQueue is false
-        const typedResults = sendResults as {
-          sent: number
-          failed: number
-          errors: Array<{ subscriptionId: string; error: Error }>
-        }
-
-        results.sent += typedResults.sent
-        results.failed += typedResults.failed
-        results.errors.push(
-          ...typedResults.errors.map(error => ({
-            notificationId: notification.id,
-            error: error.error,
-          })),
-        )
-
-        results.processed++
-      } catch (error) {
-        results.failed++
-        results.errors.push({
-          notificationId: notification.id,
-          error: error as Error,
-        })
-        results.processed++
-      }
-    })
-
-    await Promise.allSettled(processPromises)
-
-    // Clear the queue after processing
-    this.clearNotificationQueue()
-
-    return results
-  }
-
-  /**
-   * Clears all queued notifications without processing them.
-   *
-   * @returns {number} The number of notifications that were cleared.
-   */
-  public clearNotificationQueue(): number {
-    const size = this.notificationQueue.size
-    this.notificationQueue.clear()
-    return size
-  }
-
-  /**
-   * Gets the current size of the notification queue.
-   *
-   * @returns {number} The number of notifications currently in the queue.
-   */
-  public getNotificationQueueSize(): number {
-    return this.notificationQueue.size
-  }
-
-  /**
-   * Gets a copy of all queued notifications (for debugging/monitoring purposes).
-   *
-   * @returns {QueuedNotification[]} Array of all queued notifications.
-   */
-  public getQueuedNotifications(): QueuedNotification[] {
-    return Array.from(this.notificationQueue.values())
-  }
-
-  /**
-   * Removes a specific notification from the queue by ID.
-   *
-   * @param {string} notificationId The ID of the notification to remove.
-   * @returns {boolean} True if the notification was found and removed, false otherwise.
-   */
-  public removeQueuedNotification(notificationId: string): boolean {
-    return this.notificationQueue.delete(notificationId)
-  }
-
-  /**
-   * Convenience method to queue a notification and immediately process the queue.
-   * Useful for modules that want to send notifications right away but still benefit from batching.
-   *
-   * @param {Omit<QueuedNotification, 'id' | 'createdAt'>} notificationData The notification data to queue and process.
-   * @returns {Promise<{ processed: number; sent: number; failed: number; errors: Array<{ notificationId: string; error: Error }> }>}
-   * Returns statistics about the processing operation.
-   */
-  public async queueAndProcessNotification(
-    notificationData: Omit<QueuedNotification, 'id' | 'createdAt'>,
-  ): Promise<{
-    processed: number
-    sent: number
-    failed: number
-    errors: Array<{ notificationId: string; error: Error }>
-  }> {
-    const queueId = this.queueNotification(notificationData)
-    const results = await this.processNotificationQueue()
-    return results
   }
 }

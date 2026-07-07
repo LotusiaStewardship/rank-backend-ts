@@ -5,7 +5,6 @@ import { RuntimeState } from './lib/state'
 import { Indexer } from './lib/indexer'
 import { AuthorizationCache } from './lib/api/authCache'
 import { API } from './lib/api'
-import { PushAPI } from './lib/api-push'
 import { log } from './util/functions'
 import {
   ERR,
@@ -38,14 +37,13 @@ const api = new API({
   state,
   db,
   temporal,
+  subscriptionManager,
 })
-const pushApi = new PushAPI({ subscriptionManager, authCache, state, db })
 // Event/Signal handlers
 process.once('SIGINT', close)
 process.once('SIGTERM', close)
 indexer.once('exception', close)
 api.once('exception', close)
-pushApi.once('exception', close)
 /**
  * Gracefully shuts down all running services and disconnects from resources.
  *
@@ -56,7 +54,6 @@ pushApi.once('exception', close)
 async function close(exitCode: number | string, exitError?: string) {
   try {
     await api.close()
-    await pushApi.close()
     await indexer.close()
     await temporal.close()
     subscriptionManager.close()
@@ -96,7 +93,6 @@ async function close(exitCode: number | string, exitError?: string) {
   await subscriptionManager.init()
   await indexer.init()
   await api.init()
-  await pushApi.init()
   await temporal.init()
 })().catch(e => {
   const [exitCode, exitError] = e as Exception

@@ -9,7 +9,7 @@ import config from '../../config'
 import { getTimestampUTC, type Database, type Timespan } from '../database'
 import { log } from '../../util/functions'
 import { Address, BufferUtil, Networks } from 'xpi-ts/lib/bitcore'
-import { RankTopPost, RankTopProfile } from '../api'
+import { RankTopPost, RankTopProfile } from '../api/types'
 
 /**
  * Temporal client and worker wrapper class for managing workflow executions

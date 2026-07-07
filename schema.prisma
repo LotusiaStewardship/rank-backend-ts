@@ -212,8 +212,8 @@ model ExtensionPushSubscription {
 
   // subscription endpoint data provided by the browser's Push API
   endpoint  String @unique
-  p256dhKey String @unique
-  authKey   String @unique
+  p256dhKey String
+  authKey   String
 
   // subscription metadata
   isActive  Boolean  @default(false)
