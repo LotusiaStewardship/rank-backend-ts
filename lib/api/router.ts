@@ -254,13 +254,15 @@ export class API extends EventEmitter {
     this.router.param('searchType', Parameters.searchType)
     this.router.param('txid', Parameters.txid)
 
-    // Mount sub-routers
+    // Mount sub-routers — static-prefixed routers MUST come before
+    // profiles router, whose /:platform/:profileId/* catch-all would
+    // otherwise swallow requests meant for /feed/*, /wallet/*, etc.
     const subRouters: [string, Router][] = [
-      ['/', createProfilesRouter(db, temporal)],
       ['/', createFeedRouter(db)],
       ['/', createWalletRouter(db, authCache, state)],
       ['/', createReferralRouter(db, temporal)],
       ['/', createSystemRouter(db, temporal)],
+      ['/', createProfilesRouter(db, temporal)],
       ['/push', createPushRouter({ db, authCache, state, subscriptionManager })],
       ...routers,
     ]

@@ -55,6 +55,94 @@ export function createProfilesRouter(db: Database, temporal: Temporal): Router {
   })
 
   // ============================================================
+  // GET /search/:searchType/:query
+  // ============================================================
+  router.get('/search/:searchType/:query', async (req: Request, res: Response) => {
+    const t0 = performance.now()
+    const query = req.params.query ?? ''
+    if (!query || query.length < 2) {
+      const t1 = (performance.now() - t0).toFixed(3)
+      log([
+        ['api', 'get.search'],
+        ...toLogEntries(req.params),
+        ['elapsed', `${t1}ms`],
+      ])
+      return sendJSON(res, [], HTTP.OK)
+    }
+    try {
+      const result = await db.apiSearchProfile(query)
+      const t1 = (performance.now() - t0).toFixed(3)
+      log([
+        ['api', 'get.search'],
+        ...toLogEntries(req.params),
+        ['elapsed', `${t1}ms`],
+      ])
+      return sendJSON(res, result, HTTP.OK)
+    } catch (e) {
+      const t1 = (performance.now() - t0).toFixed(3)
+      log([
+        ['api', 'error'],
+        ['action', 'get.search'],
+        ...toLogEntries(req.params),
+        ['message', `"${String(e)}"`],
+        ['elapsed', `${t1}ms`],
+      ])
+      return sendJSON(
+        res,
+        { error: 'search not found', params: req.params },
+        HTTP.NOT_FOUND,
+      )
+    }
+  })
+
+  // ============================================================
+  // GET /stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?
+  // ============================================================
+  router.get('/stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?', async (req: Request, res: Response) => {
+    const t0 = performance.now()
+    try {
+      const platform = req.params.platform as ScriptChunkPlatformUTF8
+      const statsRoute = req.params.statsRoute as StatsRoute
+      const [dataType, rankingType] = statsRoute.split(/\/|-/) as [
+        'profiles' | 'posts',
+        'top' | 'lowest',
+      ]
+      const startTime = req.params.timespan as Timespan
+      const includeVotes = Boolean(req.params.votes == 'includeVotes')
+      const pageNum = Number(req.params.pageNum)
+      const dbMethod: keyof typeof db = StatsRoutes[statsRoute]
+      const result = await (db as any)[dbMethod]({
+        startTime,
+        dataType: dataType == 'profiles' ? 'profileId' : 'postId',
+        rankingType,
+        includeVotes,
+        pageNum,
+      })
+      const t1 = (performance.now() - t0).toFixed(3)
+      log([
+        ['api', 'get.stats'],
+        ...toLogEntries(req.params),
+        ['elapsed', `${t1}ms`],
+      ])
+      return sendJSON(res, result, HTTP.OK)
+    } catch (e) {
+      const t1 = (performance.now() - t0).toFixed(3)
+      log([
+        ['api', 'error'],
+        ['action', 'get.stats'],
+        ...toLogEntries(req.params),
+        ['message', `"${String(e)}"`],
+        ['elapsed', `${t1}ms`],
+      ])
+      return sendJSON(
+        res,
+        { error: 'stats not found', params: req.params },
+        HTTP.NOT_FOUND,
+      )
+    }
+  })
+
+  // ============================================================
   // GET /:platform/:profileId
   // ============================================================
   router.get('/:platform/:profileId', async (req: Request, res: Response) => {
@@ -163,94 +251,6 @@ export function createProfilesRouter(db: Database, temporal: Temporal): Router {
       return sendJSON(
         res,
         { error: 'post not found', params: req.params },
-        HTTP.NOT_FOUND,
-      )
-    }
-  })
-
-  // ============================================================
-  // GET /search/:searchType/:query
-  // ============================================================
-  router.get('/search/:searchType/:query', async (req: Request, res: Response) => {
-    const t0 = performance.now()
-    const query = req.params.query ?? ''
-    if (!query || query.length < 2) {
-      const t1 = (performance.now() - t0).toFixed(3)
-      log([
-        ['api', 'get.search'],
-        ...toLogEntries(req.params),
-        ['elapsed', `${t1}ms`],
-      ])
-      return sendJSON(res, [], HTTP.OK)
-    }
-    try {
-      const result = await db.apiSearchProfile(query)
-      const t1 = (performance.now() - t0).toFixed(3)
-      log([
-        ['api', 'get.search'],
-        ...toLogEntries(req.params),
-        ['elapsed', `${t1}ms`],
-      ])
-      return sendJSON(res, result, HTTP.OK)
-    } catch (e) {
-      const t1 = (performance.now() - t0).toFixed(3)
-      log([
-        ['api', 'error'],
-        ['action', 'get.search'],
-        ...toLogEntries(req.params),
-        ['message', `"${String(e)}"`],
-        ['elapsed', `${t1}ms`],
-      ])
-      return sendJSON(
-        res,
-        { error: 'search not found', params: req.params },
-        HTTP.NOT_FOUND,
-      )
-    }
-  })
-
-  // ============================================================
-  // GET /stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?
-  // ============================================================
-  router.get('/stats/:statsRoute(profiles/[a-z-]+|posts/[a-z-]+)/:timespan?/:votes?/:pageNum?', async (req: Request, res: Response) => {
-    const t0 = performance.now()
-    try {
-      const platform = req.params.platform as ScriptChunkPlatformUTF8
-      const statsRoute = req.params.statsRoute as StatsRoute
-      const [dataType, rankingType] = statsRoute.split(/\/|-/) as [
-        'profiles' | 'posts',
-        'top' | 'lowest',
-      ]
-      const startTime = req.params.timespan as Timespan
-      const includeVotes = Boolean(req.params.votes == 'includeVotes')
-      const pageNum = Number(req.params.pageNum)
-      const dbMethod: keyof typeof db = StatsRoutes[statsRoute]
-      const result = await (db as any)[dbMethod]({
-        startTime,
-        dataType: dataType == 'profiles' ? 'profileId' : 'postId',
-        rankingType,
-        includeVotes,
-        pageNum,
-      })
-      const t1 = (performance.now() - t0).toFixed(3)
-      log([
-        ['api', 'get.stats'],
-        ...toLogEntries(req.params),
-        ['elapsed', `${t1}ms`],
-      ])
-      return sendJSON(res, result, HTTP.OK)
-    } catch (e) {
-      const t1 = (performance.now() - t0).toFixed(3)
-      log([
-        ['api', 'error'],
-        ['action', 'get.stats'],
-        ...toLogEntries(req.params),
-        ['message', `"${String(e)}"`],
-        ['elapsed', `${t1}ms`],
-      ])
-      return sendJSON(
-        res,
-        { error: 'stats not found', params: req.params },
         HTTP.NOT_FOUND,
       )
     }
